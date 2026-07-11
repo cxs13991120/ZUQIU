@@ -1,0 +1,57 @@
+name: Daily Sporttery Forecast
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 11:30 Beijing time
+    - cron: "30 3 * * *"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate daily forecast and plan
+        run: |
+          python import_sporttery.py
+          python predict_today.py
+          python generate_betting_plan.py
+          python build_site.py
+
+      - name: Commit generated files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update daily Sporttery forecast"
+          file_pattern: "data/*.csv data/*.json output/*.csv output/*.md web/index.html"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
