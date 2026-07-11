@@ -1,0 +1,17 @@
+{
+  "daily_budget": 300,
+  "max_daily_budget": 500,
+  "base_allocations": {
+    "total_goals": 100,
+    "win_draw_win": 100,
+    "half_full": 50,
+    "score_combo": 50
+  },
+  "min_stake": 10,
+  "default_odds": {},
+  "confidence_multiplier": {
+    "high": 1.15,
+    "medium": 0.9,
+    "low": 0.55
+  }
+}
