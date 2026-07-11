@@ -1,0 +1,17 @@
+{
+  "base_goals": 1.35,
+  "elo_goal_weight": 0.62,
+  "attack_weight": 1.0,
+  "defense_weight": 0.9,
+  "form_weight": 0.65,
+  "injury_weight": 1.0,
+  "rest_weight": 0.035,
+  "home_adv_weight": 1.0,
+  "market_blend_weight": 0.28,
+  "max_goals": 10,
+  "knockout_stages": ["round32", "round16", "quarterfinal", "semifinal", "third_place", "final", "knockout"],
+  "confidence_thresholds": {
+    "high": 0.62,
+    "medium": 0.54
+  }
+}
