@@ -337,6 +337,8 @@ def settle_item(item: dict, result: dict | None) -> tuple[str, float]:
     if item["play"] in {"胜平负", "平局单场"}:
         won = selection == outcome(home, away)
     elif item["play"] == "半全场":
+        if result.get("half_home_goals") == "" or result.get("half_away_goals") == "":
+            return "未结算", 0.0
         won = selection == outcome(half_home, half_away) + outcome(home, away)
     elif item["play"] == "比分":
         won = selection == f"{home}-{away}"
