@@ -1,9 +1,11 @@
 import csv
 import json
 import math
+import time
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -12,6 +14,14 @@ DATA_DIR = ROOT / "data"
 API_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getUniformMatchResultV1.qry"
 MATCH_LIST_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getMatchListV1.qry"
 ODDS_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getFixedBonusV1.qry"
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
+ESPN_LEAGUES = {
+    "fifa.world": "世界杯",
+    "nor.1": "挪超",
+    "swe.1": "瑞超",
+    "fin.1": "芬超",
+}
+ZGZCW_HAD_URL = "https://cp.zgzcw.com/lottery/jchtplayvsForJsp.action?lotteryId=47&type=jcmini"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     "Referer": "https://www.sporttery.cn/jc/zqsgkj/",
@@ -19,6 +29,89 @@ HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "X-Requested-With": "XMLHttpRequest",
 }
+
+
+def fetch_json(url: str, retries: int = 3) -> dict:
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            request = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < retries:
+                time.sleep(2 ** attempt)
+    assert last_error is not None
+    raise last_error
+
+
+def fetch_text(url: str, retries: int = 3) -> str:
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            request = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(request, timeout=25) as response:
+                raw = response.read()
+                charset = response.headers.get_content_charset() or "utf-8"
+                return raw.decode(charset, errors="replace")
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < retries:
+                time.sleep(2 ** attempt)
+    assert last_error is not None
+    raise last_error
+
+
+class ZgzcwMatchParser(HTMLParser):
+    def __init__(self, target_date: date):
+        super().__init__(convert_charrefs=True)
+        self.target_date = target_date.isoformat()
+        self.current: dict | None = None
+        self.matches: list[dict] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key: value or "" for key, value in attrs}
+        if tag == "tr" and values.get("id", "").startswith("tr_"):
+            row_date = values.get("t", "")[:10]
+            self.current = None
+            if row_date == self.target_date:
+                self.current = {
+                    "matchId": values["id"].removeprefix("tr_"),
+                    "matchNumStr": values.get("mn", ""),
+                    "leagueNameAbbr": values.get("m", ""),
+                    "matchStatus": "ZGZCW",
+                    "poolStatus": "",
+                    "source": "中国足彩网",
+                    "venue": "中国足彩网备用数据",
+                    "h": "",
+                    "d": "",
+                    "a": "",
+                }
+        elif self.current is not None and tag == "a":
+            title = values.get("title", "").strip()
+            if title and "homeTeam" not in self.current:
+                self.current["homeTeam"] = title
+            elif title and "awayTeam" not in self.current:
+                self.current["awayTeam"] = title
+        elif self.current is not None and tag == "input":
+            input_id = values.get("id", "")
+            if input_id.startswith("ht_"):
+                standard = values.get("value", "").split("|", 1)[0].split()
+                if len(standard) == 3:
+                    self.current["h"], self.current["d"], self.current["a"] = standard
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "tr" and self.current is not None:
+            if self.current.get("homeTeam") and self.current.get("awayTeam"):
+                self.matches.append(self.current)
+            self.current = None
+
+
+def fetch_zgzcw_matches(target_date: date) -> list[dict]:
+    parser = ZgzcwMatchParser(target_date)
+    parser.feed(fetch_text(ZGZCW_HAD_URL))
+    return parser.matches
 
 
 def fetch_matches(target_date: date) -> list[dict]:
@@ -33,9 +126,7 @@ def fetch_matches(target_date: date) -> list[dict]:
         "pcOrWap": "1",
     }
     url = API_URL + "?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = fetch_json(url)
     if str(payload.get("errorCode")) != "0":
         raise RuntimeError(payload.get("errorMessage", "竞彩网接口返回异常"))
     return payload.get("value", {}).get("matchResult", [])
@@ -44,9 +135,7 @@ def fetch_matches(target_date: date) -> list[dict]:
 def fetch_selling_matches(target_date: date) -> list[dict]:
     params = {"clientCode": "3001"}
     url = MATCH_LIST_URL + "?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = fetch_json(url)
     if str(payload.get("errorCode")) != "0":
         raise RuntimeError(payload.get("errorMessage", "竞彩网在售接口返回异常"))
 
@@ -60,6 +149,50 @@ def fetch_selling_matches(target_date: date) -> list[dict]:
     return selected
 
 
+def fetch_espn_matches(target_date: date) -> list[dict]:
+    matches: list[dict] = []
+    seen: set[str] = set()
+    for league_slug, league_label in ESPN_LEAGUES.items():
+        params = {"dates": target_date.strftime("%Y%m%d"), "limit": "100"}
+        url = ESPN_SCOREBOARD_URL.format(league=league_slug) + "?" + urllib.parse.urlencode(params)
+        payload = fetch_json(url, retries=2)
+        for event in payload.get("events", []):
+            event_id = str(event.get("id", ""))
+            if not event_id or event_id in seen:
+                continue
+            competition = (event.get("competitions") or [{}])[0]
+            status = competition.get("status", {}).get("type", {})
+            if status.get("completed") or status.get("state") == "post":
+                continue
+            competitors = competition.get("competitors", [])
+            home = next((item for item in competitors if item.get("homeAway") == "home"), None)
+            away = next((item for item in competitors if item.get("homeAway") == "away"), None)
+            if not home or not away:
+                continue
+            kickoff = event.get("date") or competition.get("date") or ""
+            try:
+                kickoff_dt = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
+                kickoff_label = kickoff_dt.astimezone(timezone(timedelta(hours=8))).strftime("%m-%d %H:%M")
+            except ValueError:
+                kickoff_label = kickoff
+            venue = competition.get("venue", {}).get("fullName") or "ESPN"
+            matches.append(
+                {
+                    "matchId": f"espn-{event_id}",
+                    "matchNumStr": kickoff_label,
+                    "leagueNameAbbr": league_label,
+                    "homeTeam": home.get("team", {}).get("displayName", ""),
+                    "awayTeam": away.get("team", {}).get("displayName", ""),
+                    "matchStatus": "ESPN",
+                    "poolStatus": "",
+                    "source": "ESPN",
+                    "venue": venue,
+                }
+            )
+            seen.add(event_id)
+    return matches
+
+
 def latest_odds_record(records: list[dict]) -> dict:
     if not records:
         return {}
@@ -69,9 +202,7 @@ def latest_odds_record(records: list[dict]) -> dict:
 def fetch_odds(match_id: str) -> dict:
     params = {"matchId": match_id, "clientCode": "3001"}
     url = ODDS_URL + "?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = fetch_json(url)
     if str(payload.get("errorCode")) != "0":
         return {}
     history = payload.get("value", {}).get("oddsHistory", {})
@@ -163,7 +294,7 @@ def write_fixtures(matches: list[dict], target_date: date) -> Path:
                     "team_a": team_home(item),
                     "team_b": team_away(item),
                     "neutral": "false",
-                    "venue": "竞彩网",
+                    "venue": item.get("venue") or ("ESPN备用数据" if item.get("source") == "ESPN" else "竞彩网"),
                     "odds_a": item.get("h", ""),
                     "odds_draw": item.get("d", ""),
                     "odds_b": item.get("a", ""),
@@ -236,7 +367,15 @@ def collect_odds(matches: list[dict]) -> dict[str, dict]:
     odds = {}
     for item in matches:
         match_id = str(item.get("matchId", ""))
-        if match_id:
+        if item.get("source") == "中国足彩网":
+            odds[match_id] = {
+                "had": {"h": item.get("h", ""), "d": item.get("d", ""), "a": item.get("a", "")},
+                "hhad": {},
+                "ttg": {},
+                "hafu": {},
+                "crs": {},
+            }
+        elif match_id and not match_id.startswith("espn-"):
             odds[match_id] = fetch_odds(match_id)
     return odds
 
@@ -244,6 +383,19 @@ def collect_odds(matches: list[dict]) -> dict[str, dict]:
 def write_odds_data(odds: dict[str, dict], target_date: date) -> Path:
     path = DATA_DIR / f"sporttery_odds_{target_date.isoformat()}.json"
     path.write_text(json.dumps(odds, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def write_source_status(source: str, target_date: date, message: str = "") -> Path:
+    path = DATA_DIR / "source_status.json"
+    payload = {
+        "source": source,
+        "target_date": target_date.isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "fallback": source != "竞彩网",
+        "message": message,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
@@ -256,7 +408,23 @@ def main() -> int:
     args = parser.parse_args()
 
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
-    selected = fetch_selling_matches(target_date)
+    source = "竞彩网"
+    source_message = ""
+    try:
+        selected = fetch_selling_matches(target_date)
+    except Exception as exc:
+        source = "中国足彩网"
+        source_message = f"竞彩网云端接口暂时不可用（{type(exc).__name__}），已切换中国足彩网竞彩页面。"
+        print(f"WARNING: {source_message}")
+        try:
+            selected = fetch_zgzcw_matches(target_date)
+            if not selected:
+                raise RuntimeError("中国足彩网当天没有可解析的竞彩比赛")
+        except Exception as fallback_exc:
+            source = "ESPN"
+            source_message += f" 中国足彩网也不可用（{type(fallback_exc).__name__}），已切换 ESPN。"
+            print(f"WARNING: {source_message}")
+            selected = fetch_espn_matches(target_date)
     matches = selected
     if args.include_finished:
         matches = fetch_matches(target_date)
@@ -266,6 +434,7 @@ def main() -> int:
     fixtures_path = write_fixtures(selected, target_date)
     ratings_path = write_ratings(selected)
     odds_path = write_odds_data(odds_data, target_date)
+    status_path = write_source_status(source, target_date, source_message)
     print(f"竞彩网返回比赛: {len(matches)}")
     print(f"导入未开奖比赛: {len(selected)}")
     for item in selected:
@@ -277,6 +446,8 @@ def main() -> int:
     print(f"Updated: {fixtures_path}")
     print(f"Updated: {ratings_path}")
     print(f"Updated: {odds_path}")
+    print(f"Data source: {source}")
+    print(f"Updated: {status_path}")
     return 0
 
 
