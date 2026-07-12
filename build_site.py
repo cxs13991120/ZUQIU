@@ -297,11 +297,12 @@ def render_site(rows: list[dict]) -> str:
     betting_ledger = read_betting_ledger()
     source_status = read_source_status()
     source_name = str(source_status.get("source") or "未知")
+    analysis_source = str(source_status.get("analysis_source") or "专业欧赔市场")
     source_message = str(source_status.get("message") or "")
     if source_status.get("fallback"):
-        source_alert = f'''<section class="source-alert warning"><strong>当前数据源：{html.escape(source_name)}（备用）</strong><span>{html.escape(source_message)} 备用源赔率项目可能不完整，缺失玩法不会生成投注方案。</span></section>'''
+        source_alert = f'''<section class="source-alert warning"><strong>赛程及方案赔率：{html.escape(source_name)}（备用）</strong><span>模型分析：{html.escape(analysis_source)}。{html.escape(source_message)} 缺失赔率的选项不会进入方案。</span></section>'''
     else:
-        source_alert = f'''<section class="source-alert ok"><strong>当前数据源：{html.escape(source_name)}</strong><span>赛程和赔率来自竞彩网官方接口。</span></section>'''
+        source_alert = f'''<section class="source-alert ok"><strong>赛程及方案赔率：{html.escape(source_name)}</strong><span>模型分析：{html.escape(analysis_source)}；投注赔率仅采用竞彩足球官方赔率。</span></section>'''
 
     match_cards = "\n".join(render_match(row) for row in display_rows)
     if not match_cards:
