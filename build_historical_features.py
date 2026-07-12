@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+TEAM_ALIASES = {"奥尔格里": "厄格里特"}
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -22,7 +23,13 @@ def load_results() -> list[dict]:
 
 
 def build_features() -> Path:
-    rows = sorted(load_results(), key=lambda row: row["date"])
+    unique = {}
+    for row in load_results():
+        normalized = dict(row)
+        normalized["team_a"] = TEAM_ALIASES.get(row["team_a"], row["team_a"])
+        normalized["team_b"] = TEAM_ALIASES.get(row["team_b"], row["team_b"])
+        unique[(normalized["date"], normalized["team_a"], normalized["team_b"])] = normalized
+    rows = sorted(unique.values(), key=lambda row: row["date"])
     appearances: dict[str, list[dict]] = defaultdict(list)
     total_goals = 0
     for row in rows:
