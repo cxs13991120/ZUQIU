@@ -199,43 +199,29 @@ def build_plan(target_date: date) -> list[dict]:
     strategy = config["draw_strategy"]
     plan: list[dict] = []
     draw_candidates = []
-    total_legs = []
-    score_legs = []
+    wdw_legs = []
 
     for row in predictions:
         match_id = row.get("match_id", "")
         official = odds_by_match.get(match_id, {})
         had = official.get("had", {})
-        ttg = official.get("ttg", {})
-        crs = official.get("crs", {})
         draw_probability = as_float(row, "p_draw")
         draw_odds = official_float(had.get("d"))
         if draw_odds:
             draw_candidates.append((draw_probability, row, "平", draw_probability, draw_odds))
 
-        match_total_legs = []
-        for goals, probability in total_goal_distribution(row).items():
-            odds = official_float(ttg.get(f"s{goals}"))
+        match_wdw = []
+        for selection, probability, odds_value in [
+            ("胜", as_float(row, "p_a"), had.get("h")),
+            ("平", as_float(row, "p_draw"), had.get("d")),
+            ("负", as_float(row, "p_b"), had.get("a")),
+        ]:
+            odds = official_float(odds_value)
             if odds:
-                label = "7+球" if goals == "7" else f"{goals}球"
-                match_total_legs.append((probability, row, label, probability, odds))
-        if match_total_legs:
-            total_legs.append(max(match_total_legs, key=lambda item: item[3]))
-
-        match_score_legs = []
-        for index in range(1, 4):
-            score = row.get(f"score_{index}", "")
-            probability = as_float(row, f"score_{index}_prob")
-            if not score:
-                continue
-            try:
-                odds = official_float(crs.get(score_key(score)))
-            except Exception:
-                odds = None
-            if odds:
-                match_score_legs.append((probability, row, score, probability, odds))
-        if match_score_legs:
-            score_legs.append(max(match_score_legs, key=lambda item: item[3]))
+                match_wdw.append((probability, row, selection, probability, odds))
+        if match_wdw:
+            # One selection per match, ranked by calibrated model probability.
+            wdw_legs.append(max(match_wdw, key=lambda item: item[3]))
 
     ranked_draws = sorted(draw_candidates, key=lambda item: item[3], reverse=True)
     draw_count = 1 if ranked_draws else 0
@@ -249,7 +235,8 @@ def build_plan(target_date: date) -> list[dict]:
             draw_count = 2
     draw_stake = int(strategy["single_stake"] if draw_count == 1 else strategy["double_stake_each"])
     for _, row, selection, probability, odds in ranked_draws[:draw_count]:
-        plan.append(make_item(row, "平局单场", selection, probability, odds, draw_stake, f"平局概率排名前{draw_count}：{pct(probability)}，{odds_source}赔率{odds}"))
+        analysis_source = row.get("analysis_source") or "专业欧赔市场"
+        plan.append(make_item(row, "平局单场", selection, probability, odds, draw_stake, f"平局概率排名前{draw_count}：{pct(probability)}；分析参考{analysis_source}，方案采用{odds_source}赔率{odds}"))
 
     def combo_candidate(candidates: list[tuple], market: str) -> dict | None:
         min_legs = int(strategy["combo_min_legs"])
@@ -266,15 +253,15 @@ def build_plan(target_date: date) -> list[dict]:
             probability *= leg_probability
             odds *= leg_odds
             labels.append(f"{row['team_a']}vs{row['team_b']} {selection}")
-            legs.append({"date": row["date"], "team_a": row["team_a"], "team_b": row["team_b"], "kind": market, "selection": selection, "score": selection if market == "比分" else "", "probability": leg_probability, "odds": leg_odds})
+            legs.append({"date": row["date"], "team_a": row["team_a"], "team_b": row["team_b"], "kind": market, "selection": selection, "probability": leg_probability, "odds": leg_odds})
         return {"market": market, "size": combo_size, "probability": probability, "odds": round(odds, 2), "labels": labels, "legs": legs, "row": selected_legs[0][1], "value": probability * odds}
 
-    combos = [item for item in [combo_candidate(score_legs, "比分"), combo_candidate(total_legs, "总进球")] if item]
-    if combos:
-        combo = max(combos, key=lambda item: item["value"])
+    combo = combo_candidate(wdw_legs, "胜平负")
+    if combo:
         selection = " × ".join(combo["labels"])
-        play = f"{combo['market']}{combo['size']}串1"
-        plan.append(make_item(combo["row"], play, selection, combo["probability"], combo["odds"], int(strategy["combo_stake"]), f"高收益串关在比分与总进球中择优，组合概率{pct(combo['probability'])}，组合赔率{combo['odds']}", combo["legs"]))
+        play = f"胜平负{combo['size']}串1"
+        analysis_source = combo["row"].get("analysis_source") or "专业欧赔市场"
+        plan.append(make_item(combo["row"], play, selection, combo["probability"], combo["odds"], int(strategy["combo_stake"]), f"按模型概率选择3至4场胜平负串关；分析参考{analysis_source}，方案赔率采用{odds_source}，组合概率{pct(combo['probability'])}，组合赔率{combo['odds']}", combo["legs"]))
 
     total = sum(item["stake"] for item in plan)
     if total > int(config["max_daily_budget"]):
@@ -314,7 +301,10 @@ def settle_item(item: dict, result: dict | None) -> tuple[str, float]:
             home_goals = int(leg_result["home_goals"])
             away_goals = int(leg_result["away_goals"])
             kind = leg.get("kind", "比分")
-            if kind == "总进球":
+            if kind == "胜平负":
+                actual = outcome(home_goals, away_goals)
+                won_leg = actual == leg.get("selection")
+            elif kind == "总进球":
                 goals = home_goals + away_goals
                 actual = "7+球" if goals >= 7 else f"{goals}球"
                 won_leg = actual == leg.get("selection")
