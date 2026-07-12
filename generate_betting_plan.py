@@ -192,6 +192,10 @@ def build_plan(target_date: date) -> list[dict]:
     config = read_json(ROOT / "betting_config.json")
     predictions = load_predictions(target_date)
     odds_by_match = load_odds(target_date)
+    status_path = DATA_DIR / "source_status.json"
+    odds_source = "竞彩网"
+    if status_path.exists():
+        odds_source = str(read_json(status_path).get("source") or odds_source)
     base = config["base_allocations"]
     daily_budget = min(int(config["daily_budget"]), int(config["max_daily_budget"]))
     total_base = sum(base.values())
@@ -247,17 +251,17 @@ def build_plan(target_date: date) -> list[dict]:
     if total_candidates:
         _, row, selection, probability, odds = max(total_candidates, key=lambda item: item[3])
         stake = money(base["total_goals"] * scale)
-        plan.append(make_item(row, "总进球", selection, probability, odds, stake, f"总进球模型信心最高：{selection}，概率{pct(probability)}，竞彩网赔率{odds}"))
+        plan.append(make_item(row, "总进球", selection, probability, odds, stake, f"总进球模型信心最高：{selection}，概率{pct(probability)}，{odds_source}赔率{odds}"))
 
     if wdw_candidates:
         _, row, selection, probability, odds = max(wdw_candidates, key=lambda item: item[3])
         stake = money(base["win_draw_win"] * scale)
-        plan.append(make_item(row, "胜平负", selection, probability, odds, stake, f"胜平负模型信心最高：{selection}，概率{pct(probability)}，竞彩网赔率{odds}"))
+        plan.append(make_item(row, "胜平负", selection, probability, odds, stake, f"胜平负模型信心最高：{selection}，概率{pct(probability)}，{odds_source}赔率{odds}"))
 
     if hafu_candidates:
         _, row, selection, probability, odds = max(hafu_candidates, key=lambda item: item[3])
         stake = money(base["half_full"] * scale)
-        plan.append(make_item(row, "半全场", selection, probability, odds, stake, f"半全场模型信心最高：{selection}，概率{pct(probability)}，竞彩网赔率{odds}"))
+        plan.append(make_item(row, "半全场", selection, probability, odds, stake, f"半全场模型信心最高：{selection}，概率{pct(probability)}，{odds_source}赔率{odds}"))
 
     score_budget = money(base["score_combo"] * scale)
     combo_size = 4 if len(score_candidates) >= 4 else 2
