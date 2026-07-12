@@ -247,7 +247,7 @@ def render_betting_plan(plan: list[dict]) -> str:
               <td>{html.escape(item.get("play", ""))}</td>
               <td>{html.escape(item.get("match", ""))}</td>
               <td><strong>{html.escape(item.get("selection", ""))}</strong></td>
-              <td>{pct(as_float(item, "probability"))}<br><small>市场 {pct(as_float(item, "market_probability"))}</small></td>
+              <td>保守 {pct(as_float(item, "probability"))}<br><small>原模型 {pct(as_float(item, "raw_model_probability"))} / 市场 {pct(as_float(item, "market_probability"))}</small></td>
               <td>{html.escape(item.get("odds", ""))}<br><small>优势 {pct(as_float(item, "value_edge"))}</small></td>
               <td>{yuan(as_float(item, "stake"))}</td>
               <td>{yuan(as_float(item, "expected_profit"))}</td>
@@ -295,6 +295,7 @@ def render_ledger(ledger: list[dict], model_metrics: dict) -> str:
     brier = overall.get("brier")
     log_loss = overall.get("log_loss")
     average_expected_return = overall.get("average_expected_return")
+    clv = model_metrics.get("clv", {})
     return f"""
       <section class="ledger-strip">
         <div><span>累计模拟投入</span><strong>{yuan(total_stake)}</strong></div>
@@ -305,6 +306,7 @@ def render_ledger(ledger: list[dict], model_metrics: dict) -> str:
         <div><span>Brier概率误差</span><strong>{decimal(brier)}</strong></div>
         <div><span>Log Loss</span><strong>{decimal(log_loss)}</strong></div>
         <div><span>平均赔率价值</span><strong>{pct((average_expected_return - 1) if average_expected_return is not None else None)}</strong></div>
+        <div><span>平均CLV</span><strong>{pct(clv.get("average_clv"))}</strong></div>
       </section>
     """
 
