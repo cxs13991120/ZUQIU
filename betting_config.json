@@ -20,10 +20,10 @@
   "value_strategy": {
     "min_draw_probability": 0.25,
     "min_draw_edge": 0.0,
-    "min_draw_expected_return": 0.80,
+    "min_draw_expected_return": 1.0,
     "min_combo_leg_probability": 0.48,
     "min_combo_leg_edge": 0.0,
-    "min_combo_expected_return": 0.78,
+    "min_combo_expected_return": 1.0,
     "min_history_samples": 5
   },
   "default_odds": {},
