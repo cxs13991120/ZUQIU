@@ -18,13 +18,25 @@
     "combo_max_legs": 4
   },
   "value_strategy": {
-    "min_draw_probability": 0.25,
-    "min_draw_edge": 0.0,
-    "min_draw_expected_return": 1.0,
-    "min_combo_leg_probability": 0.48,
-    "min_combo_leg_edge": 0.0,
-    "min_combo_expected_return": 1.0,
-    "min_history_samples": 5
+    "min_probability_edge": 0.03,
+    "min_expected_return": 1.03,
+    "model_edge_weight_base": 0.35,
+    "model_edge_weight_max": 0.75,
+    "calibration_prior": 100,
+    "reference_bankroll": 5000,
+    "kelly_fraction": 0.25,
+    "min_single_stake": 20,
+    "max_single_stake": 200,
+    "single_budget_cap": 200,
+    "max_single_count": 2,
+    "min_combo_leg_probability": 0.45,
+    "min_combo_leg_edge": 0.02,
+    "min_combo_leg_expected_return": 1.0,
+    "combo_min_legs": 3,
+    "combo_max_legs": 4,
+    "combo_stake": 30,
+    "min_combo_expected_return": 1.03,
+    "min_history_samples": 30
   },
   "default_odds": {},
   "confidence_multiplier": {
