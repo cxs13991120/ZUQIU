@@ -36,6 +36,10 @@ class Fixture:
     odds_a: float | None
     odds_draw: float | None
     odds_b: float | None
+    market_odds_a: float | None = None
+    market_odds_draw: float | None = None
+    market_odds_b: float | None = None
+    analysis_source: str = ""
     match_num: str = ""
     match_id: str = ""
 
@@ -92,6 +96,10 @@ def load_fixtures() -> list[Fixture]:
                     odds_a=to_optional_float(row.get("odds_a", "")),
                     odds_draw=to_optional_float(row.get("odds_draw", "")),
                     odds_b=to_optional_float(row.get("odds_b", "")),
+                    market_odds_a=to_optional_float(row.get("market_odds_a", "")),
+                    market_odds_draw=to_optional_float(row.get("market_odds_draw", "")),
+                    market_odds_b=to_optional_float(row.get("market_odds_b", "")),
+                    analysis_source=(row.get("analysis_source", "") or "").strip(),
                     match_num=(row.get("match_num", "") or "").strip(),
                     match_id=(row.get("match_id", "") or "").strip(),
                 )
@@ -160,9 +168,12 @@ def score_distribution(lam_a: float, lam_b: float, max_goals: int) -> dict:
 
 
 def market_probabilities(fixture: Fixture) -> tuple[float, float, float] | None:
-    if not all([fixture.odds_a, fixture.odds_draw, fixture.odds_b]):
+    odds = (fixture.market_odds_a, fixture.market_odds_draw, fixture.market_odds_b)
+    if not all(odds):
+        odds = (fixture.odds_a, fixture.odds_draw, fixture.odds_b)
+    if not all(odds):
         return None
-    implied = [1 / fixture.odds_a, 1 / fixture.odds_draw, 1 / fixture.odds_b]
+    implied = [1 / value for value in odds]
     total = sum(implied)
     return implied[0] / total, implied[1] / total, implied[2] / total
 
@@ -241,6 +252,7 @@ def predict_fixture(fixture: Fixture, ratings: dict[str, TeamRating], config: di
         "adv_b": adv_b,
         "pick": pick,
         "confidence": confidence(best_probability, config),
+        "analysis_source": fixture.analysis_source or "竞彩足球市场",
         "top_scores": dist["top_scores"],
     }
 
@@ -297,6 +309,7 @@ def write_csv(predictions: list[dict], target_date: date) -> Path:
         "adv_b",
         "pick",
         "confidence",
+        "analysis_source",
         "score_1",
         "score_1_prob",
         "score_2",
