@@ -42,6 +42,7 @@ jobs:
       - name: Generate daily forecast and plan
         run: |
           python import_sporttery.py
+          python build_historical_features.py
           python predict_today.py
           python generate_betting_plan.py
           python build_site.py
@@ -51,7 +52,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update daily Sporttery forecast"
-          file_pattern: "data/*.csv data/*.json output/*.csv output/*.md web/index.html web/daily-report.png"
+          file_pattern: "data/*.csv data/*.json output/*.csv output/*.md output/*.json web/index.html web/daily-report.png"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
