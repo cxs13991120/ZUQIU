@@ -5,7 +5,7 @@
     "total_goals": 100,
     "win_draw_win": 100,
     "half_full": 50,
-    "score_combo": 50
+    "wdw_combo": 30
   },
   "min_stake": 10,
   "draw_strategy": {
