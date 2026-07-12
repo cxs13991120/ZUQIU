@@ -1,4 +1,5 @@
 import csv
+import json
 import textwrap
 from datetime import date, datetime
 from pathlib import Path
@@ -17,6 +18,16 @@ def read_csv(path: Path) -> list[dict]:
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def read_metrics() -> dict:
+    path = OUTPUT_DIR / "model_metrics.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def find_font() -> str:
@@ -64,6 +75,7 @@ def latest_plan() -> tuple[str, list[dict]]:
 def draw_report() -> Path:
     report_date, plan = latest_plan()
     ledger = read_csv(OUTPUT_DIR / "betting_ledger.csv")
+    metrics = read_metrics().get("overall", {})
     plan_height = max(1, len(plan)) * 124
     ledger_height = max(1, len(ledger)) * 76
     height = 590 + plan_height + ledger_height
@@ -86,11 +98,13 @@ def draw_report() -> Path:
     hits = sum(1 for row in settled if row.get("status") == "命中")
     profit = sum(number(row, "profit") for row in settled)
     today_stake = sum(number(row, "stake") for row in plan)
+    brier = metrics.get("brier")
+    roi = metrics.get("roi")
     stats = [
         ("今日预算", f"{today_stake:.0f} 元"),
-        ("累计投入", f"{total_stake:.0f} 元"),
         ("已结算", f"{len(settled)} 笔"),
-        ("命中率", f"{(hits / len(settled) * 100 if settled else 0):.1f}%"),
+        ("Brier误差", f"{brier:.3f}" if brier is not None else "-"),
+        ("实际回报率", f"{roi * 100:+.1f}%" if roi is not None else "-"),
         ("累计盈亏", f"{profit:+.0f} 元"),
     ]
     card_width = 278
@@ -115,7 +129,9 @@ def draw_report() -> Path:
             draw.text((900, y + 17), f"赔率 {row.get('odds', '-')}　金额 {row.get('stake', '-')}元", font=font(23), fill=ink)
             selection_lines = wrap(row.get("selection", "-"), 62)
             draw.text((320, y + 57), selection_lines[0], font=font(21), fill=muted)
-            draw.text((1180, y + 57), f"模型概率 {number(row, 'probability') * 100:.1f}%", font=font(20), fill=muted)
+            market_probability = number(row, "market_probability")
+            value_edge = number(row, "value_edge")
+            draw.text((1040, y + 57), f"模型 {number(row, 'probability') * 100:.1f}%  市场 {market_probability * 100:.1f}%  优势 {value_edge * 100:+.1f}%", font=font(20), fill=muted)
             y += 124
 
     draw.line((70, y, WIDTH - 70, y), fill=line, width=2)
