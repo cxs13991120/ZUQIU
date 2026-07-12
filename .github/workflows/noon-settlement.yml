@@ -33,6 +33,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install image fonts and library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+          python -m pip install --quiet pillow
+
       - name: Update results and ledger
         continue-on-error: true
         run: |
@@ -42,12 +48,13 @@ jobs:
         run: |
           python generate_betting_plan.py --settle-only
           python build_site.py
+          python build_daily_image.py
 
       - name: Commit settlement files
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update Sporttery settlement"
-          file_pattern: "data/bet_results.csv output/betting_ledger.csv web/index.html"
+          file_pattern: "data/bet_results.csv output/betting_ledger.csv web/index.html web/daily-report.png"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
