@@ -11,6 +11,16 @@ WEB_DIR = ROOT / "web"
 ASSET_PATH = "assets/stadium-dashboard.png"
 
 
+def read_source_status() -> dict:
+    path = ROOT / "data" / "source_status.json"
+    if not path.exists():
+        return {"source": "竞彩网", "fallback": False, "message": ""}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"source": "未知", "fallback": True, "message": "数据源状态文件无法读取。"}
+
+
 def read_predictions() -> list[dict]:
     rows: list[dict] = []
     for path in sorted(OUTPUT_DIR.glob("predictions_*.csv")):
@@ -285,6 +295,13 @@ def render_site(rows: list[dict]) -> str:
     high_confidence = sum(1 for row in rows if row.get("confidence") in {"高", "High"})
     betting_plan = read_betting_plan(display_date)
     betting_ledger = read_betting_ledger()
+    source_status = read_source_status()
+    source_name = str(source_status.get("source") or "未知")
+    source_message = str(source_status.get("message") or "")
+    if source_status.get("fallback"):
+        source_alert = f'''<section class="source-alert warning"><strong>当前数据源：{html.escape(source_name)}（备用）</strong><span>{html.escape(source_message)} 备用源赔率项目可能不完整，缺失玩法不会生成投注方案。</span></section>'''
+    else:
+        source_alert = f'''<section class="source-alert ok"><strong>当前数据源：{html.escape(source_name)}</strong><span>赛程和赔率来自竞彩网官方接口。</span></section>'''
 
     match_cards = "\n".join(render_match(row) for row in display_rows)
     if not match_cards:
@@ -335,6 +352,17 @@ def render_site(rows: list[dict]) -> str:
       width: min(1180px, 100%);
       margin: 0 auto;
     }}
+    .source-alert {{
+      display: grid;
+      gap: 4px;
+      margin: 22px 0 0;
+      padding: 13px 16px;
+      border: 1px solid;
+      background: #fff;
+    }}
+    .source-alert.warning {{ border-color: #d7a23a; background: #fff8e8; color: #704d0c; }}
+    .source-alert.ok {{ border-color: #77b796; background: #edf8f1; color: #145b39; }}
+    .source-alert span {{ font-size: 13px; line-height: 1.5; }}
     .eyebrow {{
       margin: 0 0 10px;
       font-size: 13px;
@@ -701,6 +729,7 @@ def render_site(rows: list[dict]) -> str:
   </section>
 
   <main>
+    {source_alert}
     <section class="toolbar" aria-label="核心统计">
       <div class="stat"><span>当前显示日期</span><strong>{html.escape(display_label)}</strong></div>
       <div class="stat"><span>当天比赛</span><strong>{len(display_rows)}</strong></div>
