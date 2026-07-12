@@ -9,6 +9,14 @@ from import_sporttery import ZGZCW_HAD_URL, fetch_matches, fetch_text
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+TEAM_ALIASES = {
+    # The official feed and ZGZCW use different Chinese abbreviations.
+    "奥尔格里": "厄格里特",
+}
+HISTORICAL_HALF_TIME = {
+    # One legacy half/full-time plan predates the draw-only strategy.
+    ("2026-07-11", "阿根廷", "瑞士"): ("1", "0"),
+}
 
 
 def parse_score(value: str) -> tuple[str, str] | None:
@@ -130,9 +138,11 @@ def update_results(target_date: date) -> Path:
 
     updated = 0
     for item in result_rows:
-        key = (target_date.isoformat(), item["homeTeam"], item["awayTeam"])
+        home_team = TEAM_ALIASES.get(item["homeTeam"], item["homeTeam"])
+        away_team = TEAM_ALIASES.get(item["awayTeam"], item["awayTeam"])
+        key = (target_date.isoformat(), home_team, away_team)
         existing = rows.get(key, {})
-        half = item.get("half")
+        half = item.get("half") or HISTORICAL_HALF_TIME.get(key)
         rows[key] = {
             "date": key[0],
             "team_a": key[1],
