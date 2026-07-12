@@ -243,18 +243,23 @@ def build_plan(target_date: date) -> list[dict]:
         max_legs = int(strategy["combo_max_legs"])
         if len(candidates) < min_legs:
             return None
-        combo_size = min(max_legs, len(candidates))
-        selected_legs = sorted(candidates, key=lambda item: item[3], reverse=True)[:combo_size]
-        probability = 1.0
-        odds = 1.0
-        labels = []
-        legs = []
-        for _, row, selection, leg_probability, leg_odds in selected_legs:
-            probability *= leg_probability
-            odds *= leg_odds
-            labels.append(f"{row['team_a']}vs{row['team_b']} {selection}")
-            legs.append({"date": row["date"], "team_a": row["team_a"], "team_b": row["team_b"], "kind": market, "selection": selection, "probability": leg_probability, "odds": leg_odds})
-        return {"market": market, "size": combo_size, "probability": probability, "odds": round(odds, 2), "labels": labels, "legs": legs, "row": selected_legs[0][1], "value": probability * odds}
+        ranked = sorted(candidates, key=lambda item: item[3], reverse=True)
+        best = None
+        for combo_size in range(min_legs, min(max_legs, len(ranked)) + 1):
+            selected_legs = ranked[:combo_size]
+            probability = 1.0
+            odds = 1.0
+            labels = []
+            legs = []
+            for _, row, selection, leg_probability, leg_odds in selected_legs:
+                probability *= leg_probability
+                odds *= leg_odds
+                labels.append(f"{row['team_a']}vs{row['team_b']} {selection}")
+                legs.append({"date": row["date"], "team_a": row["team_a"], "team_b": row["team_b"], "kind": market, "selection": selection, "probability": leg_probability, "odds": leg_odds})
+            candidate = {"market": market, "size": combo_size, "probability": probability, "odds": round(odds, 2), "labels": labels, "legs": legs, "row": selected_legs[0][1], "value": probability * odds}
+            if best is None or candidate["value"] > best["value"]:
+                best = candidate
+        return best
 
     combo = combo_candidate(wdw_legs, "胜平负")
     if combo:
