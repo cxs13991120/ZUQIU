@@ -23,7 +23,8 @@ def summarize(rows: list[dict]) -> dict:
     def metrics(items: list[dict]) -> dict:
         if not items:
             return {"count": 0, "hits": 0, "hit_rate": None, "brier": None, "log_loss": None, "stake": 0.0, "profit": 0.0, "roi": None, "average_expected_return": None}
-        probabilities = [max(0.001, min(0.999, float(row.get("probability") or 0.5))) for row in items]
+        probabilities = [max(0.0, min(1.0, float(row.get("probability") or 0.5))) for row in items]
+        safe_probabilities = [max(0.001, min(0.999, probability)) for probability in probabilities]
         outcomes = [1.0 if row.get("status") == "命中" else 0.0 for row in items]
         stake = sum(float(row.get("stake") or 0) for row in items)
         profit = sum(float(row.get("profit") or 0) for row in items)
@@ -33,7 +34,7 @@ def summarize(rows: list[dict]) -> dict:
             "hits": int(sum(outcomes)),
             "hit_rate": sum(outcomes) / len(items),
             "brier": sum((probability - outcome) ** 2 for probability, outcome in zip(probabilities, outcomes)) / len(items),
-            "log_loss": -sum(outcome * math.log(probability) + (1 - outcome) * math.log(1 - probability) for probability, outcome in zip(probabilities, outcomes)) / len(items),
+            "log_loss": -sum(outcome * math.log(probability) + (1 - outcome) * math.log(1 - probability) for probability, outcome in zip(safe_probabilities, outcomes)) / len(items),
             "stake": round(stake, 2),
             "profit": round(profit, 2),
             "roi": profit / stake if stake else None,
