@@ -1,11 +1,14 @@
 import csv
 import json
 import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "output"
+SNAPSHOT_DIR = ROOT / "data" / "odds_snapshots"
+BEIJING = timezone(timedelta(hours=8))
 
 
 def play_family(play: str) -> str:
@@ -17,8 +20,10 @@ def play_family(play: str) -> str:
 def summarize(rows: list[dict]) -> dict:
     settled = [row for row in rows if row.get("status") in {"命中", "未中"}]
     by_play: dict[str, list[dict]] = {}
+    by_league: dict[str, list[dict]] = {}
     for row in settled:
         by_play.setdefault(play_family(row.get("play", "")), []).append(row)
+        by_league.setdefault(row.get("stage") or "未知", []).append(row)
 
     def metrics(items: list[dict]) -> dict:
         if not items:
@@ -41,7 +46,92 @@ def summarize(rows: list[dict]) -> dict:
             "average_expected_return": sum(expected) / len(expected),
         }
 
-    return {"overall": metrics(settled), "by_play": {key: metrics(items) for key, items in by_play.items()}}
+    league_metrics = {}
+    for league, items in by_league.items():
+        item_metrics = metrics(items)
+        recent = metrics(items[-10:]) if len(items) >= 10 else item_metrics
+        previous = metrics(items[-20:-10]) if len(items) >= 20 else None
+        worsening = bool(previous and recent.get("brier") is not None and previous.get("brier") is not None and recent["brier"] > previous["brier"])
+        item_metrics["recent_brier"] = recent.get("brier")
+        item_metrics["paused"] = len(items) >= 20 and (item_metrics.get("roi") or 0) < 0 and worsening
+        league_metrics[league] = item_metrics
+    return {
+        "overall": metrics(settled),
+        "by_play": {key: metrics(items) for key, items in by_play.items()},
+        "by_league": league_metrics,
+    }
+
+
+def closing_line_value(rows: list[dict]) -> dict:
+    snapshots = []
+    if SNAPSHOT_DIR.exists():
+        for path in sorted(SNAPSHOT_DIR.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            try:
+                captured = datetime.fromisoformat(payload.get("captured_at", ""))
+            except ValueError:
+                continue
+            for match in payload.get("matches", []):
+                kickoff_text = match.get("kickoff_at", "")
+                if not kickoff_text:
+                    continue
+                try:
+                    kickoff = datetime.strptime(kickoff_text, "%Y-%m-%d %H:%M").replace(tzinfo=BEIJING)
+                except ValueError:
+                    continue
+                if captured <= kickoff:
+                    snapshots.append({**match, "target_date": payload.get("target_date", ""), "captured": captured, "kickoff": kickoff})
+
+    def close_price(target_date: str, team_a: str, team_b: str, selection: str) -> float | None:
+        key = {"胜": "h", "平": "d", "负": "a"}.get(selection)
+        if key is None:
+            return None
+        candidates = [item for item in snapshots if item["target_date"] == target_date and item["team_a"] == team_a and item["team_b"] == team_b and item.get(key)]
+        if not candidates:
+            return None
+        try:
+            return float(max(candidates, key=lambda item: item["captured"])[key])
+        except (TypeError, ValueError):
+            return None
+
+    values = []
+    for row in rows:
+        try:
+            initial = float(row.get("odds") or 0)
+        except ValueError:
+            continue
+        closing = None
+        if "串" in row.get("play", ""):
+            try:
+                legs = json.loads(row.get("legs_json") or "[]")
+            except json.JSONDecodeError:
+                legs = []
+            prices = []
+            for leg in legs:
+                if leg.get("kind") != "胜平负":
+                    prices = []
+                    break
+                price = close_price(leg["date"], leg["team_a"], leg["team_b"], leg.get("selection", ""))
+                if price is None:
+                    prices = []
+                    break
+                prices.append(price)
+            if prices:
+                closing = math.prod(prices)
+        else:
+            teams = (row.get("match") or "").split(" vs ", 1)
+            if len(teams) == 2:
+                closing = close_price(row.get("date", ""), teams[0], teams[1], row.get("selection", ""))
+        if closing and initial:
+            values.append(initial / closing - 1)
+    return {
+        "count": len(values),
+        "average_clv": sum(values) / len(values) if values else None,
+        "positive_rate": sum(1 for value in values if value > 0) / len(values) if values else None,
+    }
 
 
 def write_metrics() -> Path:
@@ -51,6 +141,7 @@ def write_metrics() -> Path:
         with ledger.open("r", encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
     payload = summarize(rows)
+    payload["clv"] = closing_line_value(rows)
     output = OUTPUT_DIR / "model_metrics.json"
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Updated model metrics: {output}")
