@@ -1,10 +1,12 @@
-name: Noon Sporttery Settlement
+name: Afternoon Sporttery Settlement
 
 on:
   workflow_dispatch:
   schedule:
-    # 12:00 Beijing time
-    - cron: "0 4 * * *"
+    # 13:45 Beijing time, before the 14:00 email window.
+    - cron: "45 5 * * *"
+    # Retry at 14:05 in case results or the first scheduled run are delayed.
+    - cron: "5 6 * * *"
 
 permissions:
   contents: write
@@ -40,7 +42,6 @@ jobs:
           python -m pip install --quiet pillow
 
       - name: Update results and ledger
-        continue-on-error: true
         run: |
           python update_sporttery_results.py
 
