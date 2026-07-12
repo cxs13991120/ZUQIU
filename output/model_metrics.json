@@ -3,12 +3,12 @@
     "count": 4,
     "hits": 1,
     "hit_rate": 0.25,
-    "brier": 0.3127054902377935,
+    "brier": 0.3127052450070541,
     "log_loss": 0.7965131384357909,
     "stake": 300.0,
     "profit": 60.0,
     "roi": 0.2,
-    "average_expected_return": 1.4486608221434807
+    "average_expected_return": 0.8248533843239094
   },
   "by_play": {
     "总进球": {
@@ -48,12 +48,12 @@
       "count": 1,
       "hits": 0,
       "hit_rate": 0.0,
-      "brier": 1e-06,
+      "brier": 1.9077042487571106e-08,
       "log_loss": 0.0010005003335835344,
       "stake": 50.0,
       "profit": -50.0,
       "roi": -1.0,
-      "average_expected_return": 2.8951
+      "average_expected_return": 0.39987024872171517
     }
   }
 }
