@@ -10,7 +10,7 @@ SNAPSHOT_DIR = ROOT / "data" / "odds_snapshots"
 BEIJING = timezone(timedelta(hours=8))
 
 
-def capture(target_date: date) -> Path:
+def capture(target_date: date) -> Path | None:
     captured_at = datetime.now(BEIJING)
     matches = fetch_zgzcw_matches(target_date)
     payload = {
@@ -32,7 +32,8 @@ def capture(target_date: date) -> Path:
         ],
     }
     if not payload["matches"]:
-        raise RuntimeError("没有抓到可记录的竞彩足球赔率")
+        print("No Sporttery matches available for this snapshot.")
+        return None
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     output = SNAPSHOT_DIR / f"{target_date.isoformat()}-{captured_at.strftime('%H%M')}.json"
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
