@@ -16,7 +16,7 @@ def capture(target_date: date) -> Path | None:
     payload = {
         "target_date": target_date.isoformat(),
         "captured_at": captured_at.isoformat(),
-        "source": "zgzcw_professional",
+        "source": "zgzcw",
         "matches": [
             {
                 "team_a": item.get("homeTeam", ""),
@@ -26,9 +26,9 @@ def capture(target_date: date) -> Path | None:
                 "h": item.get("h", ""),
                 "d": item.get("d", ""),
                 "a": item.get("a", ""),
-                "market_h": item.get("h", ""),
-                "market_d": item.get("d", ""),
-                "market_a": item.get("a", ""),
+                "market_h": item.get("market_h", ""),
+                "market_d": item.get("market_d", ""),
+                "market_a": item.get("market_a", ""),
                 "market_type": "win_draw_loss",
                 "settlement_minutes": 90,
                 "includes_extra_time": False,

@@ -170,15 +170,17 @@ def collect(target_date: date, offline: bool = False) -> Path:
         _apply_official_odds(fixture, sporttery)
         match_snapshots = _match_snapshots(fixture, snapshots)
         markets: list[dict] = []
+        polymarket_request_succeeded = False
         if not offline:
             try:
                 markets = fetch_polymarket(fixture["team_a"], fixture["team_b"])
+                polymarket_request_succeeded = True
             except PublicMarketError as error:
                 errors.append(f"polymarket {fixture['match_id']}: {error}")
         evidence = build_evidence(fixture, match_snapshots, markets)
         if "domestic_sporttery" not in evidence["sources"]:
             errors.append(f"domestic_sporttery {fixture['match_id']}: missing 90m odds")
-        if not offline and markets and "polymarket" not in evidence["sources"]:
+        if polymarket_request_succeeded and "polymarket" not in evidence["sources"]:
             errors.append(f"polymarket {fixture['match_id']}: no matching 90m market")
         matches.append(evidence)
     return write_payload(data_dir / f"market_heat_{target_date.isoformat()}.json", target_date.isoformat(), matches, errors)

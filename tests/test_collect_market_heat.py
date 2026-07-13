@@ -117,6 +117,44 @@ class MarketHeatCollectorTest(unittest.TestCase):
         self.assertEqual([], payload["errors"])
         self.assertEqual(2, payload["matches"][0]["source_count"])
 
+    def test_successful_empty_public_market_response_records_matching_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            (data_dir / "fixtures.csv").write_text(
+                "date,team_a,team_b,odds_a,odds_draw,odds_b,market_odds_a,market_odds_draw,market_odds_b,match_id\n"
+                "2026-07-12,Norway,England,3.8,3.6,1.95,3.9,3.5,1.9,001\n",
+                encoding="utf-8",
+            )
+            with patch.object(collector, "ROOT", root), patch.object(
+                collector, "fetch_polymarket", return_value=[]
+            ):
+                output = collector.collect(date(2026, 7, 12))
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(["polymarket 001: no matching 90m market"], payload["errors"])
+
+    def test_public_market_request_error_is_not_recorded_as_matching_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            (data_dir / "fixtures.csv").write_text(
+                "date,team_a,team_b,odds_a,odds_draw,odds_b,market_odds_a,market_odds_draw,market_odds_b,match_id\n"
+                "2026-07-12,Norway,England,3.8,3.6,1.95,3.9,3.5,1.9,001\n",
+                encoding="utf-8",
+            )
+            with patch.object(collector, "ROOT", root), patch.object(
+                collector, "fetch_polymarket", side_effect=collector.PublicMarketError("timeout")
+            ):
+                output = collector.collect(date(2026, 7, 12))
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(["polymarket 001: timeout"], payload["errors"])
+
     def test_snapshot_retains_normalized_market_fields(self):
         source_match = {
             "homeTeam": "Norway",
@@ -126,6 +164,9 @@ class MarketHeatCollectorTest(unittest.TestCase):
             "h": "3.8",
             "d": "3.6",
             "a": "1.95",
+            "market_h": "2.4",
+            "market_d": "3.2",
+            "market_a": "3.1",
         }
         with tempfile.TemporaryDirectory() as folder:
             with patch.object(snapshot, "SNAPSHOT_DIR", Path(folder)), patch.object(
@@ -136,9 +177,13 @@ class MarketHeatCollectorTest(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
 
         match = payload["matches"][0]
-        self.assertEqual("3.8", match["market_h"])
-        self.assertEqual("3.6", match["market_d"])
-        self.assertEqual("1.95", match["market_a"])
+        self.assertEqual("zgzcw", payload["source"])
+        self.assertEqual("3.8", match["h"])
+        self.assertEqual("3.6", match["d"])
+        self.assertEqual("1.95", match["a"])
+        self.assertEqual("2.4", match["market_h"])
+        self.assertEqual("3.2", match["market_d"])
+        self.assertEqual("3.1", match["market_a"])
         self.assertEqual("win_draw_loss", match["market_type"])
         self.assertEqual(90, match["settlement_minutes"])
         self.assertIs(False, match["includes_extra_time"])
