@@ -1,3 +1,5 @@
+import csv
+import json
 import unittest
 from datetime import date
 from pathlib import Path
@@ -7,6 +9,10 @@ from unittest.mock import patch
 import build_daily_image
 import build_site
 from build_site import render_draw_alert
+
+
+def deeply_nested_evidence(depth: int = 1200) -> str:
+    return '{"nested":' * depth + '{"source":"<& deep source"}' + "}" * depth
 
 
 class DrawAlertReportingTest(unittest.TestCase):
@@ -494,6 +500,98 @@ class DrawAlertReportingTest(unittest.TestCase):
         for metric in metrics:
             for label in ("\u5b98\u65b9\u5e73\u8d54", "\u6a21\u578b", "\u5e02\u573a", "\u4f18\u52bf", "\u671f\u671b\u503c", "xG\u603b\u548c"):
                 self.assertIn(f"{label} -", metric)
+
+    def test_deep_evidence_json_falls_back_safely_on_website(self):
+        evidence = deeply_nested_evidence()
+        try:
+            html = render_draw_alert([
+                {
+                    "rank": "1",
+                    "subtype": "cold_draw",
+                    "match": "deep evidence",
+                    "settlement_mode": "observation",
+                    "evidence_json": evidence,
+                }
+            ])
+        except RecursionError as error:
+            self.fail(f"deep website evidence raised RecursionError: {error}")
+
+        self.assertIn("\u8bc1\u636e\u7ed3\u6784\u8fc7\u6df1", html)
+        self.assertNotIn("deep source", html)
+        self.assertLessEqual(len(build_site.evidence_source_summary(evidence)), 160)
+
+    def test_evidence_summary_limits_node_and_text_budgets(self):
+        many_nodes = json.dumps(
+            {"items": [{"source": f"provider-{index}"} for index in range(300)]},
+            ensure_ascii=False,
+        )
+        long_source = json.dumps({"source": "<&\u8d85\u957f\u6765\u6e90" * 200}, ensure_ascii=False)
+
+        self.assertEqual("\u8bc1\u636e\u6765\u6e90\u5df2\u622a\u65ad", build_site.evidence_source_summary(many_nodes))
+        long_summary = build_site.evidence_source_summary(long_source)
+        self.assertEqual("\u8bc1\u636e\u6765\u6e90\u5df2\u622a\u65ad", long_summary)
+        self.assertLessEqual(len(long_summary), 160)
+
+    def test_deep_evidence_json_falls_back_safely_in_daily_image(self):
+        class RecordingDraw:
+            def __init__(self, drawing, calls):
+                self.drawing = drawing
+                self.calls = calls
+
+            def __getattr__(self, name):
+                return getattr(self.drawing, name)
+
+            def text(self, xy, text, *args, **kwargs):
+                self.calls.append((text, xy, kwargs))
+                return self.drawing.text(xy, text, *args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            web = root / "web"
+            output.mkdir()
+            (output / "betting_plan_2026-07-13.csv").write_text("match,play,odds,stake,selection\n", encoding="utf-8")
+            (output / "betting_ledger.csv").write_text("date,play,match,selection,stake,status,profit\n", encoding="utf-8")
+            alert_path = output / "draw_alert_2026-07-13.csv"
+            fieldnames = ["date", "rank", "subtype", "match", "settlement_mode", "evidence_json"]
+            with alert_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "date": "2026-07-13",
+                        "rank": "1",
+                        "subtype": "cold_draw",
+                        "match": "deep evidence",
+                        "settlement_mode": "observation",
+                        "evidence_json": deeply_nested_evidence(),
+                    }
+                )
+            calls = []
+            original_draw = build_daily_image.ImageDraw.Draw
+
+            try:
+                with patch.object(build_daily_image, "OUTPUT_DIR", output), patch.object(build_daily_image, "WEB_DIR", web), patch.object(
+                    build_daily_image.ImageDraw,
+                    "Draw",
+                    side_effect=lambda image: RecordingDraw(original_draw(image), calls),
+                ):
+                    image_path = build_daily_image.draw_report()
+            except RecursionError as error:
+                self.fail(f"deep image evidence raised RecursionError: {error}")
+
+            with build_daily_image.Image.open(image_path) as image:
+                self.assertEqual((1600, 1060), image.size)
+
+        evidence_calls = [call for call in calls if call[0].startswith("\u8bc1\u636e\u6765\u6e90\uff1a")]
+        self.assertGreaterEqual(len(evidence_calls), 1)
+        self.assertLessEqual(len(evidence_calls), 2)
+        self.assertIn("\u8bc1\u636e\u7ed3\u6784\u8fc7\u6df1", "".join(text for text, _, _ in evidence_calls))
+        self.assertNotIn("&lt;", "".join(text for text, _, _ in evidence_calls))
+        measurement = build_daily_image.ImageDraw.Draw(build_daily_image.Image.new("RGB", (1600, 10)))
+        for text, (x, _), kwargs in evidence_calls:
+            width = measurement.textbbox((0, 0), text, font=kwargs["font"])[2]
+            self.assertLessEqual(x + width, build_daily_image.WIDTH - 70, text)
 
 
 if __name__ == "__main__":

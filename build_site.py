@@ -18,6 +18,13 @@ SETTLEMENT_LABELS = {
     "standalone": "独立小额模拟",
     "budget_capped_observation": "达到当日预警预算上限，零新增金额观察",
 }
+EVIDENCE_MAX_DEPTH = 16
+EVIDENCE_MAX_NODES = 256
+EVIDENCE_MAX_INPUT_CHARS = 32_768
+EVIDENCE_MAX_SUMMARY_LENGTH = 160
+EVIDENCE_SOURCE_KEYS = ("source", "provider", "bookmaker", "name")
+EVIDENCE_TOO_DEEP = "证据结构过深"
+EVIDENCE_TRUNCATED = "证据来源已截断"
 
 
 def read_source_status() -> dict:
@@ -384,31 +391,81 @@ def render_observations(observations: list[dict]) -> str:
     """
 
 
+def evidence_json_exceeds_depth(value: str) -> bool:
+    depth = 0
+    in_string = False
+    escaped_character = False
+    for character in value:
+        if in_string:
+            if escaped_character:
+                escaped_character = False
+            elif character == "\\":
+                escaped_character = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > EVIDENCE_MAX_DEPTH:
+                return True
+        elif character in "]}":
+            depth = max(0, depth - 1)
+    return False
+
+
 def evidence_source_summary(value: object) -> str:
-    """Return only named, parsed evidence sources; never echo untrusted JSON."""
+    """Return a bounded summary of named evidence sources without echoing raw JSON."""
+    raw_evidence = external_text(value).strip()
+    if not raw_evidence:
+        return "未提供可用来源"
+    if len(raw_evidence) > EVIDENCE_MAX_INPUT_CHARS:
+        return EVIDENCE_TRUNCATED
+    if evidence_json_exceeds_depth(raw_evidence):
+        return EVIDENCE_TOO_DEEP
     try:
-        payload = json.loads(external_text(value))
-    except (TypeError, json.JSONDecodeError):
+        payload = json.loads(raw_evidence)
+    except (TypeError, ValueError, RecursionError):
         return "未提供可用来源"
 
     sources: list[str] = []
-
-    def collect(item: object) -> None:
-        if isinstance(item, list):
-            for child in item:
-                collect(child)
-        elif isinstance(item, dict):
-            for key in ("source", "provider", "bookmaker", "name"):
+    seen_sources: set[str] = set()
+    stack: list[tuple[object, int]] = [(payload, 1 if isinstance(payload, (list, dict)) else 0)]
+    visited_nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        visited_nodes += 1
+        if visited_nodes > EVIDENCE_MAX_NODES:
+            return EVIDENCE_TRUNCATED
+        if depth > EVIDENCE_MAX_DEPTH:
+            return EVIDENCE_TOO_DEEP
+        if isinstance(item, dict):
+            for key in EVIDENCE_SOURCE_KEYS:
                 source = item.get(key)
-                if isinstance(source, (str, int, float)) and external_text(source).strip():
-                    sources.append(external_text(source).strip())
-            for child in item.values():
-                if isinstance(child, (list, dict)):
-                    collect(child)
+                if not isinstance(source, (str, int, float)):
+                    continue
+                source_text = external_text(source).strip()
+                if not source_text or source_text in seen_sources:
+                    continue
+                if len(source_text) > EVIDENCE_MAX_SUMMARY_LENGTH:
+                    return EVIDENCE_TRUNCATED
+                seen_sources.add(source_text)
+                if len(sources) < 3:
+                    sources.append(source_text)
+            children = list(item.values())
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        if visited_nodes + len(stack) + len(children) > EVIDENCE_MAX_NODES:
+            return EVIDENCE_TRUNCATED
+        for child in reversed(children):
+            child_depth = depth + 1 if isinstance(child, (list, dict)) else depth
+            stack.append((child, child_depth))
 
-    collect(payload)
-    unique = list(dict.fromkeys(sources))
-    return "、".join(unique[:3]) if unique else "已记录来源"
+    summary = "、".join(sources) if sources else "已记录来源"
+    return summary if len(summary) <= EVIDENCE_MAX_SUMMARY_LENGTH else EVIDENCE_TRUNCATED
 
 
 def draw_alert_value(alert: dict, key: str) -> float | None:
