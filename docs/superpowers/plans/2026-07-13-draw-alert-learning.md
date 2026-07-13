@@ -938,10 +938,12 @@ class WorkflowScheduleTest(unittest.TestCase):
             text = (root / name).read_text(encoding="utf-8")
             self.assertIn("group: sporttery-repository", text)
             self.assertIn("cancel-in-progress: false", text)
+            self.assertIn("queue: max", text)
 
     def test_email_waits_in_the_same_queue_without_installing_ml(self):
         text = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "email-report.yml").read_text(encoding="utf-8")
         self.assertIn("group: sporttery-repository", text)
+        self.assertIn("queue: max", text)
         self.assertNotIn("requirements.txt", text)
 ```
 
@@ -962,7 +964,7 @@ After the existing prediction and betting-plan commands, run:
           python draw_alert_ledger.py
 ```
 
-Install `requirements.txt` before Pillow, keep `TZ: Asia/Shanghai`, and include `data/market_heat_*.json`, `data/draw_feature_snapshots/*.json`, `data/models/*.joblib`, `output/draw_alert*.csv`, `output/draw_alert*.json`, and `output/draw_model_registry.json` in the commit pattern. All repository-writing workflows use `concurrency.group: sporttery-repository` with `cancel-in-progress: false` so snapshots, forecasts, refreshes, and settlements cannot race their git commits.
+Install `requirements.txt` before Pillow, keep `TZ: Asia/Shanghai`, and include `data/market_heat_*.json`, `data/draw_feature_snapshots/*.json`, `data/models/*.joblib`, `output/draw_alert*.csv`, `output/draw_alert*.json`, and `output/draw_model_registry.json` in the commit pattern. All repository-writing workflows use `concurrency.group: sporttery-repository`, `cancel-in-progress: false`, and `queue: max` so snapshots, forecasts, refreshes, settlements, and email cannot race or replace already-pending runs.
 
 - [ ] **Step 4: Create the 13:30 refresh workflow**
 
