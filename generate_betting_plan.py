@@ -124,9 +124,10 @@ def hafu_key(selection: str) -> str:
     return mapping[selection[0]] + mapping[selection[1]]
 
 
-def make_item(row: dict, play: str, selection: str, probability: float, odds: float, stake: int, reason: str, legs=None, market_probability: float | None = None, value_edge: float | None = None, raw_model_probability: float | None = None) -> dict:
+def make_item(row: dict, play: str, selection: str, probability: float, odds: float, stake: int, reason: str, legs=None, market_probability: float | None = None, value_edge: float | None = None, raw_model_probability: float | None = None, strategy_version: str = "") -> dict:
     return {
         "date": row["date"],
+        "strategy_version": strategy_version,
         "stage": row.get("stage", ""),
         "match": f"{row['team_a']} vs {row['team_b']}",
         "team_a": row["team_a"],
@@ -326,6 +327,7 @@ def build_plan(target_date: date) -> list[dict]:
 
 def build_value_plan(target_date: date) -> list[dict]:
     config = read_json(ROOT / "betting_config.json")
+    strategy_version = str(config.get("strategy_version") or "value-v2")
     value = config.get("value_strategy", {})
     predictions = load_predictions(target_date)
     odds_by_match = load_odds(target_date)
@@ -339,15 +341,16 @@ def build_value_plan(target_date: date) -> list[dict]:
     if ledger_path.exists():
         with ledger_path.open("r", encoding="utf-8-sig", newline="") as handle:
             history = list(csv.DictReader(handle))
-    metrics = summarize(history)
+    metrics = summarize(history, strategy_version)
     by_play = metrics.get("by_play", {})
     paused_leagues = {league for league, item in metrics.get("by_league", {}).items() if item.get("paused")}
-    overall = metrics.get("overall", {})
+    overall = metrics.get("active_strategy", {})
 
     settled_count = int(overall.get("count") or 0)
+    strict_mode = settled_count < int(value.get("strict_until_samples", 100))
     prior = float(value.get("calibration_prior", 100))
-    base_weight = float(value.get("model_edge_weight_base", 0.35))
-    max_weight = float(value.get("model_edge_weight_max", 0.75))
+    base_weight = float(value.get("strict_model_edge_weight_base", 0.15) if strict_mode else value.get("model_edge_weight_base", 0.35))
+    max_weight = float(value.get("strict_model_edge_weight_max", 0.35) if strict_mode else value.get("model_edge_weight_max", 0.75))
     model_weight = base_weight + (max_weight - base_weight) * settled_count / (settled_count + prior)
     if overall.get("brier") is not None and float(overall["brier"]) > 0.25:
         model_weight *= max(0.70, 1 - (float(overall["brier"]) - 0.25))
@@ -374,10 +377,11 @@ def build_value_plan(target_date: date) -> list[dict]:
 
     def kelly_stake(probability: float, odds: float, family: str) -> int:
         full_kelly = max(0.0, (probability * odds - 1) / (odds - 1))
-        fraction = full_kelly * float(value.get("kelly_fraction", 0.25))
+        kelly_fraction = float(value.get("strict_kelly_fraction", 0.125) if strict_mode else value.get("kelly_fraction", 0.25))
+        fraction = full_kelly * kelly_fraction
         raw = float(value.get("reference_bankroll", 5000)) * fraction * performance_multiplier(family)
         minimum = int(value.get("min_single_stake", 20))
-        maximum = int(value.get("max_single_stake", 200))
+        maximum = int(value.get("strict_max_single_stake", 50) if strict_mode else value.get("max_single_stake", 200))
         return max(minimum, min(maximum, money(raw))) if raw >= minimum else 0
 
     singles = []
@@ -407,7 +411,9 @@ def build_value_plan(target_date: date) -> list[dict]:
                 "value_edge": edge, "odds": price, "expected_value": expected_value,
                 "family": family,
             }
-            if edge >= float(value.get("min_probability_edge", 0.03)) and expected_value >= float(value.get("min_expected_return", 1.03)):
+            edge_threshold = float(value.get("strict_min_probability_edge", 0.05) if strict_mode else value.get("min_probability_edge", 0.03))
+            return_threshold = float(value.get("strict_min_expected_return", 1.06) if strict_mode else value.get("min_expected_return", 1.03))
+            if edge >= edge_threshold and expected_value >= return_threshold:
                 stake = kelly_stake(probability, price, family)
                 if stake:
                     fraction = stake / float(value.get("reference_bankroll", 5000))
@@ -416,8 +422,8 @@ def build_value_plan(target_date: date) -> list[dict]:
                     singles.append(candidate)
             if (
                 probability >= float(value.get("min_combo_leg_probability", 0.45))
-                and edge >= float(value.get("min_combo_leg_edge", 0.02))
-                and expected_value >= float(value.get("min_combo_leg_expected_return", 1.0))
+                and edge >= float(value.get("strict_min_combo_leg_edge", 0.03) if strict_mode else value.get("min_combo_leg_edge", 0.02))
+                and expected_value >= float(value.get("strict_min_combo_leg_expected_return", 1.02) if strict_mode else value.get("min_combo_leg_expected_return", 1.0))
             ):
                 per_match_combo.append(candidate)
         if per_match_combo:
@@ -425,7 +431,7 @@ def build_value_plan(target_date: date) -> list[dict]:
 
     plan = []
     used_matches: set[tuple[str, str]] = set()
-    single_budget = int(value.get("single_budget_cap", 200))
+    single_budget = int(value.get("strict_single_budget_cap", 100) if strict_mode else value.get("single_budget_cap", 200))
     max_singles = int(value.get("max_single_count", 2))
     for item in sorted(singles, key=lambda candidate: candidate["quality"], reverse=True):
         match_key = (item["row"]["team_a"], item["row"]["team_b"])
@@ -435,7 +441,7 @@ def build_value_plan(target_date: date) -> list[dict]:
         play = "平局单场" if item["selection"] == "平" else "胜平负单场"
         source = item["row"].get("analysis_source") or "专业欧赔市场"
         reason = f"保守概率{pct(item['probability'])}（原模型{pct(item['raw_probability'])}），市场公平概率{pct(item['market_probability'])}，概率优势{pct(item['value_edge'])}，期望值{item['expected_value']:.3f}；参考{source}，采用{odds_source}赔率"
-        plan.append(make_item(item["row"], play, item["selection"], item["probability"], item["odds"], stake, reason, market_probability=item["market_probability"], value_edge=item["value_edge"], raw_model_probability=item["raw_probability"]))
+        plan.append(make_item(item["row"], play, item["selection"], item["probability"], item["odds"], stake, reason, market_probability=item["market_probability"], value_edge=item["value_edge"], raw_model_probability=item["raw_probability"], strategy_version=strategy_version))
         used_matches.add(match_key)
         single_budget -= stake
 
@@ -449,18 +455,19 @@ def build_value_plan(target_date: date) -> list[dict]:
             odds = math.prod(item["odds"] for item in selected)
             expected_value = probability * odds
             candidate = {"selected": selected, "probability": probability, "raw_probability": raw_probability, "market_probability": market_probability, "value_edge": probability - market_probability, "odds": round(odds, 2), "expected_value": expected_value}
-            if expected_value >= float(value.get("min_combo_expected_return", 1.03)) and (best_combo is None or expected_value > best_combo["expected_value"]):
+            combo_threshold = float(value.get("strict_min_combo_expected_return", 1.10) if strict_mode else value.get("min_combo_expected_return", 1.03))
+            if expected_value >= combo_threshold and (best_combo is None or expected_value > best_combo["expected_value"]):
                 best_combo = candidate
 
     remaining_budget = int(config["max_daily_budget"]) - sum(item["stake"] for item in plan)
-    combo_stake = int(value.get("combo_stake", 30))
+    combo_stake = int(value.get("strict_combo_stake", 20) if strict_mode else value.get("combo_stake", 30))
     if best_combo and remaining_budget >= combo_stake:
         selected = best_combo["selected"]
         labels = [f"{item['row']['team_a']}vs{item['row']['team_b']} {item['selection']}" for item in selected]
         legs = [{"date": item["row"]["date"], "team_a": item["row"]["team_a"], "team_b": item["row"]["team_b"], "kind": "胜平负", "selection": item["selection"], "probability": item["probability"], "raw_model_probability": item["raw_probability"], "market_probability": item["market_probability"], "value_edge": item["value_edge"], "odds": item["odds"]} for item in selected]
         source = selected[0]["row"].get("analysis_source") or "专业欧赔市场"
         reason = f"保守组合概率{pct(best_combo['probability'])}（原模型{pct(best_combo['raw_probability'])}），市场公平概率{pct(best_combo['market_probability'])}，概率优势{pct(best_combo['value_edge'])}，期望值{best_combo['expected_value']:.3f}；参考{source}，采用{odds_source}赔率"
-        plan.append(make_item(selected[0]["row"], f"胜平负{len(selected)}串1", " × ".join(labels), best_combo["probability"], best_combo["odds"], combo_stake, reason, legs, market_probability=best_combo["market_probability"], value_edge=best_combo["value_edge"], raw_model_probability=best_combo["raw_probability"]))
+        plan.append(make_item(selected[0]["row"], f"胜平负{len(selected)}串1", " × ".join(labels), best_combo["probability"], best_combo["odds"], combo_stake, reason, legs, market_probability=best_combo["market_probability"], value_edge=best_combo["value_edge"], raw_model_probability=best_combo["raw_probability"], strategy_version=strategy_version))
 
     total = sum(item["stake"] for item in plan)
     if total > int(config["max_daily_budget"]):
@@ -544,6 +551,7 @@ def write_plan(plan: list[dict], target_date: date) -> Path:
     path = OUTPUT_DIR / f"betting_plan_{target_date.isoformat()}.csv"
     fields = [
         "date",
+        "strategy_version",
         "stage",
         "match",
         "team_a",
@@ -584,6 +592,7 @@ def write_ledger(plan: list[dict] | None = None) -> Path:
         plan = load_all_plans()
     fields = [
         "date",
+        "strategy_version",
         "stage",
         "match",
         "play",
@@ -607,6 +616,7 @@ def write_ledger(plan: list[dict] | None = None) -> Path:
         rows.append(
             {
                 "date": item["date"],
+                "strategy_version": item.get("strategy_version", ""),
                 "stage": item.get("stage", ""),
                 "match": item["match"],
                 "play": item["play"],
