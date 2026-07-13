@@ -865,7 +865,32 @@ def _validate_concrete_estimator(model, model_kind, feature_count):
     else:
         if type(model) is not Pipeline:
             raise ValueError("full model must be a Pipeline")
-        if [name for name, _ in model.steps] != ["standardscaler", "logisticregression"]:
+        required_pipeline = Pipeline(
+            [
+                ("standardscaler", StandardScaler()),
+                (
+                    "logisticregression",
+                    LogisticRegression(C=0.5, max_iter=1000, random_state=42),
+                ),
+            ]
+        )
+        pipeline_parameters = model.get_params(deep=False)
+        required_pipeline_parameters = required_pipeline.get_params(deep=False)
+        pipeline_steps = pipeline_parameters.pop("steps", None)
+        required_pipeline_steps = required_pipeline_parameters.pop("steps")
+        try:
+            pipeline_step_signature = [
+                (name, type(estimator)) for name, estimator in pipeline_steps
+            ]
+        except (TypeError, ValueError) as error:
+            raise ValueError("full model pipeline steps are invalid") from error
+        required_step_signature = [
+            (name, type(estimator)) for name, estimator in required_pipeline_steps
+        ]
+        if (
+            pipeline_parameters != required_pipeline_parameters
+            or pipeline_step_signature != required_step_signature
+        ):
             raise ValueError("full model pipeline steps are invalid")
         scaler = model.named_steps["standardscaler"]
         logistic = model.named_steps["logisticregression"]

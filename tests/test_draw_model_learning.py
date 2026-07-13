@@ -184,6 +184,21 @@ class DrawModelLearningTest(unittest.TestCase):
                     predict_draw_probability(self._feature_values(0.31, 0.30), root=self.temp_root),
                 )
 
+    def test_artifact_validation_rejects_pipeline_shallow_parameter_changes(self):
+        cases = {
+            "verbose": {"verbose": True},
+            "memory": {"memory": "pipeline-cache"},
+            "transform_input": {"transform_input": ["X"]},
+        }
+
+        for version, parameters in cases.items():
+            with self.subTest(parameter=version):
+                artifact = self._artifact(0.66, FEATURES, f"pipeline-{version}")
+                artifact["model"].set_params(**parameters)
+
+                with self.assertRaises(ValueError):
+                    _validate_artifact(artifact)
+
     def test_artifact_validation_rejects_nonfinite_estimator_capability(self):
         artifact = self._artifact(0.66, SMALL_SAMPLE_FEATURES, "nan-v1")
         artifact["model"].intercept_[:] = np.nan
