@@ -2,8 +2,12 @@
 
 import argparse
 import csv
+import hashlib
 import importlib
 import json
+import os
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from draw_alert_core import DrawInputs, MarketEvidence, classify_candidate, fair_probabilities
@@ -19,6 +23,10 @@ FIELDS = [
 ]
 
 RANK_GATES = ((0.27, 0.04, 1.05), (0.29, 0.05, 1.07), (0.31, 0.06, 1.09), (0.33, 0.07, 1.11))
+DRAW_MODEL_FEATURES = [
+    "base_draw_probability", "market_draw_probability", "favorite_probability", "win_probability_gap",
+    "xg_total", "favorite_movement", "regional_gap", "source_count", "is_knockout", "is_balanced",
+]
 
 
 def derive_structural_signals(
@@ -115,6 +123,7 @@ def generate_alerts(target_date: str, root: Path = ROOT) -> Path:
             market_heat.get("captured_at", ""),
             draw_config,
             app_config,
+            root,
         )
         if candidate:
             candidates.append(candidate)
@@ -159,7 +168,15 @@ def generate_alerts(target_date: str, root: Path = ROOT) -> Path:
     return path
 
 
-def _candidate_from_rows(prediction: dict, evidence: dict | None, domestic: dict, captured_at: str, draw_config: dict, app_config: dict) -> dict | None:
+def _candidate_from_rows(
+    prediction: dict,
+    evidence: dict | None,
+    domestic: dict,
+    captured_at: str,
+    draw_config: dict,
+    app_config: dict,
+    root: Path = ROOT,
+) -> dict | None:
     if not evidence:
         return None
     match_id = str(prediction.get("match_id") or "")
@@ -173,16 +190,35 @@ def _candidate_from_rows(prediction: dict, evidence: dict | None, domestic: dict
     except (KeyError, TypeError, ValueError):
         return None
     fair = fair_probabilities(*odds)
+    stage = str(prediction.get("stage", ""))
+    knockout_stages = {
+        str(value).casefold() for value in app_config.get("knockout_stages", [])
+    }
+    features = {
+        "base_draw_probability": model_probabilities[1],
+        "market_draw_probability": fair[1],
+        "favorite_probability": max(model_probabilities[0], model_probabilities[2]),
+        "win_probability_gap": abs(model_probabilities[0] - model_probabilities[2]),
+        "xg_total": xg_a + xg_b,
+        "favorite_movement": _number(evidence.get("favorite_movement")) or 0.0,
+        "regional_gap": _number(evidence.get("regional_gap")) or 0.0,
+        "source_count": len(market_sources),
+        "is_knockout": int(stage.casefold() in knockout_stages),
+        "is_balanced": int(
+            abs(model_probabilities[0] - model_probabilities[2])
+            <= float(draw_config.get("balanced_max_win_gap", 0.10))
+        ),
+    }
+    _capture_feature_snapshot(
+        root,
+        prediction,
+        evidence,
+        captured_at,
+        odds[1],
+        features,
+    )
     calibrated_draw_probability = _calibrated_probability(
-        {
-            "base_draw_probability": model_probabilities[1],
-            "market_draw_probability": fair[1],
-            "xg_total": xg_a + xg_b,
-            "favorite_movement": _number(evidence.get("favorite_movement")),
-            "regional_gap": _number(evidence.get("regional_gap")),
-            "source_count": len(market_sources),
-        },
-        model_probabilities[1],
+        features, model_probabilities[1], root=root
     )
     signals = derive_structural_signals(
         prediction.get("stage", ""), xg_a, xg_b, odds, model_probabilities,
@@ -279,13 +315,83 @@ def _domestic_odds(domestic: dict, match_id: str) -> tuple[float, float, float] 
     return odds if all(value > 0 for value in odds) else None
 
 
-def _calibrated_probability(features: dict, fallback: float) -> float:
+def _calibrated_probability(features: dict, fallback: float, root: Path = ROOT) -> float:
     try:
         predictor = importlib.import_module("draw_model_learning").predict_draw_probability
-        probability = float(predictor(features))
+        probability = float(predictor(features, root=root))
         return probability if 0 < probability < 1 else fallback
     except Exception:
         return fallback
+
+
+def _capture_feature_snapshot(
+    root: Path,
+    prediction: dict,
+    evidence: dict,
+    captured_at: str,
+    domestic_draw_odds: float,
+    features: dict,
+) -> Path | None:
+    captured = _timestamp(captured_at)
+    kickoff = _timestamp(evidence.get("kickoff_at"))
+    if captured is None or kickoff is None or captured > kickoff:
+        return None
+    if list(features) != DRAW_MODEL_FEATURES:
+        return None
+    payload = {
+        "snapshot_schema_version": 1,
+        "date": str(prediction.get("date") or ""),
+        "match_id": str(prediction.get("match_id") or ""),
+        "team_a": str(prediction.get("team_a") or ""),
+        "team_b": str(prediction.get("team_b") or ""),
+        "stage": str(prediction.get("stage") or ""),
+        "captured_at": captured_at,
+        "kickoff_at": str(evidence.get("kickoff_at") or ""),
+        "domestic_draw_odds": float(domestic_draw_odds),
+        "features": features,
+    }
+    if not all(payload[name] for name in ("date", "match_id", "team_a", "team_b")):
+        return None
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+    timestamp = captured.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(root) / "data" / "draw_feature_snapshots" / f"{timestamp}-{digest}.json"
+    _atomic_create_json(path, payload)
+    return path
+
+
+def _atomic_create_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _timestamp(value) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _quarter_kelly_stake(probability: float, odds: float, minimum: int, maximum: int, bankroll: int) -> int:

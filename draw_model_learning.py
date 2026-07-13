@@ -1,6 +1,7 @@
 """Chronological champion/challenger learning for draw probabilities."""
 
 import argparse
+import copy
 import csv
 import hashlib
 import json
@@ -8,7 +9,7 @@ import math
 import os
 import sys
 import tempfile
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import joblib
@@ -34,10 +35,26 @@ FEATURES = [
     "is_balanced",
 ]
 SMALL_SAMPLE_FEATURES = FEATURES[:2]
-SAMPLE_FIELDS = ["date", "match_id", "team_a", "team_b", "stage", "outcome", *FEATURES]
+SAMPLE_FIELDS = [
+    "date",
+    "match_id",
+    "team_a",
+    "team_b",
+    "stage",
+    "captured_at",
+    "kickoff_at",
+    "snapshot_path",
+    "domestic_draw_odds",
+    "closing_market_draw_probability",
+    "outcome",
+    *FEATURES,
+]
 ARTIFACT_SCHEMA_VERSION = 1
 REGISTRY_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 1
 MIN_FULL_FEATURE_SAMPLES = 200
+MIN_SHADOW_SAMPLES = 200
+MIN_SHADOW_BETS = 100
 TRAINING_INTERVAL_DAYS = 7
 WEIGHT_HALF_LIFE_DAYS = 180
 
@@ -51,11 +68,13 @@ def chronological_splits(dates: list[date], n_splits: int):
 def promotion_decision(challenger: dict, champion: dict) -> bool:
     return all((
         challenger.get("shadow_days", 0) >= 28,
-        challenger.get("sample_count", 0) >= 200,
-        challenger.get("bet_count", 0) >= 100,
+        challenger.get("sample_count", 0) >= MIN_SHADOW_SAMPLES,
+        challenger.get("bet_count", 0) >= MIN_SHADOW_BETS,
         challenger.get("brier_improvement", 0) >= 0.02,
+        challenger.get("log_loss_improvement", 0) >= 0.02,
         challenger.get("brier_skill", 0) > 0,
-        challenger.get("clv", 0) > 0,
+        challenger.get("clv") is not None,
+        (challenger.get("clv") or 0) > 0,
         challenger.get("roi", 0) > 0,
         challenger.get("max_drawdown", float("inf")) <= champion.get("max_drawdown", float("inf")),
     ))
@@ -87,6 +106,7 @@ def league_pause_states(rows: list[dict]) -> dict:
 
     states = {}
     for stage, settled in grouped.items():
+        settled.sort(key=lambda item: _league_sort_key(item[0]))
         stake = sum(_number(row.get("hypothetical_stake")) or 0.0 for row, _, _ in settled)
         profit = sum(_number(row.get("hypothetical_profit")) or 0.0 for row, _, _ in settled)
         roi = profit / stake if stake else 0.0
@@ -116,18 +136,18 @@ def predict_draw_probability(features: dict, *, root: Path = ROOT) -> float:
     root = Path(root)
     try:
         registry = _read_registry(root / "output" / "draw_model_registry.json")
+        if registry.get("schema_version") != REGISTRY_SCHEMA_VERSION:
+            raise ValueError("unsupported draw model registry schema")
         champion = registry.get("champion")
         if not isinstance(champion, dict):
             return fallback
-        artifact_path = root / champion["artifact"]
-        artifact = _load_artifact(artifact_path)
-        feature_order = artifact["feature_order"]
-        values = [[_feature_value(features, name, fallback) for name in feature_order]]
+        artifact = _load_registry_artifact(root, champion)
+        values = [_required_feature_vector(features, artifact["feature_order"])]
         probability = float(artifact["model"].predict_proba(values)[0][1])
         if not math.isfinite(probability):
             return fallback
         return min(0.70, max(0.03, probability))
-    except (OSError, ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
+    except Exception:
         return fallback
 
 
@@ -139,70 +159,56 @@ def build_training_samples(root: Path = ROOT, as_of: date | None = None) -> list
         (str(row.get("date", "")), str(row.get("team_a", "")), str(row.get("team_b", ""))): row
         for row in results
     }
-    odds_cache = {}
-    evidence_cache = {}
-    config = _read_json(root / "config.json", {})
-    knockout_stages = {str(value).casefold() for value in config.get("knockout_stages", [])}
-    samples = []
-    seen = set()
+    snapshots = {}
+    snapshot_dir = root / "data" / "draw_feature_snapshots"
+    for path in sorted(snapshot_dir.glob("*.json")) if snapshot_dir.exists() else []:
+        snapshot = _valid_snapshot(path, root, cutoff)
+        if snapshot is None:
+            continue
+        key = (
+            snapshot["date"],
+            snapshot["team_a"],
+            snapshot["team_b"],
+            snapshot["match_id"],
+        )
+        snapshots.setdefault(key, []).append(snapshot)
 
-    for path in sorted((root / "output").glob("predictions_*.csv")):
-        for prediction in _read_csv(path):
-            target_date = _parse_date(prediction.get("date"))
-            if target_date is None or target_date > cutoff:
-                continue
-            key = (
-                target_date.isoformat(),
-                str(prediction.get("team_a", "")),
-                str(prediction.get("team_b", "")),
-            )
-            result = result_by_match.get(key)
-            if result is None:
-                continue
-            home_goals = _goal(result.get("home_goals"))
-            away_goals = _goal(result.get("away_goals"))
-            if home_goals is None or away_goals is None:
-                continue
-            sample_key = (*key, str(prediction.get("match_id", "")))
-            if sample_key in seen:
-                continue
-            numeric = _prediction_numbers(prediction)
-            if numeric is None:
-                continue
-            seen.add(sample_key)
-            p_a, p_draw, p_b, xg_a, xg_b = numeric
-            odds = odds_cache.setdefault(
-                target_date.isoformat(),
-                _read_json(root / "data" / f"sporttery_odds_{target_date.isoformat()}.json", {}),
-            )
-            market_probability = _market_draw_probability(
-                odds, str(prediction.get("match_id", ""))
-            )
-            evidence_by_match = evidence_cache.setdefault(
-                target_date.isoformat(),
-                _market_evidence(root, target_date),
-            )
-            evidence = evidence_by_match.get(str(prediction.get("match_id", "")), {})
-            stage = str(prediction.get("stage", ""))
-            samples.append({
-                "date": target_date.isoformat(),
-                "match_id": str(prediction.get("match_id", "")),
-                "team_a": key[1],
-                "team_b": key[2],
-                "stage": stage,
-                "outcome": int(home_goals == away_goals),
-                "base_draw_probability": p_draw,
-                "market_draw_probability": market_probability if market_probability is not None else p_draw,
-                "favorite_probability": max(p_a, p_b),
-                "win_probability_gap": abs(p_a - p_b),
-                "xg_total": xg_a + xg_b,
-                "favorite_movement": _number(evidence.get("favorite_movement")) or 0.0,
-                "regional_gap": _number(evidence.get("regional_gap")) or 0.0,
-                "source_count": _source_count(evidence),
-                "is_knockout": int(stage.casefold() in knockout_stages),
-                "is_balanced": int(abs(p_a - p_b) <= 0.10),
-            })
-    samples.sort(key=lambda row: (row["date"], row["match_id"], row["team_a"], row["team_b"]))
+    samples = []
+    for key, captures in snapshots.items():
+        result = result_by_match.get(key[:3])
+        if result is None:
+            continue
+        home_goals = _goal(result.get("home_goals"))
+        away_goals = _goal(result.get("away_goals"))
+        if home_goals is None or away_goals is None:
+            continue
+        captures.sort(key=lambda item: (item["captured_time"], item["snapshot_path"]))
+        entry = captures[0]
+        closing = captures[-1]
+        row = {
+            "date": entry["date"],
+            "match_id": entry["match_id"],
+            "team_a": entry["team_a"],
+            "team_b": entry["team_b"],
+            "stage": entry["stage"],
+            "captured_at": entry["captured_at"],
+            "kickoff_at": entry["kickoff_at"],
+            "snapshot_path": entry["snapshot_path"],
+            "domestic_draw_odds": entry["domestic_draw_odds"],
+            "closing_market_draw_probability": closing["features"]["market_draw_probability"],
+            "outcome": int(home_goals == away_goals),
+        }
+        row.update(entry["features"])
+        samples.append(row)
+    samples.sort(
+        key=lambda row: (
+            row["date"],
+            row["captured_at"],
+            row["match_id"],
+            row["team_a"],
+            row["team_b"],
+        )
+    )
     return samples
 
 
@@ -218,7 +224,8 @@ def update_draw_model(
     model_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     registry_path = output_dir / "draw_model_registry.json"
-    registry = _load_or_initialize_registry(registry_path)
+    original = _load_or_initialize_registry(registry_path)
+    registry = copy.deepcopy(original)
 
     try:
         samples = build_training_samples(root, as_of=current_date)
@@ -235,14 +242,15 @@ def update_draw_model(
             and _training_is_due(registry, current_date, force_train)
         ):
             artifact = _train_artifact(samples, as_of=current_date)
-            challenger_path = model_dir / "draw_challenger.joblib"
-            _atomic_dump_artifact(artifact, challenger_path)
+            challenger_path = model_dir / f"{artifact['metadata']['version']}.joblib"
+            _persist_immutable_artifact(artifact, challenger_path)
             registry["challenger"] = _challenger_entry(
-                artifact, root, challenger_path, samples, current_date
+                artifact, root, challenger_path, current_date
             )
             registry["last_training_date"] = current_date.isoformat()
             registry["last_training_error"] = None
     except Exception as error:
+        registry = copy.deepcopy(original)
         registry["last_training_error"] = f"{type(error).__name__}: {error}"
 
     registry["schema_version"] = REGISTRY_SCHEMA_VERSION
@@ -269,13 +277,16 @@ def _train_artifact(rows: list[dict], as_of: date) -> dict:
     if len(set(outcomes.tolist())) < 2:
         raise ValueError("training samples must contain both draw and non-draw outcomes")
     weights = _sample_weights(rows, as_of)
-    fold_metrics = _cross_validation_metrics(
-        rows, x_values, outcomes, weights, feature_order, model_kind
-    )
+    fold_metrics = _cross_validation_metrics(rows, x_values, outcomes, weights, model_kind)
     model = _new_model(model_kind)
     _fit_model(model, x_values, outcomes, weights, model_kind)
     digest_input = [
-        [row.get("date"), row.get("match_id"), row.get("outcome"), *[row.get(name) for name in feature_order]]
+        [
+            row.get("date"),
+            row.get("match_id"),
+            row.get("outcome"),
+            *[row.get(name) for name in feature_order],
+        ]
         for row in rows
     ]
     digest = hashlib.sha256(
@@ -297,7 +308,7 @@ def _train_artifact(rows: list[dict], as_of: date) -> dict:
     }
 
 
-def _cross_validation_metrics(rows, x_values, outcomes, weights, feature_order, model_kind):
+def _cross_validation_metrics(rows, x_values, outcomes, weights, model_kind):
     if len(rows) < 3:
         return []
     metrics = []
@@ -331,7 +342,9 @@ def _cross_validation_metrics(rows, x_values, outcomes, weights, feature_order, 
 def _new_model(model_kind):
     logistic = LogisticRegression(C=0.5, max_iter=1000, random_state=42)
     if model_kind == "full_feature_logistic":
-        return Pipeline([("standardscaler", StandardScaler()), ("logisticregression", logistic)])
+        return Pipeline(
+            [("standardscaler", StandardScaler()), ("logisticregression", logistic)]
+        )
     return logistic
 
 
@@ -355,52 +368,56 @@ def _advance_challenger(root, registry, samples, current_date):
     if not isinstance(challenger, dict):
         return False
     created_on = _parse_date(challenger.get("created_on"))
-    challenger["shadow_days"] = max(0, (current_date - created_on).days) if created_on else 0
-    shadow_start = created_on or current_date
-    artifact_path = _registry_artifact_path(root, challenger)
-    try:
-        artifact = _load_artifact(artifact_path)
-    except (OSError, ValueError, TypeError, KeyError):
-        registry["last_training_error"] = "Invalid active challenger artifact"
-        registry["challenger"] = None
-        return True
-
+    if created_on is None:
+        registry["last_training_error"] = "Active challenger has no valid creation date"
+        return False
+    challenger["shadow_days"] = max(0, (current_date - created_on).days)
+    artifact = _load_registry_artifact(root, challenger)
+    shadow_start = _challenger_start(challenger, created_on)
     shadow_samples = [
         row
         for row in samples
-        if _parse_date(row.get("date")) is not None
-        and _parse_date(row.get("date")) > shadow_start
+        if (_timestamp(row.get("captured_at")) or _date_start(_parse_date(row.get("date"))))
+        > shadow_start
     ]
-    challenger.update(_shadow_metrics(artifact, shadow_samples, root, since=shadow_start))
-    if promotion_decision(challenger, registry.get("champion") or {}):
+    reference_artifact = None
+    champion = registry.get("champion")
+    if isinstance(champion, dict):
+        reference_artifact = _load_registry_artifact(root, champion)
+    challenger.update(
+        _shadow_metrics(
+            artifact,
+            shadow_samples,
+            root,
+            since=created_on,
+            reference_artifact=reference_artifact,
+        )
+    )
+    if challenger["shadow_days"] < 28:
+        return False
+    if (
+        challenger.get("sample_count", 0) < MIN_SHADOW_SAMPLES
+        or challenger.get("bet_count", 0) < MIN_SHADOW_BETS
+    ):
+        return False
+    if promotion_decision(challenger, champion or {}):
         _promote_challenger(root, registry, artifact, challenger, current_date)
         return True
-    if challenger["shadow_days"] >= 28:
-        registry["last_model_event"] = {
-            "type": "rejection",
-            "version": challenger.get("version"),
-            "date": current_date.isoformat(),
-        }
-        registry["challenger"] = None
-        return True
-    return False
+    registry["last_model_event"] = {
+        "type": "rejection",
+        "version": challenger.get("version"),
+        "date": current_date.isoformat(),
+    }
+    registry["challenger"] = None
+    return True
 
 
 def _promote_challenger(root, registry, artifact, challenger, current_date):
-    champion_path = root / "data" / "models" / "draw_champion.joblib"
-    previous_path = root / "data" / "models" / "draw_previous_champion.joblib"
-    old_champion = registry.get("champion")
-    if isinstance(old_champion, dict):
-        old_artifact = _load_artifact(_registry_artifact_path(root, old_champion))
-        _atomic_dump_artifact(old_artifact, previous_path)
-        registry["previous_champion"] = {
-            **old_champion,
-            "artifact": _relative_path(root, previous_path),
-        }
-    _atomic_dump_artifact(artifact, champion_path)
+    _validate_artifact(artifact, challenger)
+    old_champion = copy.deepcopy(registry.get("champion"))
+    registry["previous_champion"] = old_champion
     registry["champion"] = {
-        **challenger,
-        "artifact": _relative_path(root, champion_path),
+        **copy.deepcopy(challenger),
         "promoted_on": current_date.isoformat(),
     }
     registry["challenger"] = None
@@ -416,21 +433,23 @@ def _rollback_if_needed(root, registry, samples, current_date):
     previous = registry.get("previous_champion")
     if not isinstance(champion, dict) or not isinstance(previous, dict) or len(samples) < 50:
         return
-    current_artifact = _load_artifact(_registry_artifact_path(root, champion))
-    previous_artifact = _load_artifact(_registry_artifact_path(root, previous))
+    current_artifact = _load_registry_artifact(root, champion)
+    previous_artifact = _load_registry_artifact(root, previous)
     latest = samples[-50:]
     current_metrics = _artifact_metrics(current_artifact, latest)
     previous_metrics = _artifact_metrics(previous_artifact, latest)
-    champion["recent_50"] = current_metrics
-    previous["recent_50"] = previous_metrics
     if not rollback_decision(current_metrics, previous_metrics):
+        champion["recent_50"] = current_metrics
+        previous["recent_50"] = previous_metrics
         return
-    champion_path = root / "data" / "models" / "draw_champion.joblib"
-    previous_path = root / "data" / "models" / "draw_previous_champion.joblib"
-    _atomic_dump_artifact(previous_artifact, champion_path)
-    _atomic_dump_artifact(current_artifact, previous_path)
-    registry["champion"] = {**previous, "artifact": _relative_path(root, champion_path)}
-    registry["previous_champion"] = {**champion, "artifact": _relative_path(root, previous_path)}
+    registry["champion"] = {
+        **copy.deepcopy(previous),
+        "recent_50": previous_metrics,
+    }
+    registry["previous_champion"] = {
+        **copy.deepcopy(champion),
+        "recent_50": current_metrics,
+    }
     registry["last_model_event"] = {
         "type": "rollback",
         "from_version": champion.get("version"),
@@ -441,61 +460,133 @@ def _rollback_if_needed(root, registry, samples, current_date):
     }
 
 
-def _challenger_entry(artifact, root, path, samples, current_date):
+def _challenger_entry(artifact, root, path, current_date):
     metadata = artifact["metadata"]
-    entry = {
+    return {
         "version": metadata["version"],
         "artifact": _relative_path(root, path),
-        "feature_order": artifact["feature_order"],
+        "feature_order": list(artifact["feature_order"]),
         "model_kind": metadata["model_kind"],
         "created_on": current_date.isoformat(),
+        "created_at": f"{current_date.isoformat()}T23:59:59.999999+00:00",
         "shadow_days": 0,
-        "sample_count": len(samples),
+        "sample_count": 0,
+        "bet_count": 0,
         "fold_metrics": metadata["fold_metrics"],
+        "brier_improvement": 0.0,
+        "log_loss_improvement": 0.0,
+        "brier_skill": 0.0,
+        "clv": None,
+        "roi": 0.0,
+        "max_drawdown": 0.0,
     }
-    entry.update(_shadow_metrics(artifact, [], root, since=current_date))
-    return entry
 
 
-def _shadow_metrics(artifact, samples, root, since):
-    metrics = _artifact_metrics(artifact, samples) if samples else {}
-    base_brier = _probability_brier(samples, "base_draw_probability")
-    market_brier = _probability_brier(samples, "market_draw_probability")
-    model_brier = metrics.get("brier")
-    ledger = [
-        row
-        for row in _read_csv(root / "output" / "draw_alert_ledger.csv")
-        if _binary_outcome(row.get("outcome")) is not None
-        and _parse_date(row.get("date")) is not None
-        and _parse_date(row.get("date")) > since
-    ]
-    stakes = [_number(row.get("hypothetical_stake")) or 0.0 for row in ledger]
-    profits = [_number(row.get("hypothetical_profit")) or 0.0 for row in ledger]
-    clv_values = [value for value in (_number(row.get("clv")) for row in ledger) if value is not None]
+def _shadow_metrics(
+    artifact,
+    samples,
+    root,
+    since,
+    reference_artifact=None,
+):
+    if reference_artifact is None:
+        try:
+            registry = _read_registry(Path(root) / "output" / "draw_model_registry.json")
+            champion = registry.get("champion")
+            if isinstance(champion, dict):
+                reference_artifact = _load_registry_artifact(Path(root), champion)
+        except Exception:
+            reference_artifact = None
+    probabilities = _artifact_probabilities(artifact, samples)
+    outcomes = [int(row["outcome"]) for row in samples]
+    reference_probabilities = (
+        _artifact_probabilities(reference_artifact, samples)
+        if reference_artifact is not None
+        else [float(row["base_draw_probability"]) for row in samples]
+    )
+    market_probabilities = [float(row["market_draw_probability"]) for row in samples]
+    model_metrics = _probability_metrics(outcomes, probabilities)
+    reference_metrics = _probability_metrics(outcomes, reference_probabilities)
+    market_metrics = _probability_metrics(outcomes, market_probabilities)
+
+    config = _read_json(Path(root) / "betting_config.json", {}).get("draw_alert", {})
+    minimum_probability = float(config.get("min_draw_probability", 0.27))
+    minimum_edge = float(config.get("min_draw_edge", 0.04))
+    minimum_ev = float(config.get("min_expected_value", 1.05))
+    maximum_xg = float(config.get("max_xg_total", 2.5))
+    stake = float(config.get("hypothetical_stake", 10))
+    profits = []
+    clv_values = []
+    for row, probability in zip(samples, probabilities):
+        market = _number(row.get("market_draw_probability"))
+        odds = _number(row.get("domestic_draw_odds"))
+        xg_total = _number(row.get("xg_total"))
+        if market is None or odds is None or odds <= 1 or xg_total is None:
+            continue
+        if not (
+            probability >= minimum_probability
+            and probability - market >= minimum_edge
+            and probability * odds >= minimum_ev
+            and xg_total <= maximum_xg
+        ):
+            continue
+        profits.append(stake * (odds - 1) if int(row["outcome"]) else -stake)
+        closing = _number(row.get("closing_market_draw_probability"))
+        if closing is not None:
+            clv_values.append(closing - market)
+
+    model_brier = model_metrics.get("brier")
+    model_log_loss = model_metrics.get("log_loss")
+    reference_brier = reference_metrics.get("brier")
+    reference_log_loss = reference_metrics.get("log_loss")
+    market_brier = market_metrics.get("brier")
+    total_stake = stake * len(profits)
     return {
-        **metrics,
+        **model_metrics,
         "sample_count": len(samples),
-        "bet_count": len(ledger),
-        "brier_improvement": ((base_brier - model_brier) / base_brier) if base_brier and model_brier is not None else 0.0,
-        "brier_skill": (1.0 - model_brier / market_brier) if market_brier and model_brier is not None else 0.0,
-        "clv": sum(clv_values) / len(clv_values) if clv_values else 0.0,
-        "roi": sum(profits) / sum(stakes) if sum(stakes) else 0.0,
+        "bet_count": len(profits),
+        "reference_brier": reference_brier,
+        "reference_log_loss": reference_log_loss,
+        "market_brier": market_brier,
+        "brier_improvement": _relative_improvement(reference_brier, model_brier),
+        "log_loss_improvement": _relative_improvement(reference_log_loss, model_log_loss),
+        "brier_skill": _relative_improvement(market_brier, model_brier),
+        "clv": sum(clv_values) / len(clv_values) if clv_values else None,
+        "roi": sum(profits) / total_stake if total_stake else 0.0,
         "max_drawdown": _max_drawdown(profits),
     }
 
 
 def _artifact_metrics(artifact, rows):
-    if not rows:
-        return {}
-    feature_order = artifact["feature_order"]
-    values = [[_feature_value(row, name, float(row["base_draw_probability"])) for name in feature_order] for row in rows]
+    probabilities = _artifact_probabilities(artifact, rows)
     outcomes = [int(row["outcome"]) for row in rows]
+    return _probability_metrics(outcomes, probabilities)
+
+
+def _artifact_probabilities(artifact, rows):
+    if not rows:
+        return []
+    values = [
+        _required_feature_vector(row, artifact["feature_order"])
+        for row in rows
+    ]
     probabilities = artifact["model"].predict_proba(values)
-    probabilities = [float(row[1]) for row in probabilities]
+    return [min(0.70, max(0.03, float(row[1]))) for row in probabilities]
+
+
+def _probability_metrics(outcomes, probabilities):
+    if not outcomes:
+        return {}
     return {
         "brier": float(brier_score_loss(outcomes, probabilities)),
         "log_loss": float(log_loss(outcomes, probabilities, labels=[0, 1])),
     }
+
+
+def _relative_improvement(reference, candidate):
+    if reference is None or candidate is None or reference <= 0:
+        return 0.0
+    return (reference - candidate) / reference
 
 
 def _training_is_due(registry, current_date, force_train):
@@ -519,6 +610,8 @@ def _load_or_initialize_registry(path):
     registry = _read_registry(path)
     if not isinstance(registry, dict):
         raise ValueError("draw model registry must be a JSON object")
+    if registry.get("schema_version") != REGISTRY_SCHEMA_VERSION:
+        raise ValueError("unsupported draw model registry schema")
     registry.setdefault("champion", None)
     registry.setdefault("challenger", None)
     registry.setdefault("previous_champion", None)
@@ -526,6 +619,30 @@ def _load_or_initialize_registry(path):
     registry.setdefault("last_training_date", None)
     registry.setdefault("last_training_error", None)
     return registry
+
+
+def _persist_immutable_artifact(artifact, path):
+    path = Path(path)
+    entry = {
+        "version": artifact["metadata"]["version"],
+        "artifact": path.name,
+        "feature_order": artifact["feature_order"],
+        "model_kind": artifact["metadata"]["model_kind"],
+    }
+    if path.exists():
+        _validate_artifact(_load_artifact(path), entry)
+        return
+    temporary = _temporary_path(path)
+    try:
+        joblib.dump(artifact, temporary)
+        _validate_artifact(_load_artifact(temporary), entry)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
+    _validate_artifact(_load_artifact(path), entry)
 
 
 def _atomic_dump_artifact(artifact, path):
@@ -576,81 +693,199 @@ def _temporary_path(path):
     return Path(name)
 
 
+def _load_registry_artifact(root, entry):
+    path = _registry_artifact_path(root, entry)
+    artifact = _load_artifact(path)
+    _validate_artifact(artifact, entry)
+    return artifact
+
+
 def _load_artifact(path):
-    artifact = joblib.load(path)
+    return joblib.load(path)
+
+
+def _validate_artifact(artifact, entry=None):
     if not isinstance(artifact, dict):
         raise ValueError("model artifact must be a dictionary")
     if artifact.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
         raise ValueError("unsupported model artifact schema")
     feature_order = artifact.get("feature_order")
-    if not isinstance(feature_order, list) or not feature_order:
-        raise ValueError("model artifact has no feature order")
-    if not hasattr(artifact.get("model"), "predict_proba"):
-        raise ValueError("model artifact cannot predict probabilities")
+    if feature_order == SMALL_SAMPLE_FEATURES:
+        expected_kind = "sigmoid_calibrator"
+    elif feature_order == FEATURES:
+        expected_kind = "full_feature_logistic"
+    else:
+        raise ValueError("model artifact feature order is not allowed")
     metadata = artifact.get("metadata")
     if not isinstance(metadata, dict) or not metadata.get("version"):
         raise ValueError("model artifact has no version metadata")
+    if metadata.get("model_kind") != expected_kind:
+        raise ValueError("model artifact kind does not match its feature order")
+    model = artifact.get("model")
+    if not callable(getattr(model, "predict_proba", None)):
+        raise ValueError("model artifact cannot predict probabilities")
+    feature_count = getattr(model, "n_features_in_", None)
+    if feature_count is None or int(feature_count) != len(feature_order):
+        raise ValueError("model artifact feature count does not match feature order")
+    if entry is not None:
+        if entry.get("version") != metadata["version"]:
+            raise ValueError("registry and artifact versions differ")
+        if entry.get("feature_order") != feature_order:
+            raise ValueError("registry and artifact feature orders differ")
+        if entry.get("model_kind") != expected_kind:
+            raise ValueError("registry and artifact model kinds differ")
     return artifact
 
 
-def _market_evidence(root, target_date):
-    payload = _read_json(root / "data" / f"market_heat_{target_date.isoformat()}.json", {})
-    return {
-        str(row.get("match_id", "")): row
-        for row in payload.get("matches", [])
-        if isinstance(row, dict) and row.get("match_id") not in (None, "")
-    }
+def _registry_artifact_path(root, entry):
+    raw = entry.get("artifact")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("registry artifact path is missing")
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("registry artifact path must be relative and non-escaping")
+    model_root = (Path(root) / "data" / "models").resolve()
+    candidate = (Path(root) / relative).resolve(strict=True)
+    try:
+        candidate.relative_to(model_root)
+    except ValueError as error:
+        raise ValueError("registry artifact path escapes data/models") from error
+    if candidate == model_root or candidate.suffix != ".joblib":
+        raise ValueError("registry artifact path must name a joblib file")
+    return candidate
 
 
-def _source_count(evidence):
-    sources = evidence.get("sources", {}) if isinstance(evidence, dict) else {}
-    if not isinstance(sources, dict):
-        return 0
-    return sum(
-        1
-        for record in sources.values()
-        if isinstance(record, dict)
-        and record.get("market_type") == "win_draw_loss"
-        and _number(record.get("settlement_minutes")) == 90
-        and record.get("includes_extra_time") is False
+def _required_feature_vector(features, feature_order):
+    values = []
+    for name in feature_order:
+        if name not in features:
+            raise ValueError(f"required model feature is missing: {name}")
+        value = _number(features[name])
+        if value is None:
+            raise ValueError(f"required model feature is invalid: {name}")
+        values.append(value)
+    return values
+
+
+def _valid_snapshot(path, root, cutoff):
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("snapshot_schema_version") != SNAPSHOT_SCHEMA_VERSION:
+            return None
+        target_date = _parse_date(payload.get("date"))
+        captured_at = _timestamp(payload.get("captured_at"))
+        kickoff_at = _timestamp(payload.get("kickoff_at"))
+        if (
+            target_date is None
+            or target_date > cutoff
+            or captured_at is None
+            or kickoff_at is None
+            or captured_at > kickoff_at
+        ):
+            return None
+        identity = [str(payload.get(name) or "") for name in ("match_id", "team_a", "team_b")]
+        if any(not value for value in identity):
+            return None
+        features = payload.get("features")
+        if not isinstance(features, dict):
+            return None
+        normalized_features = {
+            name: _number(features.get(name)) for name in FEATURES
+        }
+        if any(value is None for value in normalized_features.values()):
+            return None
+        odds = _number(payload.get("domestic_draw_odds"))
+        if odds is None or odds <= 1:
+            return None
+        return {
+            "date": target_date.isoformat(),
+            "match_id": identity[0],
+            "team_a": identity[1],
+            "team_b": identity[2],
+            "stage": str(payload.get("stage") or ""),
+            "captured_at": payload["captured_at"],
+            "kickoff_at": payload["kickoff_at"],
+            "captured_time": captured_at,
+            "domestic_draw_odds": odds,
+            "features": normalized_features,
+            "snapshot_path": path.relative_to(root).as_posix(),
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _challenger_start(challenger, created_on):
+    return _timestamp(challenger.get("created_at")) or _date_start(
+        created_on + timedelta(days=1)
     )
 
 
-def _market_draw_probability(payload, match_id):
+def _date_start(value):
+    if value is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return datetime.combine(value, time.min, tzinfo=timezone.utc)
+
+
+def _league_sort_key(row):
+    target_date = _parse_date(row.get("date"))
+    captured = _timestamp(row.get("captured_at"))
+    return (
+        _date_start(target_date),
+        captured or _date_start(target_date),
+        str(row.get("match_id") or ""),
+        str(row.get("team_a") or ""),
+        str(row.get("team_b") or ""),
+    )
+
+
+def _relative_path(root, path):
+    return Path(path).relative_to(root).as_posix()
+
+
+def _parse_date(value):
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
     try:
-        odds = payload[str(match_id)]["had"]
-        values = [float(odds[name]) for name in ("h", "d", "a")]
-        if any(value <= 0 for value in values):
-            return None
-        implied = [1.0 / value for value in values]
-        return implied[1] / sum(implied)
-    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return date.fromisoformat(value)
+    except ValueError:
         return None
 
 
-def _prediction_numbers(row):
-    values = [_number(row.get(name)) for name in ("p_a", "p_draw", "p_b", "xg_a", "xg_b")]
-    if any(value is None for value in values):
+def _timestamp(value):
+    if not isinstance(value, str) or not value:
         return None
-    p_a, p_draw, p_b, xg_a, xg_b = values
-    if not all(0 <= value <= 1 for value in (p_a, p_draw, p_b)):
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
         return None
-    return p_a, p_draw, p_b, xg_a, xg_b
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
-def _feature_value(features, name, fallback):
-    if name == "market_draw_probability":
-        return _number(features.get(name)) if _number(features.get(name)) is not None else fallback
-    value = _number(features.get(name))
-    return value if value is not None else 0.0
-
-
-def _probability_brier(rows, field):
-    if not rows:
+def _goal(value):
+    if isinstance(value, bool):
         return None
-    outcomes = [int(row["outcome"]) for row in rows]
-    probabilities = [float(row[field]) for row in rows]
-    return float(brier_score_loss(outcomes, probabilities))
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 and str(value).strip() == str(number) else None
+
+
+def _binary_outcome(value):
+    number = _number(value)
+    return int(number) if number in (0.0, 1.0) else None
+
+
+def _number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _brier_from_tuples(rows):
@@ -685,49 +920,10 @@ def _read_json(path, default):
 
 
 def _read_registry(path):
-    return json.loads(path.read_text(encoding="utf-8-sig"))
-
-
-def _relative_path(root, path):
-    return path.relative_to(root).as_posix()
-
-
-def _registry_artifact_path(root, entry):
-    return root / str(entry["artifact"])
-
-
-def _parse_date(value):
-    if isinstance(value, date):
-        return value
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def _goal(value):
-    if isinstance(value, bool):
-        return None
-    try:
-        number = int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
-    return number if number >= 0 and str(value).strip() == str(number) else None
-
-
-def _binary_outcome(value):
-    number = _number(value)
-    return int(number) if number in (0.0, 1.0) else None
-
-
-def _number(value):
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
+    registry = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(registry, dict):
+        raise ValueError("draw model registry must be a JSON object")
+    return registry
 
 
 def main(argv=None):

@@ -2,9 +2,13 @@ import csv
 import json
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import joblib
+
+from draw_model_learning import FEATURES, _train_artifact, predict_draw_probability
 from generate_draw_alert import FIELDS, _calibrated_probability, attach_stake, derive_structural_signals, generate_alerts, select_alerts
 
 
@@ -185,6 +189,115 @@ class GenerateDrawAlertTest(unittest.TestCase):
             self.assertEqual(1, len(rows))
             self.assertEqual("0", rows[0]["additional_stake"])
             self.assertEqual("observation", rows[0]["settlement_mode"])
+
+    def test_generator_captures_all_features_and_serves_real_full_feature_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "output").mkdir()
+            (root / "data" / "models").mkdir(parents=True)
+            (root / "betting_config.json").write_text(
+                (Path(__file__).resolve().parents[1] / "betting_config.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (root / "config.json").write_text(
+                json.dumps({"knockout_stages": ["quarterfinal"]}), encoding="utf-8"
+            )
+            artifact = _train_artifact(self._full_feature_samples(), as_of=date(2026, 7, 11))
+            artifact_path = root / "data" / "models" / f"{artifact['metadata']['version']}.joblib"
+            joblib.dump(artifact, artifact_path)
+            (root / "output" / "draw_model_registry.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "champion": {
+                        "version": artifact["metadata"]["version"],
+                        "artifact": artifact_path.relative_to(root).as_posix(),
+                        "feature_order": artifact["feature_order"],
+                        "model_kind": artifact["metadata"]["model_kind"],
+                    },
+                    "challenger": None,
+                    "previous_champion": None,
+                    "per_league": {},
+                }),
+                encoding="utf-8",
+            )
+            (root / "output" / "predictions_2026-07-12.csv").write_text(
+                "date,match_id,team_a,team_b,stage,xg_a,xg_b,p_a,p_draw,p_b\n"
+                "2026-07-12,001,A,B,quarterfinal,1.0,1.0,0.20,0.60,0.20\n",
+                encoding="utf-8",
+            )
+            (root / "data" / "sporttery_odds_2026-07-12.json").write_text(
+                json.dumps({"001": {"had": {"h": "3.00", "d": "4.00", "a": "3.00"}}}),
+                encoding="utf-8",
+            )
+            (root / "data" / "market_heat_2026-07-12.json").write_text(
+                json.dumps({
+                    "captured_at": "2026-07-12T10:00:00+00:00",
+                    "matches": [{
+                        "match_id": "001",
+                        "kickoff_at": "2026-07-12T12:00:00+00:00",
+                        "market_scope": "90m",
+                        "quality": "high",
+                        "favorite_movement": -0.05,
+                        "regional_gap": 0.06,
+                        "sources": {
+                            "domestic": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                            "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                        },
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            (root / "output" / "draw_alert_metrics.json").write_text(
+                json.dumps({"balanced_draw": {"promoted": False}}), encoding="utf-8"
+            )
+
+            path = generate_alerts("2026-07-12", root)
+            snapshots = list((root / "data" / "draw_feature_snapshots").glob("*.json"))
+            self.assertEqual(1, len(snapshots))
+            snapshot = json.loads(snapshots[0].read_text(encoding="utf-8"))
+            self.assertEqual(FEATURES, list(snapshot["features"]))
+            self.assertEqual(0.20, snapshot["features"]["favorite_probability"])
+            self.assertEqual(0.0, snapshot["features"]["win_probability_gap"])
+            self.assertEqual(1, snapshot["features"]["is_knockout"])
+            self.assertEqual(1, snapshot["features"]["is_balanced"])
+            expected = predict_draw_probability(snapshot["features"], root=root)
+            self.assertNotEqual(snapshot["features"]["base_draw_probability"], expected)
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(1, len(rows))
+            self.assertAlmostEqual(expected, float(rows[0]["model_draw_probability"]))
+
+            generate_alerts("2026-07-12", root)
+            self.assertEqual(
+                1, len(list((root / "data" / "draw_feature_snapshots").glob("*.json")))
+            )
+
+    @staticmethod
+    def _full_feature_samples():
+        start = date(2025, 1, 1)
+        rows = []
+        for index in range(200):
+            outcome = index % 2
+            base = 0.60 if outcome else 0.20
+            rows.append({
+                "date": (start + timedelta(days=index)).isoformat(),
+                "match_id": str(index),
+                "team_a": f"A{index}",
+                "team_b": f"B{index}",
+                "stage": "quarterfinal",
+                "outcome": outcome,
+                "base_draw_probability": base,
+                "market_draw_probability": 0.25,
+                "favorite_probability": 0.20,
+                "win_probability_gap": 0.0,
+                "xg_total": 2.0,
+                "favorite_movement": -0.05,
+                "regional_gap": 0.06,
+                "source_count": 2,
+                "is_knockout": 1,
+                "is_balanced": 1,
+            })
+        return rows
 
 
 if __name__ == "__main__":
