@@ -291,10 +291,11 @@ def render_ledger(ledger: list[dict], model_metrics: dict) -> str:
     hits = sum(1 for row in settled if row.get("status") == "命中")
     hit_rate = hits / len(settled) if settled else None
     overall = model_metrics.get("overall", {})
+    active = model_metrics.get("active_strategy", {})
     roi = overall.get("roi")
-    brier = overall.get("brier")
-    log_loss = overall.get("log_loss")
-    average_expected_return = overall.get("average_expected_return")
+    brier = active.get("brier")
+    log_loss = active.get("log_loss")
+    average_expected_return = active.get("average_expected_return")
     clv = model_metrics.get("clv", {})
     return f"""
       <section class="ledger-strip">
@@ -303,6 +304,7 @@ def render_ledger(ledger: list[dict], model_metrics: dict) -> str:
         <div><span>命中率</span><strong>{pct(hit_rate)}</strong></div>
         <div><span>累计盈亏</span><strong>{yuan(profit)}</strong></div>
         <div><span>实际回报率</span><strong>{pct(roi)}</strong></div>
+        <div><span>当前策略样本</span><strong>{active.get("count", 0)}</strong></div>
         <div><span>Brier概率误差</span><strong>{decimal(brier)}</strong></div>
         <div><span>Log Loss</span><strong>{decimal(log_loss)}</strong></div>
         <div><span>平均赔率价值</span><strong>{pct((average_expected_return - 1) if average_expected_return is not None else None)}</strong></div>
