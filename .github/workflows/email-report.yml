@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   email:
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Shanghai
@@ -25,6 +26,8 @@ jobs:
     steps:
       - name: Checkout latest report
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5

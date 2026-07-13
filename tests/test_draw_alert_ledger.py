@@ -21,6 +21,15 @@ def settled_row(**overrides):
 
 
 class DrawAlertLedgerTest(unittest.TestCase):
+    def test_cli_rejects_missing_or_unknown_arguments_without_updating(self):
+        with patch("draw_alert_ledger.update_draw_alert_ledger") as update:
+            for arguments in ([], ["--unknown"]):
+                with self.assertRaises(SystemExit) as error:
+                    main(arguments)
+                self.assertEqual(2, error.exception.code)
+
+        update.assert_not_called()
+
     def test_settle_cli_calls_ledger_update(self):
         with patch(
             "draw_alert_ledger.update_draw_alert_ledger",
