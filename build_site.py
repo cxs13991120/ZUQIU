@@ -130,26 +130,47 @@ def as_float(row: dict, key: str) -> float | None:
 
 
 def positive_amount(row: dict, key: str) -> float:
-    value = as_float(row, key) if isinstance(row, dict) else None
+    value = paid_amount(row, key)
     return value if value is not None and value > 0 else 0.0
 
 
-def standalone_draw_alert_stake(alerts: list[dict] | None) -> float:
-    return sum(
-        positive_amount(alert, "additional_stake")
-        for alert in alerts or []
-        if isinstance(alert, dict)
-        and external_text(alert.get("settlement_mode")).strip() == "standalone"
-    )
+def paid_amount(row: dict, key: str) -> float | None:
+    value = as_float(row, key) if isinstance(row, dict) else None
+    if value is None or not value.is_integer() or not 0 <= value <= 500:
+        return None
+    return value
+
+
+def standalone_draw_alert_stake(alerts: list[dict] | None) -> float | None:
+    total = 0.0
+    for alert in alerts or []:
+        if not isinstance(alert, dict):
+            return None
+        if external_text(alert.get("settlement_mode")).strip() != "standalone":
+            continue
+        value = paid_amount(alert, "additional_stake")
+        if value is None:
+            return None
+        total += value
+        if total > 500:
+            return None
+    return total
 
 
 def today_stake_totals(
     plan: list[dict] | None, alerts: list[dict] | None
-) -> tuple[float, float, float]:
-    main_stake = sum(
-        positive_amount(row, "stake") for row in plan or [] if isinstance(row, dict)
-    )
+) -> tuple[float | None, float | None, float | None]:
+    main_stake = 0.0
+    for row in plan or []:
+        value = paid_amount(row, "stake") if isinstance(row, dict) else None
+        if value is None:
+            return None, None, None
+        main_stake += value
+        if main_stake > 500:
+            return None, None, None
     draw_alert_stake = standalone_draw_alert_stake(alerts)
+    if draw_alert_stake is None or main_stake + draw_alert_stake > 500:
+        return None, None, None
     return main_stake, draw_alert_stake, main_stake + draw_alert_stake
 
 
@@ -338,6 +359,13 @@ def render_betting_plan(
     main_stake, draw_alert_stake, total_stake = today_stake_totals(
         plan, draw_alerts
     )
+    if total_stake is None:
+        return """
+        <section class="betting-section">
+          <div class="section-title"><h2>模拟投注方案</h2><span>金额数据异常</span></div>
+          <div class="empty">金额数据异常，停止新增投入。请检查方案金额后重新生成。</div>
+        </section>
+        """
     if not plan:
         if draw_alert_stake > 0:
             return f"""
@@ -517,8 +545,12 @@ def draw_alert_value(alert: dict, key: str) -> float | None:
     value = as_float(alert, key)
     if value is None:
         return None
-    if key in {"domestic_draw_odds", "expected_value", "xg_total"}:
-        return value if value > 0 else None
+    if key == "domestic_draw_odds":
+        return value if 1.01 <= value <= 100 else None
+    if key == "expected_value":
+        return value if 0 < value <= 100 else None
+    if key == "xg_total":
+        return value if 0 < value <= 10 else None
     if key in {"model_draw_probability", "market_draw_probability"}:
         return value if 0 <= value <= 1 else None
     if key == "draw_edge":
@@ -559,9 +591,11 @@ def alert_level_label(alert: dict) -> str:
 
 def alert_amount(alert: dict, settlement_mode: str) -> str:
     if settlement_mode == "linked":
-        return f"复用主方案金额 {yuan(as_float(alert, 'linked_main_stake'))}"
+        amount = paid_amount(alert, "linked_main_stake")
+        return "复用金额数据异常" if amount is None else f"复用主方案金额 {yuan(amount)}"
     if settlement_mode == "standalone":
-        return f"额外投入 {yuan(as_float(alert, 'additional_stake'))}"
+        amount = paid_amount(alert, "additional_stake")
+        return "金额数据异常，停止新增投入" if amount is None else f"额外投入 {yuan(amount)}"
     return "零新增金额"
 
 

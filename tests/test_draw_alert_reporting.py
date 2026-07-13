@@ -29,23 +29,82 @@ def multiline_evidence_source() -> tuple[str, str]:
 
 
 class DrawAlertReportingTest(unittest.TestCase):
-    def test_site_totals_only_valid_standalone_draw_alert_stakes(self):
+    def test_site_totals_include_only_valid_paid_stakes(self):
         alerts = [
             {"settlement_mode": "standalone", "additional_stake": "30"},
             {"settlement_mode": "linked", "additional_stake": "99"},
             {"settlement_mode": "observation", "additional_stake": "88"},
-            {"settlement_mode": "standalone", "additional_stake": "nan"},
-            {"settlement_mode": "standalone", "additional_stake": "inf"},
-            {"settlement_mode": "standalone", "additional_stake": "-5"},
-            {"settlement_mode": "standalone", "additional_stake": "0"},
-            {"settlement_mode": "standalone", "hypothetical_stake": "70"},
+            {"settlement_mode": "budget_capped_observation", "additional_stake": "nan"},
+            {"settlement_mode": "linked", "linked_main_stake": "inf"},
+            {"settlement_mode": "observation", "hypothetical_stake": "-5"},
         ]
 
         main, draw_alert, total = build_site.today_stake_totals(
-            [{"stake": "100"}, {"stake": "nan"}, {"stake": "-10"}], alerts
+            [{"stake": "100"}, {"stake": "0"}], alerts
         )
 
         self.assertEqual((100.0, 30.0, 130.0), (main, draw_alert, total))
+
+    def test_invalid_paid_amounts_or_combined_budget_fail_closed(self):
+        invalid_values = ("499.5", "nan", "inf", "-1", "501", "")
+        for value in invalid_values:
+            with self.subTest(source="main", value=value):
+                self.assertEqual(
+                    (None, None, None),
+                    build_site.today_stake_totals([{"stake": value}], []),
+                )
+            with self.subTest(source="alert", value=value):
+                self.assertEqual(
+                    (None, None, None),
+                    build_site.today_stake_totals(
+                        [],
+                        [{"settlement_mode": "standalone", "additional_stake": value}],
+                    ),
+                )
+
+        self.assertEqual(
+            (None, None, None),
+            build_site.today_stake_totals(
+                [{"stake": "480"}],
+                [{"settlement_mode": "standalone", "additional_stake": "30"}],
+            ),
+        )
+
+    def test_invalid_paid_amount_renders_stop_investment_warning(self):
+        html = build_site.render_betting_plan(
+            [{"stake": "499.5", "play": "胜平负"}],
+            [{"settlement_mode": "standalone", "additional_stake": "30"}],
+        )
+
+        self.assertIn("金额数据异常，停止新增投入", html)
+        self.assertNotIn("529.5", html)
+        self.assertNotIn("530元", html)
+
+    def test_draw_alert_numeric_fields_use_domain_bounds(self):
+        valid = {
+            "domestic_draw_odds": ("1.01", "100"),
+            "model_draw_probability": ("0", "1"),
+            "market_draw_probability": ("0", "1"),
+            "draw_edge": ("-1", "1"),
+            "expected_value": ("0.001", "100"),
+            "xg_total": ("0.001", "10"),
+        }
+        invalid = {
+            "domestic_draw_odds": ("1", "100.01"),
+            "model_draw_probability": ("-0.01", "1.01"),
+            "market_draw_probability": ("-0.01", "1.01"),
+            "draw_edge": ("-1.01", "1.01"),
+            "expected_value": ("0", "100.01"),
+            "xg_total": ("0", "-0.01", "10.01"),
+        }
+        for key, values in valid.items():
+            for value in values:
+                with self.subTest(key=key, value=value, valid=True):
+                    self.assertIsNotNone(build_site.draw_alert_value({key: value}, key))
+        for key, values in invalid.items():
+            for value in values:
+                with self.subTest(key=key, value=value, valid=False):
+                    self.assertIsNone(build_site.draw_alert_value({key: value}, key))
 
     def test_empty_main_plan_reports_paid_draw_alert_instead_of_no_bet(self):
         html = build_site.render_betting_plan(
@@ -206,6 +265,52 @@ class DrawAlertReportingTest(unittest.TestCase):
             self.assertIn("30 元", texts)
             self.assertIn("主方案为空，但有平局预警投入 30 元", texts)
             self.assertTrue(any("中级" in value for value in texts), texts)
+
+    def test_daily_image_fails_closed_on_invalid_paid_amounts(self):
+        class RecordingDraw:
+            def __init__(self, drawing, texts):
+                self.drawing = drawing
+                self.texts = texts
+
+            def __getattr__(self, name):
+                return getattr(self.drawing, name)
+
+            def text(self, xy, value, *args, **kwargs):
+                self.texts.append(str(value))
+                return self.drawing.text(xy, value, *args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            web = root / "web"
+            output.mkdir()
+            (output / "betting_plan_2099-01-01.csv").write_text(
+                "match,play,odds,stake,selection\nA vs B,spf,2.0,499.5,draw\n",
+                encoding="utf-8",
+            )
+            (output / "betting_ledger.csv").write_text(
+                "date,play,match,selection,stake,status,profit\n", encoding="utf-8"
+            )
+            (output / "draw_alert_2099-01-01.csv").write_text(
+                "date,rank,subtype,match,settlement_mode,additional_stake\n"
+                "2099-01-01,1,cold_draw,C vs D,standalone,30\n",
+                encoding="utf-8",
+            )
+            texts = []
+            original_draw = build_daily_image.ImageDraw.Draw
+
+            def recording_draw(image):
+                return RecordingDraw(original_draw(image), texts)
+
+            with patch.object(build_daily_image, "OUTPUT_DIR", output), patch.object(
+                build_daily_image, "WEB_DIR", web
+            ), patch.object(build_daily_image.ImageDraw, "Draw", side_effect=recording_draw):
+                build_daily_image.draw_report()
+
+            self.assertIn("停止投入", texts)
+            self.assertIn("金额数据异常，停止新增投入", texts)
+            self.assertFalse(any("529.5" in value or "530 元" in value for value in texts))
+            self.assertFalse(any("499.5" in value for value in texts))
 
     def test_empty_alert_has_neutral_copy(self):
         self.assertIn("今日无符合门槛", render_draw_alert([]))

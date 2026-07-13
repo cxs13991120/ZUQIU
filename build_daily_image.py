@@ -256,7 +256,11 @@ def draw_report() -> Path:
     metrics = all_metrics.get("overall", {})
     active_metrics = all_metrics.get("active_strategy", {})
     clv_metrics = all_metrics.get("clv", {})
-    plan_height = max(1, len(plan)) * 124
+    _, standalone_alert_stake, today_stake = today_stake_totals(
+        plan, all_draw_alerts
+    )
+    stake_data_invalid = today_stake is None
+    plan_height = max(1, 0 if stake_data_invalid else len(plan)) * 124
     ledger_height = max(1, len(ledger)) * 76
     observation_height = (58 + len(observations) * 70) if observations else 0
     height = 590 + plan_height + observation_height + ledger_height + 100 + 170 * len(draw_alerts)
@@ -278,14 +282,11 @@ def draw_report() -> Path:
     settled = [row for row in ledger if row.get("status") not in {"", "未结算"}]
     hits = sum(1 for row in settled if row.get("status") == "命中")
     profit = sum(number(row, "profit") for row in settled)
-    _, standalone_alert_stake, today_stake = today_stake_totals(
-        plan, all_draw_alerts
-    )
     brier = active_metrics.get("brier")
     roi = metrics.get("roi")
     average_clv = clv_metrics.get("average_clv")
     stats = [
-        ("今日预算", f"{today_stake:.0f} 元"),
+        ("今日预算", "停止投入" if stake_data_invalid else f"{today_stake:.0f} 元"),
         ("Brier误差", f"{brier:.3f}" if brier is not None else "-"),
         ("平均CLV", f"{average_clv * 100:+.1f}%" if average_clv is not None else "-"),
         ("实际回报率", f"{roi * 100:+.1f}%" if roi is not None else "-"),
@@ -296,13 +297,16 @@ def draw_report() -> Path:
         x = 70 + index * (card_width + 20)
         draw.rounded_rectangle((x, 230, x + card_width, 335), radius=8, fill="white", outline=line)
         draw.text((x + 18, 247), label, font=font(20), fill=muted)
-        value_color = red if label == "累计盈亏" and profit < 0 else green
+        value_color = red if (stake_data_invalid and index == 0) or (label == "累计盈亏" and profit < 0) else green
         draw.text((x + 18, 280), value, font=font(30), fill=value_color)
 
     y = 385
     draw.text((70, y), "今日投注方案", font=font(34), fill=ink)
     y += 58
-    if not plan:
+    if stake_data_invalid:
+        draw.text((75, y), "金额数据异常，停止新增投入", font=font(24), fill=red)
+        y += 124
+    elif not plan:
         empty_copy = (
             f"主方案为空，但有平局预警投入 {standalone_alert_stake:.0f} 元"
             if standalone_alert_stake > 0
