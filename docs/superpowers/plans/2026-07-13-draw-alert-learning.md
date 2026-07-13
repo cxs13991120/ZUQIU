@@ -457,16 +457,16 @@ Implement `select_alerts` and `attach_stake` with progressive gates and the test
 RANK_GATES = ((0.27, 0.04, 1.05), (0.29, 0.05, 1.07), (0.31, 0.06, 1.09), (0.33, 0.07, 1.11))
 
 
-def select_alerts(candidates: list[dict]) -> list[dict]:
+def select_alerts(candidates: list[dict], rank_gates=RANK_GATES, max_alerts: int = 4, max_per_league: int = 2) -> list[dict]:
     selected = []
     league_counts = {}
     for candidate in sorted(candidates, key=lambda item: (float(item["score"]), item["match_id"]), reverse=True):
-        if len(selected) == 4:
+        if len(selected) == max_alerts:
             break
         league = candidate.get("stage") or "未知"
-        if league_counts.get(league, 0) >= 2:
+        if league_counts.get(league, 0) >= max_per_league:
             continue
-        probability, edge, expected_value = RANK_GATES[len(selected)]
+        probability, edge, expected_value = rank_gates[len(selected)]
         if candidate["model_draw_probability"] < probability or candidate["draw_edge"] < edge or candidate["expected_value"] < expected_value:
             continue
         row = {**candidate, "rank": len(selected) + 1}
@@ -493,7 +493,7 @@ def attach_stake(alert: dict, main_plan: list[dict], existing_alerts: list[dict]
     return result
 ```
 
-Use a quarter-Kelly fraction capped to 10-30 yuan only for promoted standalone alerts, allocate in rank order, then apply both the 80-yuan alert cap and `500 - main stakes - earlier alert stakes`. Build `DrawInputs` from prediction/evidence rows, ask `draw_model_learning.predict_draw_probability()` for the calibrated value, reject missing domestic draw odds, and write an empty CSV with headers when nothing qualifies.
+Use a quarter-Kelly fraction capped to 10-30 yuan only for promoted standalone alerts, allocate in rank order, then apply both the 80-yuan alert cap and `500 - main stakes - earlier alert stakes`. Pass `rank_gates`, `max_alerts`, and `max_per_league` from `betting_config.json` into `select_alerts`. Build `DrawInputs` from prediction/evidence rows, reject missing domestic draw odds, and write an empty CSV with headers when nothing qualifies. Load `draw_model_learning.predict_draw_probability()` lazily; until Task 5 creates a valid champion model, or when model loading fails, use the existing blended `p_draw` value without interrupting generation.
 
 Derive structural signals before classification with one deterministic function: add `knockout_caution` when `stage` is in the configured knockout stages; add `low_total` when `xg_a + xg_b <= 2.35`; add `similar_strength` when the two de-vigged win probabilities differ by at most 0.10; add `underdog_resistance` when calibrated draw probability exceeds the underdog win probability and underdog non-loss probability is at least 0.35. Do not infer injuries or lineups when no timestamped source exists.
 
@@ -800,7 +800,7 @@ git commit -m "feat: show draw alerts in daily reports"
 - Create: `.github/workflows/draw-alert-refresh.yml`
 - Modify: `.github/workflows/noon-settlement.yml`
 - Modify: `.github/workflows/email-report.yml`
-- Create: `tests/test_workflow_schedule.py`
+- Modify: `tests/test_workflow_schedule.py`
 
 **Interfaces:**
 - Consumes: the scripts from Tasks 1-6.
