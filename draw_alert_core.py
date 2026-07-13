@@ -53,7 +53,7 @@ def classify_candidate(inputs: DrawInputs, config: dict) -> DrawCandidate | None
         return None
     favorite = max(fair[0], fair[2])
     win_gap = abs(fair[0] - fair[2])
-    if favorite >= config["cold_favorite_probability"] or win_gap > config["balanced_max_win_gap"]:
+    if favorite >= config["cold_favorite_probability"]:
         enough_heat = inputs.favorite_movement <= -0.04 or inputs.regional_gap >= 0.05
         enough_resistance = inputs.underdog_not_lose_probability >= 0.35 and probability > inputs.underdog_win_probability
         subtype = "cold_draw" if enough_heat and enough_resistance and len(inputs.structural_signals) >= 2 else ""

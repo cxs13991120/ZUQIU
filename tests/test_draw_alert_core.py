@@ -17,7 +17,7 @@ CFG = {
 def sample(**changes):
     values = dict(
         match_id="001", team_a="A", team_b="B", stage="quarter-final",
-        domestic_odds=(1.90, 3.60, 4.00), model_probabilities=(0.54, 0.32, 0.14),
+        domestic_odds=(1.60, 4.00, 6.00), model_probabilities=(0.54, 0.32, 0.14),
         calibrated_draw_probability=0.32, xg_total=2.10, source_count=3,
         market_scope="90m", favorite_movement=-0.06, regional_gap=0.07,
         underdog_win_probability=0.14, underdog_not_lose_probability=0.46,
@@ -38,7 +38,7 @@ class DrawAlertCoreTest(unittest.TestCase):
 
     def test_balanced_low_goal_match_is_balanced_draw(self):
         candidate = classify_candidate(sample(
-            stage="K鑱旇禌", domestic_odds=(2.70, 3.10, 2.60),
+            stage="K联赛", domestic_odds=(2.70, 3.10, 2.60),
             model_probabilities=(0.33, 0.34, 0.33), calibrated_draw_probability=0.34,
             xg_total=2.05, favorite_movement=-0.01, regional_gap=0.01,
             structural_signals=("low_total", "similar_strength"),
@@ -48,7 +48,7 @@ class DrawAlertCoreTest(unittest.TestCase):
     def test_named_balanced_regressions_use_balanced_path(self):
         for match_id in ("jeju-daejeon", "seoul-gangwon"):
             candidate = classify_candidate(sample(
-                match_id=match_id, stage="K鑱旇禌", domestic_odds=(2.70, 3.10, 2.60),
+                match_id=match_id, stage="K联赛", domestic_odds=(2.70, 3.10, 2.60),
                 model_probabilities=(0.33, 0.34, 0.33), calibrated_draw_probability=0.34,
                 xg_total=2.05, favorite_movement=-0.01, regional_gap=0.01,
                 structural_signals=("low_total", "similar_strength"),
@@ -62,6 +62,11 @@ class DrawAlertCoreTest(unittest.TestCase):
 
     def test_favorite_risk_does_not_force_a_draw(self):
         self.assertIsNone(classify_candidate(sample(calibrated_draw_probability=0.25), CFG))
+
+    def test_non_favorite_uneven_match_is_not_cold_draw(self):
+        self.assertIsNone(classify_candidate(
+            sample(domestic_odds=(1.90, 3.60, 4.00)), CFG
+        ))
 
     def test_non_90m_market_is_rejected(self):
         self.assertIsNone(classify_candidate(sample(market_scope="qualification"), CFG))

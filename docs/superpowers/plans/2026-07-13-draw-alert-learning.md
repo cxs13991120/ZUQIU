@@ -71,7 +71,7 @@ CFG = {
 def sample(**changes):
     values = dict(
         match_id="001", team_a="A", team_b="B", stage="quarter-final",
-        domestic_odds=(1.90, 3.60, 4.00), model_probabilities=(0.54, 0.32, 0.14),
+        domestic_odds=(1.60, 4.00, 6.00), model_probabilities=(0.54, 0.32, 0.14),
         calibrated_draw_probability=0.32, xg_total=2.10, source_count=3,
         market_scope="90m", favorite_movement=-0.06, regional_gap=0.07,
         underdog_win_probability=0.14, underdog_not_lose_probability=0.46,
