@@ -669,10 +669,13 @@ git commit -m "feat: settle draw alerts by subtype"
 - Create: `tests/test_draw_model_learning.py`
 - Create: `requirements.txt`
 - Create: `data/models/.gitkeep`
+- Modify: `generate_draw_alert.py`
+- Modify: `tests/test_generate_draw_alert.py`
 
 **Interfaces:**
 - Consumes: chronological prediction CSVs, results, market evidence, alert ledger, and current registry.
 - Produces: `data/draw_training_samples.csv`, `data/models/draw_champion.joblib`, `data/models/draw_challenger.joblib`, and `output/draw_model_registry.json`; exports `predict_draw_probability(features: dict) -> float`.
+- Public orchestration entry point: `update_draw_model(root: Path = ROOT, as_of: date | None = None, force_train: bool = False) -> Path`.
 
 - [ ] **Step 1: Write failing time-order and promotion tests**
 
@@ -696,7 +699,21 @@ class DrawModelLearningTest(unittest.TestCase):
     def test_all_gates_allow_promotion(self):
         challenger = {"shadow_days": 28, "sample_count": 250, "bet_count": 120, "brier_improvement": 0.03, "brier_skill": 0.02, "clv": 0.01, "roi": 0.02, "max_drawdown": 80}
         self.assertTrue(promotion_decision(challenger, {"max_drawdown": 90}))
+
+    def test_missing_champion_returns_existing_blended_probability(self):
+        self.assertEqual(0.31, predict_draw_probability({"base_draw_probability": 0.31}, root=self.temp_root))
+
+    def test_rollback_when_recent_brier_or_log_loss_worsens_two_percent(self):
+        self.assertTrue(rollback_decision({"brier": 0.204, "log_loss": 0.60}, {"brier": 0.20, "log_loss": 0.60}))
+
+    def test_only_underperforming_league_is_paused(self):
+        rows = self.league_rows("L1", count=30, negative_roi=True, worsening=True) + self.league_rows("L2", count=30, negative_roi=False, worsening=False)
+        states = league_pause_states(rows)
+        self.assertTrue(states["L1"]["paused"])
+        self.assertFalse(states["L2"]["paused"])
 ```
+
+Also add a generation regression proving that a registry entry with `per_league.<stage>.paused=true` forces that league's otherwise promoted alert to `additional_stake=0` and `settlement_mode="observation"`, while the alert remains visible and is still written for learning.
 
 - [ ] **Step 2: Verify the tests fail**
 
@@ -729,9 +746,11 @@ FEATURES = [
 
 For fewer than 200 settled all-match samples, train a sigmoid calibrator with only `base_draw_probability` and `market_draw_probability`. At 200 or more samples, train a `Pipeline([StandardScaler(), LogisticRegression(C=0.5, max_iter=1000, random_state=42)])` on all features. Use `TimeSeriesSplit` without shuffled data, save fold Brier/LogLoss and market baselines, and generate only a challenger until the four-week shadow and metric gates pass. Promotion must atomically replace the champion and retain `previous_champion` in the registry for rollback. If training fails, retain the current champion and write the error to `last_training_error`.
 
-Apply exponentially decaying sample weights while retaining every historical row. After promotion, compare the new and previous champions on the latest 50 settled all-match samples; roll back when either Brier or LogLoss is worse by at least 2%. Record per-league metrics, and after 30 samples mark only that league paused when ROI is negative and recent-ten Brier is worse than the preceding ten. A paused league can still be scored and logged but cannot publish a paid alert.
+Build `data/draw_training_samples.csv` from `output/predictions_*.csv` joined to `data/bet_results.csv` by exact date and teams. Use the prediction's already blended `p_draw` as `base_draw_probability`, the stored domestic no-vig draw probability when available as `market_draw_probability`, and `outcome=1` only for equal 90-minute goals. Never train on unresolved matches or post-match features. Write samples, registry JSON, and model replacements with a temporary file followed by `Path.replace()` so a failed run cannot corrupt the current champion.
 
-`predict_draw_probability()` must return the existing blended draw probability when no valid champion exists; otherwise load the champion and clamp its output to `[0.03, 0.70]`.
+Apply exponentially decaying sample weights while retaining every historical row. After promotion, compare the new and previous champions on the latest 50 settled all-match samples; roll back when either Brier or LogLoss is worse by at least 2% relative to the previous champion. Record per-league metrics, and after 30 samples mark only that league paused when ROI is negative and recent-ten Brier is worse than the preceding ten. A paused league can still be scored, displayed, and logged but cannot publish a paid alert; `generate_draw_alert.py` must read `output/draw_model_registry.json` and force that league's subtype metrics to unpromoted before stake attachment.
+
+`predict_draw_probability()` must return `features["base_draw_probability"]` (the existing blended draw probability) when no valid champion exists; otherwise load the champion and clamp its output to `[0.03, 0.70]`. It accepts an optional keyword-only `root` for isolated tests while remaining callable with the one-argument interface used by `generate_draw_alert.py`.
 
 Implement the tested gate helpers exactly:
 
