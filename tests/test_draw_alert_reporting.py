@@ -323,6 +323,178 @@ class DrawAlertReportingTest(unittest.TestCase):
             width = measurement.textbbox((0, 0), text, font=kwargs["font"])[2]
             self.assertLessEqual(x + width, build_daily_image.WIDTH - 70, text)
 
+    def test_website_draw_metrics_use_field_specific_validation(self):
+        invalid_alerts = [
+            {
+                "rank": "1",
+                "subtype": "cold_draw",
+                "match": "missing values",
+                "settlement_mode": "observation",
+            },
+            {
+                "rank": "2",
+                "subtype": "cold_draw",
+                "match": "non numeric values",
+                "settlement_mode": "observation",
+                "domestic_draw_odds": "not-a-number",
+                "model_draw_probability": "bad",
+                "market_draw_probability": "bad",
+                "draw_edge": "bad",
+                "expected_value": "bad",
+                "xg_total": "bad",
+            },
+            {
+                "rank": "3",
+                "subtype": "cold_draw",
+                "match": "non finite values",
+                "settlement_mode": "observation",
+                "domestic_draw_odds": "nan",
+                "model_draw_probability": "nan",
+                "market_draw_probability": "inf",
+                "draw_edge": "-inf",
+                "expected_value": "nan",
+                "xg_total": "inf",
+            },
+            {
+                "rank": "4",
+                "subtype": "cold_draw",
+                "match": "out of range values",
+                "settlement_mode": "observation",
+                "domestic_draw_odds": "0",
+                "model_draw_probability": "1.2",
+                "market_draw_probability": "-0.1",
+                "draw_edge": "1.1",
+                "expected_value": "-0.01",
+                "xg_total": "0",
+            },
+        ]
+
+        html = render_draw_alert(invalid_alerts)
+
+        labels = [
+            "\u5b98\u65b9\u5e73\u8d54",
+            "\u6a21\u578b",
+            "\u5e02\u573a",
+            "\u4f18\u52bf",
+            "\u671f\u671b\u503c",
+            "xG \u603b\u548c",
+        ]
+        for label in labels:
+            self.assertEqual(4, html.count(f"<span>{label} <strong>-</strong></span>"), label)
+
+        valid_html = render_draw_alert([
+            {
+                "rank": "1",
+                "subtype": "balanced_draw",
+                "match": "valid boundary values",
+                "settlement_mode": "observation",
+                "domestic_draw_odds": "3.60",
+                "model_draw_probability": "0",
+                "market_draw_probability": "1",
+                "draw_edge": "-1",
+                "expected_value": "0.001",
+                "xg_total": "0.001",
+            }
+        ])
+        self.assertIn("<strong>3.60</strong>", valid_html)
+        self.assertIn("<strong>0.0%</strong>", valid_html)
+        self.assertIn("<strong>100.0%</strong>", valid_html)
+        self.assertIn("<strong>-100.0%</strong>", valid_html)
+        self.assertEqual(2, valid_html.count("<strong>0.001</strong>"))
+
+        nonpositive_html = render_draw_alert([
+            {
+                "rank": "1",
+                "subtype": "balanced_draw",
+                "match": "nonpositive values",
+                "settlement_mode": "observation",
+                "domestic_draw_odds": "-2",
+                "model_draw_probability": "0.5",
+                "market_draw_probability": "0.5",
+                "draw_edge": "0",
+                "expected_value": "0",
+                "xg_total": "-0.001",
+            }
+        ])
+        for label in ("\u5b98\u65b9\u5e73\u8d54", "\u671f\u671b\u503c", "xG \u603b\u548c"):
+            self.assertIn(f"<span>{label} <strong>-</strong></span>", nonpositive_html)
+        self.assertIn("<span>\u4f18\u52bf <strong>0.0%</strong></span>", nonpositive_html)
+
+    def test_as_int_and_web_alert_ranks_handle_nonfinite_and_huge_values(self):
+        for value in ("inf", "-inf", "nan", "1e308", "1e999", "9" * 400):
+            self.assertEqual(999, build_site.as_int(value, 999), value)
+
+        html = render_draw_alert([
+            {"rank": "inf", "subtype": "cold_draw", "match": "invalid inf", "settlement_mode": "observation"},
+            {"rank": "3", "subtype": "cold_draw", "match": "valid three", "settlement_mode": "observation"},
+            {"rank": "nan", "subtype": "cold_draw", "match": "invalid nan", "settlement_mode": "observation"},
+            {"rank": "1", "subtype": "cold_draw", "match": "valid one", "settlement_mode": "observation"},
+        ])
+
+        positions = [html.index(match) for match in ("valid one", "valid three", "invalid inf", "invalid nan")]
+        self.assertEqual(sorted(positions), positions)
+        self.assertEqual(2, html.count("\u672a\u6392\u540d"))
+        self.assertNotIn("\u7b2c999\u573a", html)
+
+        huge_rank_html = render_draw_alert([
+            {"rank": "9" * 400, "subtype": "cold_draw", "match": "invalid huge", "settlement_mode": "observation"}
+        ])
+        self.assertIn("\u672a\u6392\u540d", huge_rank_html)
+
+    def test_daily_image_invalid_ranks_sort_after_valid_and_invalid_metrics_show_dash(self):
+        class RecordingDraw:
+            def __init__(self, drawing, calls):
+                self.drawing = drawing
+                self.calls = calls
+
+            def __getattr__(self, name):
+                return getattr(self.drawing, name)
+
+            def text(self, xy, text, *args, **kwargs):
+                self.calls.append((text, xy, kwargs))
+                return self.drawing.text(xy, text, *args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            web = root / "web"
+            output.mkdir()
+            (output / "betting_plan_2026-07-13.csv").write_text("match,play,odds,stake,selection\n", encoding="utf-8")
+            (output / "betting_ledger.csv").write_text("date,play,match,selection,stake,status,profit\n", encoding="utf-8")
+            (output / "draw_alert_2026-07-13.csv").write_text(
+                "date,rank,subtype,match,settlement_mode,domestic_draw_odds,model_draw_probability,market_draw_probability,draw_edge,expected_value,xg_total\n"
+                "2026-07-13,inf,cold_draw,invalid inf,observation,0,1.2,nan,1.1,-0.1,0\n"
+                "2026-07-13,2,cold_draw,valid rank,observation,not-a-number,bad,bad,bad,bad,bad\n"
+                "2026-07-13,nan,cold_draw,invalid nan,observation,inf,-0.1,2,-1.1,nan,-0.5\n",
+                encoding="utf-8",
+            )
+            calls = []
+            original_draw = build_daily_image.ImageDraw.Draw
+
+            with patch.object(build_daily_image, "OUTPUT_DIR", output), patch.object(build_daily_image, "WEB_DIR", web), patch.object(
+                build_daily_image.ImageDraw,
+                "Draw",
+                side_effect=lambda image: RecordingDraw(original_draw(image), calls),
+            ):
+                image_path = build_daily_image.draw_report()
+
+            with build_daily_image.Image.open(image_path) as image:
+                self.assertEqual((1600, 1400), image.size)
+
+        titles = [
+            text
+            for text, _, _ in calls
+            if text.startswith("\u7b2c") or text.startswith("\u672a\u6392\u540d")
+        ]
+        self.assertEqual(3, len(titles))
+        self.assertTrue(titles[0].startswith("\u7b2c2\u573a"), titles)
+        self.assertTrue(all(title.startswith("\u672a\u6392\u540d") for title in titles[1:]), titles)
+        metrics = [text for text, _, _ in calls if text.startswith("\u5b98\u65b9\u5e73\u8d54")]
+        self.assertEqual(3, len(metrics))
+        for metric in metrics:
+            for label in ("\u5b98\u65b9\u5e73\u8d54", "\u6a21\u578b", "\u5e02\u573a", "\u4f18\u52bf", "\u671f\u671b\u503c", "xG\u603b\u548c"):
+                self.assertIn(f"{label} -", metric)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 import csv
 import html
 import json
+import math
 from datetime import date, datetime
 from pathlib import Path
 
@@ -112,17 +113,22 @@ def draw_alert_key(row: dict) -> tuple[str, str, str]:
 
 
 def as_float(row: dict, key: str) -> float | None:
-    value = str(row.get(key) or "").strip()
+    raw_value = row.get(key)
+    value = "" if raw_value is None else str(raw_value).strip()
     try:
-        return float(value) if value else None
+        number = float(value) if value else None
     except (TypeError, ValueError):
         return None
+    return number if number is not None and math.isfinite(number) else None
 
 
 def as_int(value: object, default: int = 0) -> int:
     try:
-        return int(float(str(value).strip()))
-    except (TypeError, ValueError):
+        number = float(str(value).strip())
+        if not math.isfinite(number) or not number.is_integer() or abs(number) > 2_147_483_647:
+            return default
+        return int(number)
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -405,9 +411,43 @@ def evidence_source_summary(value: object) -> str:
     return "、".join(unique[:3]) if unique else "已记录来源"
 
 
+def draw_alert_value(alert: dict, key: str) -> float | None:
+    value = as_float(alert, key)
+    if value is None:
+        return None
+    if key in {"domestic_draw_odds", "expected_value", "xg_total"}:
+        return value if value > 0 else None
+    if key in {"model_draw_probability", "market_draw_probability"}:
+        return value if 0 <= value <= 1 else None
+    if key == "draw_edge":
+        return value if -1 <= value <= 1 else None
+    return None
+
+
+def format_draw_alert_odds(alert: dict) -> str:
+    if draw_alert_value(alert, "domestic_draw_odds") is None:
+        return "-"
+    return external_text(alert.get("domestic_draw_odds")).strip()
+
+
+def format_draw_alert_percentage(alert: dict, key: str) -> str:
+    value = draw_alert_value(alert, key)
+    return "-" if value is None else f"{value * 100:.1f}%"
+
+
+def format_draw_alert_decimal(alert: dict, key: str) -> str:
+    value = draw_alert_value(alert, key)
+    return "-" if value is None else f"{value:.3f}"
+
+
 def alert_rank(alert: dict) -> int:
-    rank = as_int(alert.get("rank"), 999)
-    return rank if rank > 0 else 999
+    rank = as_int(alert.get("rank"), 0)
+    return rank if 1 <= rank <= 4 else 5
+
+
+def alert_rank_label(alert: dict) -> str:
+    rank = alert_rank(alert)
+    return f"第{rank}场" if rank <= 4 else "未排名"
 
 
 def alert_amount(alert: dict, settlement_mode: str) -> str:
@@ -481,16 +521,16 @@ def render_draw_alert(alerts: list[dict], metrics: dict | None = None, registry:
         rows.append(f"""
           <article class="draw-alert-row">
             <header>
-              <span>第{alert_rank(alert)}场 · {subtype}</span>
+              <span>{alert_rank_label(alert)} · {subtype}</span>
               <strong>{escaped(alert.get("match") or "-")}</strong>
             </header>
             <div class="draw-alert-metrics">
-              <span>官方平赔 <strong>{escaped(alert.get("domestic_draw_odds") or "-")}</strong></span>
-              <span>模型 <strong>{pct(as_float(alert, "model_draw_probability"))}</strong></span>
-              <span>市场 <strong>{pct(as_float(alert, "market_draw_probability"))}</strong></span>
-              <span>优势 <strong>{pct(as_float(alert, "draw_edge"))}</strong></span>
-              <span>期望值 <strong>{decimal(as_float(alert, "expected_value"))}</strong></span>
-              <span>xG 总和 <strong>{decimal(as_float(alert, "xg_total"))}</strong></span>
+              <span>官方平赔 <strong>{escaped(format_draw_alert_odds(alert))}</strong></span>
+              <span>模型 <strong>{escaped(format_draw_alert_percentage(alert, "model_draw_probability"))}</strong></span>
+              <span>市场 <strong>{escaped(format_draw_alert_percentage(alert, "market_draw_probability"))}</strong></span>
+              <span>优势 <strong>{escaped(format_draw_alert_percentage(alert, "draw_edge"))}</strong></span>
+              <span>期望值 <strong>{escaped(format_draw_alert_decimal(alert, "expected_value"))}</strong></span>
+              <span>xG 总和 <strong>{escaped(format_draw_alert_decimal(alert, "xg_total"))}</strong></span>
             </div>
             <div class="draw-alert-detail">
               <p><span>状态</span>{state} · {alert_amount(alert, settlement_mode)}</p>

@@ -1,6 +1,5 @@
 import csv
 import json
-import math
 import textwrap
 from datetime import date, datetime
 from pathlib import Path
@@ -12,7 +11,9 @@ from build_site import (
     SETTLEMENT_LABELS,
     alert_amount,
     alert_rank,
+    alert_rank_label,
     as_int,
+    draw_alert_value,
     evidence_source_summary,
     external_text,
 )
@@ -109,16 +110,12 @@ def number(row: dict, key: str) -> float:
 
 
 def alert_number(row: dict, key: str) -> float | None:
-    try:
-        value = float(external_text(row.get(key)).strip())
-    except (TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) else None
+    return draw_alert_value(row, key)
 
 
 def alert_decimal(row: dict, key: str, *, signed: bool = False, percentage: bool = False) -> str:
     value = alert_number(row, key)
-    if value is None or (percentage and not signed and not 0 <= value <= 1) or (key == "xg_total" and value < 0):
+    if value is None:
         return "-"
     if percentage:
         return f"{value * 100:+.1f}%" if signed else f"{value * 100:.1f}%"
@@ -127,7 +124,7 @@ def alert_decimal(row: dict, key: str, *, signed: bool = False, percentage: bool
 
 def alert_odds(row: dict) -> str:
     value = alert_number(row, "domestic_draw_odds")
-    return external_text(row.get("domestic_draw_odds")).strip() if value is not None and value > 1 else "-"
+    return external_text(row.get("domestic_draw_odds")).strip() if value is not None else "-"
 
 
 def wrap(value: str, width: int) -> list[str]:
@@ -330,7 +327,7 @@ def draw_report() -> Path:
         draw.rounded_rectangle((70, y, WIDTH - 70, y + 154), radius=7, fill="white", outline=line)
         draw.text(
             (88, y + 14),
-            f"第{alert_rank(alert)}场 · {subtype}",
+            f"{alert_rank_label(alert)} · {subtype}",
             font=font(22),
             fill=gold,
         )
