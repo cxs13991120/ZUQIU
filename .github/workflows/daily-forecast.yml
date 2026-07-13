@@ -44,16 +44,34 @@ jobs:
           python -m pip install --quiet -r requirements.txt
           python -m pip install --quiet pillow
 
-      - name: Generate daily forecast and plan
+      - name: Generate required base forecast and plan
+        id: base_forecast
         run: |
           TARGET_DATE="$(date +%F)"
           python import_sporttery.py --date "$TARGET_DATE"
           python build_historical_features.py
           python predict_today.py --date "$TARGET_DATE"
           python generate_betting_plan.py --date "$TARGET_DATE"
+
+      - name: Collect optional market evidence
+        continue-on-error: true
+        run: |
+          TARGET_DATE="$(date +%F)"
           python collect_market_heat.py --date "$TARGET_DATE"
+
+      - name: Generate optional draw alerts
+        continue-on-error: true
+        run: |
+          TARGET_DATE="$(date +%F)"
           python generate_draw_alert.py --date "$TARGET_DATE"
-          python draw_alert_ledger.py --settle
+
+      - name: Update optional draw alert ledger
+        continue-on-error: true
+        run: python draw_alert_ledger.py --settle
+
+      - name: Build final website and image
+        if: always() && steps.base_forecast.outcome == 'success'
+        run: |
           python build_site.py
           python build_daily_image.py
 

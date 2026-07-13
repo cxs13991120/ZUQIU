@@ -90,23 +90,60 @@ class WorkflowScheduleTest(unittest.TestCase):
             self.assertIn("uses: actions/checkout@v4", checkout)
             self.assertIn("with:\n          ref: main", checkout)
 
-    def test_base_forecast_uses_beijing_target_date_and_required_command_order(self):
+    def test_base_forecast_is_required_and_uses_beijing_target_date(self):
         text = self.read_workflow("daily-forecast.yml")
         self.assertIn("TZ: Asia/Shanghai", self.job_block(text, "forecast"))
-        step = self.step_block(text, "forecast", "Generate daily forecast and plan")
+        step = self.step_block(
+            text, "forecast", "Generate required base forecast and plan"
+        )
         expected = [
             'TARGET_DATE="$(date +%F)"',
             'python import_sporttery.py --date "$TARGET_DATE"',
             "python build_historical_features.py",
             'python predict_today.py --date "$TARGET_DATE"',
             'python generate_betting_plan.py --date "$TARGET_DATE"',
-            'python collect_market_heat.py --date "$TARGET_DATE"',
-            'python generate_draw_alert.py --date "$TARGET_DATE"',
-            "python draw_alert_ledger.py --settle",
-            "python build_site.py",
-            "python build_daily_image.py",
         ]
         positions = [step.index(command) for command in expected]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("id: base_forecast", step)
+        self.assertNotIn("continue-on-error: true", step)
+        self.assertNotIn("collect_market_heat.py", step)
+        self.assertNotIn("generate_draw_alert.py", step)
+        self.assertNotIn("draw_alert_ledger.py", step)
+        self.assertNotIn("build_site.py", step)
+
+    def test_base_forecast_optional_steps_fail_independently_and_report_still_builds(self):
+        text = self.read_workflow("daily-forecast.yml")
+        optional_steps = {
+            "Collect optional market evidence": (
+                'python collect_market_heat.py --date "$TARGET_DATE"',
+                True,
+            ),
+            "Generate optional draw alerts": (
+                'python generate_draw_alert.py --date "$TARGET_DATE"',
+                True,
+            ),
+            "Update optional draw alert ledger": (
+                "python draw_alert_ledger.py --settle",
+                False,
+            ),
+        }
+        positions = []
+        for step_name, (command, uses_date) in optional_steps.items():
+            step = self.step_block(text, "forecast", step_name)
+            self.assertIn("continue-on-error: true", step)
+            self.assertIn(command, step)
+            if uses_date:
+                self.assertIn('TARGET_DATE="$(date +%F)"', step)
+            positions.append(text.index(f"      - name: {step_name}"))
+
+        build = self.step_block(text, "forecast", "Build final website and image")
+        self.assertIn(
+            "if: always() && steps.base_forecast.outcome == 'success'", build
+        )
+        self.assertIn("python build_site.py", build)
+        self.assertIn("python build_daily_image.py", build)
+        positions.append(text.index("      - name: Build final website and image"))
         self.assertEqual(positions, sorted(positions))
 
     def test_refresh_failure_isolation_binds_each_command_to_its_own_step(self):
