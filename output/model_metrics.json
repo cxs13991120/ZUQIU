@@ -55,5 +55,25 @@
       "roi": -1.0,
       "average_expected_return": 0.39987024872171517
     }
+  },
+  "by_league": {
+    "未知": {
+      "count": 4,
+      "hits": 1,
+      "hit_rate": 0.25,
+      "brier": 0.3127052450070541,
+      "log_loss": 0.7965131384357909,
+      "stake": 300.0,
+      "profit": 60.0,
+      "roi": 0.2,
+      "average_expected_return": 0.8248533843239094,
+      "recent_brier": 0.3127052450070541,
+      "paused": false
+    }
+  },
+  "clv": {
+    "count": 0,
+    "average_clv": null,
+    "positive_rate": null
   }
 }
