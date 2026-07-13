@@ -184,6 +184,8 @@ def collect(target_date: date, offline: bool = False) -> Path:
         fixture = dict(fixture)
         _apply_official_odds(fixture, sporttery)
         match_snapshots = _match_snapshots(fixture, snapshots)
+        if match_snapshots.get("kickoff_at"):
+            fixture["kickoff_at"] = match_snapshots["kickoff_at"]
         markets: list[dict] = []
         polymarket_request_succeeded = False
         if not offline:
@@ -235,6 +237,7 @@ def _apply_official_odds(fixture: dict, sporttery: Any) -> None:
 
 def _match_snapshots(fixture: dict, snapshots: list[dict]) -> dict:
     values: list[tuple[float, float, float] | None] = []
+    kickoff_at = ""
     match_id = str(fixture.get("match_id") or "")
     match_num = str(fixture.get("match_num") or "")
     for snapshot in snapshots:
@@ -243,8 +246,13 @@ def _match_snapshots(fixture: dict, snapshots: list[dict]) -> dict:
                 continue
             odds = _odds_from_fields(item, "market_h", "market_d", "market_a")
             values.append(odds or _odds_from_fields(item, "h", "d", "a"))
+            if item.get("kickoff_at"):
+                kickoff_at = str(item["kickoff_at"])
     valid = [value for value in values if value]
-    return {"open": valid[0], "latest": valid[-1]} if valid else {}
+    result = {"open": valid[0], "latest": valid[-1]} if valid else {}
+    if kickoff_at:
+        result["kickoff_at"] = kickoff_at
+    return result
 
 
 def _snapshot_matches(item: dict, fixture: dict, match_id: str, match_num: str) -> bool:

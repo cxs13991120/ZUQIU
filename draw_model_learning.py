@@ -59,7 +59,7 @@ MIN_SHADOW_SAMPLES = 200
 MIN_SHADOW_BETS = 100
 TRAINING_INTERVAL_DAYS = 7
 WEIGHT_HALF_LIFE_DAYS = 180
-SNAPSHOT_FILENAME = re.compile(r"^\d{8}T\d{6}Z-([0-9a-f]{64})\.json$")
+SNAPSHOT_FILENAME = re.compile(r"^(\d{8}T\d{6}Z)-([0-9a-f]{64})\.json$")
 SIMULATION_POLICY_FIELDS = (
     "min_draw_probability",
     "min_draw_edge",
@@ -382,7 +382,7 @@ def _sanitize_registry_roles(root, registry, current_date):
     errors = []
     valid_previous = _sanitize_role(root, registry, "previous_champion", current_date, errors)
     champion = registry.get("champion")
-    champion_valid = _role_is_valid(root, champion, "champion")
+    champion_valid = _role_is_valid(root, champion, "champion", current_date)
     if champion is not None and not champion_valid:
         invalid = copy.deepcopy(champion)
         if valid_previous:
@@ -412,7 +412,7 @@ def _sanitize_role(root, registry, role, current_date, errors):
     entry = registry.get(role)
     if entry is None:
         return False
-    if _role_is_valid(root, entry, role):
+    if _role_is_valid(root, entry, role, current_date):
         return True
     registry[role] = None
     message = f"invalid {role} cleared"
@@ -430,16 +430,20 @@ def _sanitize_role(root, registry, role, current_date, errors):
     return False
 
 
-def _role_is_valid(root, entry, role):
+def _role_is_valid(root, entry, role, current_date):
     if not isinstance(entry, dict):
         return False
     try:
         _load_registry_artifact(root, entry)
         if role == "challenger":
-            if _parse_date(entry.get("created_on")) is None:
+            created_on = _parse_date(entry.get("created_on"))
+            if created_on is None or created_on > current_date:
                 raise ValueError("challenger creation date is invalid")
-            if entry.get("created_at") is not None and _timestamp(entry.get("created_at")) is None:
-                raise ValueError("challenger creation timestamp is invalid")
+            if entry.get("created_at") is not None:
+                created_at = _timestamp(entry.get("created_at"))
+                update_cutoff = datetime.combine(current_date, time.max, tzinfo=BEIJING)
+                if created_at is None or created_at > update_cutoff:
+                    raise ValueError("challenger creation timestamp is invalid")
             _validate_simulation_policy(entry.get("simulation_policy"))
         return True
     except Exception:
@@ -561,7 +565,7 @@ def _challenger_entry(artifact, root, path, current_date):
         "feature_order": list(artifact["feature_order"]),
         "model_kind": metadata["model_kind"],
         "created_on": current_date.isoformat(),
-        "created_at": f"{current_date.isoformat()}T23:59:59.999999+00:00",
+        "created_at": datetime.combine(current_date, time.max, tzinfo=BEIJING).isoformat(),
         "shadow_days": 0,
         "sample_count": 0,
         "bet_count": 0,
@@ -867,20 +871,12 @@ def _validate_concrete_estimator(model, model_kind, feature_count):
         logistic = model.named_steps["logisticregression"]
         if type(scaler) is not StandardScaler or type(logistic) is not LogisticRegression:
             raise ValueError("full model pipeline estimator types are invalid")
-        if scaler.get_params(deep=False) != {
-            "copy": True,
-            "with_mean": True,
-            "with_std": True,
-        }:
+        if scaler.get_params(deep=False) != StandardScaler().get_params(deep=False):
             raise ValueError("full model scaler parameters are invalid")
         if int(getattr(scaler, "n_features_in_", -1)) != feature_count:
             raise ValueError("full model scaler feature count is invalid")
-    parameters = logistic.get_params(deep=False)
-    if (
-        parameters.get("C") != 0.5
-        or parameters.get("max_iter") != 1000
-        or parameters.get("random_state") != 42
-    ):
+    required_logistic = LogisticRegression(C=0.5, max_iter=1000, random_state=42)
+    if logistic.get_params(deep=False) != required_logistic.get_params(deep=False):
         raise ValueError("logistic regression parameters are invalid")
     if not callable(getattr(model, "predict_proba", None)):
         raise ValueError("model artifact cannot predict probabilities")
@@ -946,7 +942,7 @@ def _valid_snapshot(path, root, cutoff):
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        if digest != match.group(1):
+        if digest != match.group(2):
             return None
         if payload.get("snapshot_schema_version") != SNAPSHOT_SCHEMA_VERSION:
             return None
@@ -959,6 +955,8 @@ def _valid_snapshot(path, root, cutoff):
             or captured_at is None
             or kickoff_at is None
             or captured_at > kickoff_at
+            or match.group(1)
+            != captured_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         ):
             return None
         identity = [str(payload.get(name) or "") for name in ("match_id", "team_a", "team_b")]

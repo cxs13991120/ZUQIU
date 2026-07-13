@@ -160,6 +160,15 @@ class DrawModelLearningTest(unittest.TestCase):
         wrong_full = self._artifact(0.66, FEATURES, "wrong-full")
         wrong_full["model"].set_params(standardscaler__with_mean=False)
         cases.append(wrong_full)
+        wrong_solver = self._artifact(0.66, SMALL_SAMPLE_FEATURES, "wrong-solver")
+        wrong_solver["model"].set_params(solver="liblinear")
+        cases.append(wrong_solver)
+        wrong_penalty = self._artifact(0.66, SMALL_SAMPLE_FEATURES, "wrong-penalty")
+        wrong_penalty["model"].set_params(penalty="l1")
+        cases.append(wrong_penalty)
+        wrong_other = self._artifact(0.66, FEATURES, "wrong-other")
+        wrong_other["model"].set_params(logisticregression__fit_intercept=False)
+        cases.append(wrong_other)
         not_pipeline = self._artifact(0.66, SMALL_SAMPLE_FEATURES, "not-pipeline")
         not_pipeline["feature_order"] = list(FEATURES)
         not_pipeline["metadata"]["model_kind"] = "full_feature_logistic"
@@ -331,6 +340,17 @@ class DrawModelLearningTest(unittest.TestCase):
         payload = json.loads(valid_path.read_text(encoding="utf-8"))
         payload["features"]["xg_total"] = 9.9
         valid_path.write_text(json.dumps(payload), encoding="utf-8")
+        self._write_csv(
+            self.temp_root / "data" / "bet_results.csv",
+            [{"date": "2026-01-02", "team_a": "A", "team_b": "B", "home_goals": "1", "away_goals": "1"}],
+        )
+
+        self.assertEqual([], build_training_samples(self.temp_root, as_of=date(2026, 1, 2)))
+
+    def test_snapshot_timestamp_prefix_must_match_captured_at(self):
+        valid_path = self._write_snapshot("valid")
+        renamed = valid_path.with_name(valid_path.name.replace("T100000Z-", "T100001Z-"))
+        valid_path.replace(renamed)
         self._write_csv(
             self.temp_root / "data" / "bet_results.csv",
             [{"date": "2026-01-02", "team_a": "A", "team_b": "B", "home_goals": "1", "away_goals": "1"}],
@@ -621,6 +641,55 @@ class DrawModelLearningTest(unittest.TestCase):
         events = [event for event in first["event_history"] if event["type"] == "role_recovery"]
         self.assertEqual(1, len(events))
         self.assertEqual(first["challenger"]["version"], second["challenger"]["version"])
+
+    def test_future_challenger_creation_is_quarantined_once_and_replaced(self):
+        cases = (
+            (
+                "created-on",
+                {"created_on": "2026-07-13", "created_at": "2026-07-13T00:00:00+08:00"},
+            ),
+            (
+                "created-at",
+                {"created_on": "2026-07-11", "created_at": "2026-07-13T00:00:00+08:00"},
+            ),
+        )
+        for label, creation in cases:
+            with self.subTest(label=label):
+                version = f"future-{label}"
+                artifact = self._artifact(0.30, SMALL_SAMPLE_FEATURES, version)
+                self._install_artifact(artifact, f"{version}.joblib", role="challenger")
+                registry = self._read_registry()
+                registry["challenger"].update(
+                    **creation, simulation_policy=self._simulation_policy()
+                )
+                registry["last_training_date"] = "2025-01-01"
+                self._write_registry(registry)
+
+                with patch(
+                    "draw_model_learning.build_training_samples",
+                    return_value=self._samples(40),
+                ):
+                    update_draw_model(
+                        self.temp_root,
+                        as_of=date(2026, 7, 12),
+                        force_train=True,
+                    )
+                    first = self._read_registry()
+                    update_draw_model(self.temp_root, as_of=date(2026, 7, 12))
+                    second = self._read_registry()
+
+                self.assertNotEqual(version, first["challenger"]["version"])
+                recovery_events = [
+                    event
+                    for event in first["event_history"]
+                    if event.get("type") == "role_recovery"
+                    and event.get("role") == "challenger"
+                ]
+                self.assertEqual(1, len(recovery_events))
+                self.assertEqual(first["event_history"], second["event_history"])
+                self.assertEqual(
+                    first["challenger"]["version"], second["challenger"]["version"]
+                )
 
     def test_invalid_previous_is_cleared_without_harming_champion_or_repeating(self):
         champion = self._artifact(0.30, SMALL_SAMPLE_FEATURES, "champion-v1")

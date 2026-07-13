@@ -211,14 +211,44 @@ class MarketHeatCollectorTest(unittest.TestCase):
             data_dir.mkdir()
             output_dir.mkdir()
             (data_dir / "fixtures.csv").write_text(
-                "date,team_a,team_b,kickoff_at,odds_a,odds_draw,odds_b,"
-                "market_odds_a,market_odds_draw,market_odds_b,match_id\n"
-                "2026-07-12,Norway,England,2026-07-12T20:00:00+08:00,"
-                "3.8,3.6,1.95,3.9,3.5,1.9,001\n",
+                "date,kickoff_local,stage,team_a,team_b,neutral,venue,odds_a,"
+                "odds_draw,odds_b,market_odds_a,market_odds_draw,market_odds_b,"
+                "analysis_source,is_single_had,match_num,match_id,pool_status\n"
+                "2026-07-12,\u5468\u4e00201,quarterfinal,Norway,England,false,Test,"
+                "3.8,3.6,1.95,3.9,3.5,1.9,market,true,\u5468\u4e00201,001,\n",
+                encoding="utf-8",
+            )
+            snapshot_dir = data_dir / "odds_snapshots"
+            snapshot_dir.mkdir()
+            (snapshot_dir / "2026-07-12-0900.json").write_text(
+                json.dumps(
+                    {
+                        "source": "zgzcw",
+                        "matches": [
+                            {
+                                "team_a": "Norway",
+                                "team_b": "England",
+                                "match_num": "\u5468\u4e00201",
+                                "kickoff_at": "2026-07-12T20:00:00+08:00",
+                                "h": "3.8",
+                                "d": "3.6",
+                                "a": "1.95",
+                                "market_h": "3.9",
+                                "market_d": "3.5",
+                                "market_a": "1.9",
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
             with patch.object(collector, "ROOT", root):
-                collector.collect(date(2026, 7, 12), offline=True)
+                market_heat_path = collector.collect(date(2026, 7, 12), offline=True)
+            market_heat = json.loads(market_heat_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "2026-07-12T20:00:00+08:00",
+                market_heat["matches"][0]["kickoff_at"],
+            )
             (root / "betting_config.json").write_text(
                 (Path(__file__).resolve().parents[1] / "betting_config.json").read_text(
                     encoding="utf-8"
