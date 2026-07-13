@@ -31,14 +31,32 @@ class WorkflowScheduleTest(unittest.TestCase):
                 return "\n".join(lines[start:end])
         return "\n".join(lines[start:])
 
-    def step_block(self, text, step_name):
-        lines = text.splitlines()
+    def step_block(self, text, job_name, step_name):
+        lines = self.job_block(text, job_name).splitlines()
         marker = f"      - name: {step_name}"
         start = lines.index(marker)
         for end in range(start + 1, len(lines)):
             if lines[end].startswith("      - name: "):
                 return "\n".join(lines[start:end])
         return "\n".join(lines[start:])
+
+    def test_step_block_scopes_duplicate_step_names_to_the_requested_job(self):
+        workflow = """jobs:
+  other:
+    steps:
+      - name: Refresh input
+        continue-on-error: true
+        run: python correct.py
+  target:
+    steps:
+      - name: Refresh input
+        run: python missing-isolation.py
+"""
+
+        target_step = self.step_block(workflow, "target", "Refresh input")
+
+        self.assertIn("python missing-isolation.py", target_step)
+        self.assertNotIn("continue-on-error: true", target_step)
 
     def test_beijing_schedule_crons_include_settlement_retry_and_snapshots(self):
         schedules = {
@@ -68,14 +86,14 @@ class WorkflowScheduleTest(unittest.TestCase):
         for workflow_name, job_name in self.WORKFLOW_JOBS.items():
             text = self.read_workflow(workflow_name)
             self.assertIn(self.MAIN_OR_SCHEDULE_GUARD, self.job_block(text, job_name))
-            checkout = self.step_block(text, checkout_steps[workflow_name])
+            checkout = self.step_block(text, job_name, checkout_steps[workflow_name])
             self.assertIn("uses: actions/checkout@v4", checkout)
             self.assertIn("with:\n          ref: main", checkout)
 
     def test_base_forecast_uses_beijing_target_date_and_required_command_order(self):
         text = self.read_workflow("daily-forecast.yml")
         self.assertIn("TZ: Asia/Shanghai", self.job_block(text, "forecast"))
-        step = self.step_block(text, "Generate daily forecast and plan")
+        step = self.step_block(text, "forecast", "Generate daily forecast and plan")
         expected = [
             'TARGET_DATE="$(date +%F)"',
             'python import_sporttery.py --date "$TARGET_DATE"',
@@ -101,15 +119,15 @@ class WorkflowScheduleTest(unittest.TestCase):
         }
         step_positions = []
         for step_name, command in refresh_steps.items():
-            step = self.step_block(text, step_name)
+            step = self.step_block(text, "refresh", step_name)
             self.assertIn("continue-on-error: true", step)
             self.assertIn('TARGET_DATE="$(date +%F)"', step)
             self.assertIn(command, step)
             step_positions.append(text.index(f"      - name: {step_name}"))
         self.assertEqual(step_positions, sorted(step_positions))
 
-        ledger_step = self.step_block(text, "Refresh draw alert ledger")
-        rebuild_step = self.step_block(text, "Rebuild report from the latest committed data")
+        ledger_step = self.step_block(text, "refresh", "Refresh draw alert ledger")
+        rebuild_step = self.step_block(text, "refresh", "Rebuild report from the latest committed data")
         self.assertIn("python draw_alert_ledger.py --settle", ledger_step)
         self.assertIn("python build_site.py", rebuild_step)
         self.assertIn("python build_daily_image.py", rebuild_step)
@@ -120,7 +138,7 @@ class WorkflowScheduleTest(unittest.TestCase):
 
     def test_settlement_uses_yesterday_for_results_and_today_for_training(self):
         text = self.read_workflow("noon-settlement.yml")
-        step = self.step_block(text, "Update results, settle ledgers, and train the draw model")
+        step = self.step_block(text, "settlement", "Update results, settle ledgers, and train the draw model")
         expected = [
             'TODAY="$(date +%F)"',
             'SETTLEMENT_DATE="$(date -d \'yesterday\' +%F)"',
@@ -137,8 +155,15 @@ class WorkflowScheduleTest(unittest.TestCase):
         self.assertNotIn('python update_sporttery_results.py --date "$TODAY"', step)
 
     def test_base_refresh_and_settlement_install_learning_and_image_dependencies(self):
-        for name in ("daily-forecast.yml", "draw-alert-refresh.yml", "noon-settlement.yml"):
-            step = self.step_block(self.read_workflow(name), "Install learning dependencies and image fonts")
+        jobs = {
+            "daily-forecast.yml": "forecast",
+            "draw-alert-refresh.yml": "refresh",
+            "noon-settlement.yml": "settlement",
+        }
+        for name, job_name in jobs.items():
+            step = self.step_block(
+                self.read_workflow(name), job_name, "Install learning dependencies and image fonts"
+            )
             self.assertIn("python -m pip install --quiet -r requirements.txt", step)
             self.assertIn("python -m pip install --quiet pillow", step)
             self.assertIn("fonts-noto-cjk", step)
@@ -155,12 +180,12 @@ class WorkflowScheduleTest(unittest.TestCase):
             "web/daily-report.png",
         )
         commit_steps = {
-            "daily-forecast.yml": "Commit generated files",
-            "draw-alert-refresh.yml": "Commit refreshed files",
-            "noon-settlement.yml": "Commit settlement files",
+            "daily-forecast.yml": ("forecast", "Commit generated files"),
+            "draw-alert-refresh.yml": ("refresh", "Commit refreshed files"),
+            "noon-settlement.yml": ("settlement", "Commit settlement files"),
         }
-        for name, step_name in commit_steps.items():
-            step = self.step_block(self.read_workflow(name), step_name)
+        for name, (job_name, step_name) in commit_steps.items():
+            step = self.step_block(self.read_workflow(name), job_name, step_name)
             for pattern in required:
                 self.assertIn(pattern, step)
 
@@ -168,7 +193,7 @@ class WorkflowScheduleTest(unittest.TestCase):
         text = self.read_workflow("email-report.yml")
         job = self.job_block(text, "email")
         self.assertIn("TZ: Asia/Shanghai", job)
-        self.assertIn("python send_daily_email.py", self.step_block(text, "Send report image"))
+        self.assertIn("python send_daily_email.py", self.step_block(text, "email", "Send report image"))
         password = re.search(r"^      GMAIL_APP_PASSWORD: (.+)$", job, re.MULTILINE)
         self.assertIsNotNone(password)
         self.assertEqual("${{ secrets.GMAIL_APP_PASSWORD }}", password.group(1))
