@@ -1,4 +1,5 @@
 {
+  "strategy_version": "value-v2",
   "daily_budget": 230,
   "max_daily_budget": 500,
   "base_allocations": {
@@ -18,6 +19,18 @@
     "combo_max_legs": 4
   },
   "value_strategy": {
+    "strict_until_samples": 100,
+    "strict_min_probability_edge": 0.05,
+    "strict_min_expected_return": 1.06,
+    "strict_model_edge_weight_base": 0.15,
+    "strict_model_edge_weight_max": 0.35,
+    "strict_kelly_fraction": 0.125,
+    "strict_max_single_stake": 50,
+    "strict_single_budget_cap": 100,
+    "strict_min_combo_leg_edge": 0.03,
+    "strict_min_combo_leg_expected_return": 1.02,
+    "strict_min_combo_expected_return": 1.10,
+    "strict_combo_stake": 20,
     "min_probability_edge": 0.03,
     "min_expected_return": 1.03,
     "model_edge_weight_base": 0.35,
