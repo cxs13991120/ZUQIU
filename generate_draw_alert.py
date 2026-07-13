@@ -58,28 +58,66 @@ def derive_structural_signals(
 
 def same_match(alert: dict, row: dict) -> bool:
     if alert.get("match_id") and row.get("match_id"):
-        return str(alert["match_id"]) == str(row["match_id"])
+        if str(alert["match_id"]) != str(row["match_id"]):
+            return False
+        for key in ("date", "team_a", "team_b"):
+            if alert.get(key) and row.get(key) and alert.get(key) != row.get(key):
+                return False
+        return True
     return (
-        alert.get("date") == row.get("date")
+        bool(alert.get("date") and alert.get("team_a") and alert.get("team_b"))
+        and alert.get("date") == row.get("date")
         and alert.get("team_a") == row.get("team_a")
         and alert.get("team_b") == row.get("team_b")
     )
 
 
+def _same_date_and_teams(alert: dict, leg: dict) -> bool:
+    return (
+        bool(alert.get("date") and alert.get("team_a") and alert.get("team_b"))
+        and alert.get("date") == leg.get("date")
+        and alert.get("team_a") == leg.get("team_a")
+        and alert.get("team_b") == leg.get("team_b")
+    )
+
+
 def _combo_draw_matches(alert: dict, row: dict) -> bool:
     raw_legs = row.get("legs_json")
+    if not isinstance(raw_legs, str) or len(raw_legs) > 65_536:
+        return False
     try:
         legs = json.loads(raw_legs)
-    except (TypeError, json.JSONDecodeError):
+    except (TypeError, json.JSONDecodeError, RecursionError):
         return False
     if not isinstance(legs, list):
         return False
     return any(
         isinstance(leg, dict)
         and leg.get("selection") == "平"
-        and same_match(alert, leg)
+        and _same_date_and_teams(alert, leg)
         for leg in legs
     )
+
+
+def _stake_amount(value: object, maximum: int) -> int | None:
+    parsed = _number(value)
+    if (
+        parsed is None
+        or not parsed.is_integer()
+        or parsed < 0
+        or parsed > maximum
+    ):
+        return None
+    return int(parsed)
+
+
+def _total_valid_stakes(rows: list[dict], key: str, maximum: int) -> int:
+    total = 0
+    for row in rows:
+        stake = _stake_amount(row.get(key), maximum)
+        if stake is not None:
+            total += stake
+    return total
 
 
 def select_alerts(candidates: list[dict], rank_gates=RANK_GATES, max_alerts: int = 4, max_per_league: int = 2) -> list[dict]:
@@ -130,12 +168,22 @@ def attach_stake(alert: dict, main_plan: list[dict], existing_alerts: list[dict]
     )
     result["hypothetical_stake"] = 10
     if linked:
-        result.update(additional_stake=0, linked_main_stake=int(float(linked.get("stake") or 0)), settlement_mode="linked")
+        linked_stake = _stake_amount(linked.get("stake"), daily_budget)
+        if linked_stake is None:
+            result.update(
+                additional_stake=0,
+                linked_main_stake=0,
+                settlement_mode="observation",
+            )
+        else:
+            result.update(additional_stake=0, linked_main_stake=linked_stake, settlement_mode="linked")
     elif not subtype_metrics.get("promoted"):
         result.update(additional_stake=0, linked_main_stake=0, settlement_mode="observation")
     else:
-        used = sum(int(float(row.get("stake") or 0)) for row in main_plan)
-        alert_used = sum(int(float(row.get("additional_stake") or 0)) for row in existing_alerts)
+        used = _total_valid_stakes(main_plan, "stake", daily_budget)
+        alert_used = _total_valid_stakes(
+            existing_alerts, "additional_stake", alert_budget
+        )
         available = max(0, min(daily_budget - used - alert_used, alert_budget - alert_used))
         stake = min(requested_stake, available) if available >= minimum_stake else 0
         state = "standalone" if stake else "budget_capped_observation"
@@ -364,20 +412,30 @@ def _qualifying_source_records(evidence: dict) -> dict:
         and record.get("market_type") == "win_draw_loss"
         and _integer(record.get("settlement_minutes")) == 90
         and record.get("includes_extra_time") is False
-        and _source_probabilities_are_valid(record)
+        and _source_record_is_valid(record)
     }
 
 
-def _source_probabilities_are_valid(record: dict) -> bool:
+def _source_record_is_valid(record: dict) -> bool:
     fields = ("home_probability", "draw_probability", "away_probability")
-    present = [field for field in fields if field in record]
-    if not present:
-        return True
-    return len(present) == len(fields) and all(
-        (value := _number(record.get(field))) is not None
-        and is_finite_between(value, 0.0, 1.0)
-        for field in fields
-    )
+    probabilities = [_number(record.get(field)) for field in fields]
+    if not all(
+        value is not None and is_finite_between(value, 0.0, 1.0)
+        for value in probabilities
+    ):
+        return False
+    if not math.isclose(sum(probabilities), 1.0, abs_tol=0.05):
+        return False
+    raw_volume = record.get("volume")
+    if raw_volume not in (None, ""):
+        volume = _number(raw_volume)
+        if volume is None or not is_finite_between(volume, 0.0, 1_000_000_000_000.0):
+            return False
+    try:
+        json.dumps(record, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return True
 
 
 def _domestic_odds(domestic: dict, match_id: str) -> tuple[float, float, float] | None:

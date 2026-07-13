@@ -13,6 +13,19 @@ from draw_model_learning import FEATURES, _train_artifact, predict_draw_probabil
 from generate_draw_alert import FIELDS, _calibrated_probability, _candidate_from_rows, _capture_feature_snapshot, _qualifying_source_records, attach_stake, derive_structural_signals, generate_alerts, select_alerts
 
 
+def source_record(**overrides):
+    record = {
+        "market_type": "win_draw_loss",
+        "settlement_minutes": 90,
+        "includes_extra_time": False,
+        "home_probability": 0.20,
+        "draw_probability": 0.25,
+        "away_probability": 0.55,
+    }
+    record.update(overrides)
+    return record
+
+
 class GenerateDrawAlertTest(unittest.TestCase):
     def test_broken_optional_model_falls_back_to_blended_probability(self):
         with patch("generate_draw_alert.importlib.import_module", side_effect=RuntimeError("broken model")):
@@ -69,9 +82,9 @@ class GenerateDrawAlertTest(unittest.TestCase):
                     "match_id": "001", "market_scope": "90m", "quality": "high",
                     "favorite_movement": -0.05, "regional_gap": 0.06,
                     "sources": {
-                        "domestic_sporttery": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
-                        "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
-                        "extra_time": {"market_type": "win_draw_loss", "settlement_minutes": 120, "includes_extra_time": False},
+                        "domestic_sporttery": source_record(),
+                        "professional": source_record(),
+                        "extra_time": source_record(settlement_minutes=120),
                     },
                 }],
             }), encoding="utf-8")
@@ -142,8 +155,8 @@ class GenerateDrawAlertTest(unittest.TestCase):
             "favorite_movement": -0.05,
             "regional_gap": 0.06,
             "sources": {
-                "domestic": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
-                "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                "domestic": source_record(),
+                "professional": source_record(),
             },
         }
         domestic = {"001": {"had": {"h": "1.60", "d": "4.00", "a": "6.00"}}}
@@ -173,8 +186,8 @@ class GenerateDrawAlertTest(unittest.TestCase):
         evidence = {
             "market_scope": "90m", "quality": "high", "favorite_movement": -0.05, "regional_gap": 0.06,
             "sources": {
-                "domestic": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
-                "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                "domestic": source_record(),
+                "professional": source_record(),
             },
         }
         candidate = _candidate_from_rows(
@@ -210,6 +223,24 @@ class GenerateDrawAlertTest(unittest.TestCase):
 
         self.assertEqual({"good"}, set(records))
 
+    def test_sources_require_probabilities_and_finite_optional_volume(self):
+        records = _qualifying_source_records({
+            "sources": {
+                "metadata_only": {
+                    "market_type": "win_draw_loss",
+                    "settlement_minutes": 90,
+                    "includes_extra_time": False,
+                },
+                "nan_volume": source_record(volume=float("nan")),
+                "infinite_nested_number": source_record(
+                    metadata={"risk": float("inf")}
+                ),
+                "good": source_record(volume=1_250_000),
+            }
+        })
+
+        self.assertEqual({"good"}, set(records))
+
     def test_overlap_reuses_main_stake_without_additional_money(self):
         alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
         main = [{"match_id": "001", "stake": "100", "selection": "平"}]
@@ -217,6 +248,22 @@ class GenerateDrawAlertTest(unittest.TestCase):
         self.assertEqual(0, result["additional_stake"])
         self.assertEqual(100, result["linked_main_stake"])
         self.assertEqual("linked", result["settlement_mode"])
+
+    def test_same_id_with_conflicting_date_and_teams_does_not_link(self):
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
+        main = [{
+            "match_id": "001",
+            "date": "2026-07-13",
+            "team_a": "X",
+            "team_b": "Y",
+            "stake": "100",
+            "selection": "平",
+        }]
+
+        result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
+
+        self.assertEqual("standalone", result["settlement_mode"])
+        self.assertEqual(30, result["additional_stake"])
 
     def test_overlap_without_match_id_uses_date_and_teams(self):
         alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
@@ -232,7 +279,7 @@ class GenerateDrawAlertTest(unittest.TestCase):
             "selection": "串关",
             "stake": "60",
             "legs_json": json.dumps([
-                {"match_id": "001", "team_a": "A", "team_b": "B", "selection": "平"},
+                {"date": "2026-07-12", "team_a": "A", "team_b": "B", "selection": "平"},
             ]),
         }]
 
@@ -241,6 +288,48 @@ class GenerateDrawAlertTest(unittest.TestCase):
         self.assertEqual(0, result["additional_stake"])
         self.assertEqual(60, result["linked_main_stake"])
         self.assertEqual("linked", result["settlement_mode"])
+
+    def test_combo_same_id_with_conflicting_date_and_teams_does_not_link(self):
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
+        main = [{
+            "selection": "串关",
+            "stake": "60",
+            "legs_json": json.dumps([
+                {"match_id": "001", "date": "2026-07-13", "team_a": "X", "team_b": "Y", "selection": "平"},
+            ]),
+        }]
+
+        result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
+
+        self.assertEqual("standalone", result["settlement_mode"])
+        self.assertEqual(30, result["additional_stake"])
+        self.assertEqual(0, result["linked_main_stake"])
+
+    def test_invalid_linked_main_stakes_fail_closed_without_crashing(self):
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
+        for raw_stake in ("NaN", "Infinity", "-60", "501", "10.5"):
+            with self.subTest(stake=raw_stake):
+                main = [{"match_id": "001", "stake": raw_stake, "selection": "平"}]
+
+                result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
+
+                self.assertEqual("observation", result["settlement_mode"])
+                self.assertEqual(0, result["additional_stake"])
+                self.assertEqual(0, result["linked_main_stake"])
+
+    def test_invalid_unrelated_stakes_do_not_break_budget_calculation(self):
+        result = attach_stake(
+            {"match_id": "002", "subtype": "cold_draw"},
+            [{"match_id": "001", "stake": "NaN", "selection": "胜"}],
+            [{"additional_stake": "Infinity"}, {"additional_stake": "-20"}],
+            {"promoted": True},
+            500,
+            80,
+            30,
+        )
+
+        self.assertEqual("standalone", result["settlement_mode"])
+        self.assertEqual(30, result["additional_stake"])
 
     def test_combo_draw_leg_uses_date_and_forward_team_order_as_fallback(self):
         alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
@@ -316,8 +405,8 @@ class GenerateDrawAlertTest(unittest.TestCase):
                         "match_id": "001", "market_scope": "90m", "quality": "high",
                         "favorite_movement": -0.05, "regional_gap": 0.06,
                         "sources": {
-                            "domestic": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
-                            "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                            "domestic": source_record(),
+                            "professional": source_record(),
                         },
                     }],
                 }),
@@ -390,8 +479,8 @@ class GenerateDrawAlertTest(unittest.TestCase):
                         "favorite_movement": -0.05,
                         "regional_gap": 0.06,
                         "sources": {
-                            "domestic": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
-                            "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                            "domestic": source_record(),
+                            "professional": source_record(),
                         },
                     }],
                 }),
