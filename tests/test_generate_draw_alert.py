@@ -622,6 +622,38 @@ class GenerateDrawAlertTest(unittest.TestCase):
 
         self.assertIsNone(path)
 
+    def test_snapshot_capture_rejects_out_of_range_source_count_before_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _capture_feature_snapshot(
+                root,
+                {
+                    "date": "2026-07-12",
+                    "match_id": "001",
+                    "team_a": "A",
+                    "team_b": "B",
+                    "stage": "quarterfinal",
+                },
+                {"kickoff_at": "2026-07-12 20:00:00"},
+                datetime(2026, 7, 12, 11, 0, tzinfo=timezone.utc),
+                4.0,
+                {
+                    "base_draw_probability": 0.32,
+                    "market_draw_probability": 0.25,
+                    "favorite_probability": 0.54,
+                    "win_probability_gap": 0.42,
+                    "xg_total": 2.30,
+                    "favorite_movement": -0.05,
+                    "regional_gap": 0.06,
+                    "source_count": 101,
+                    "is_knockout": 1,
+                    "is_balanced": 0,
+                },
+            )
+
+            self.assertIsNone(path)
+            self.assertFalse((root / "data" / "draw_feature_snapshots").exists())
+
     @staticmethod
     def _full_feature_samples():
         start = date(2025, 1, 1)

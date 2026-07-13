@@ -29,6 +29,19 @@ DRAW_MODEL_FEATURES = [
     "base_draw_probability", "market_draw_probability", "favorite_probability", "win_probability_gap",
     "xg_total", "favorite_movement", "regional_gap", "source_count", "is_knockout", "is_balanced",
 ]
+DRAW_MODEL_FEATURE_RANGES = {
+    "base_draw_probability": (0.0, 1.0),
+    "market_draw_probability": (0.0, 1.0),
+    "favorite_probability": (0.0, 1.0),
+    "win_probability_gap": (0.0, 1.0),
+    "xg_total": (0.0, 10.0),
+    "favorite_movement": (-1.0, 1.0),
+    "regional_gap": (-1.0, 1.0),
+    "source_count": (0.0, 100.0),
+    "is_knockout": (0.0, 1.0),
+    "is_balanced": (0.0, 1.0),
+}
+DRAW_MODEL_INTEGER_FEATURES = {"source_count", "is_knockout", "is_balanced"}
 
 
 def derive_structural_signals(
@@ -294,6 +307,9 @@ def _candidate_from_rows(
     if not odds:
         return None
     market_sources = _qualifying_market_sources(evidence)
+    source_count = len(market_sources)
+    if source_count > 100:
+        return None
     try:
         model_probabilities = (float(prediction["p_a"]), float(prediction["p_draw"]), float(prediction["p_b"]))
         xg_a, xg_b = float(prediction["xg_a"]), float(prediction["xg_b"])
@@ -332,7 +348,7 @@ def _candidate_from_rows(
         "xg_total": xg_a + xg_b,
         "favorite_movement": favorite_movement,
         "regional_gap": regional_gap,
-        "source_count": len(market_sources),
+        "source_count": source_count,
         "is_knockout": int(stage.casefold() in knockout_stages),
         "is_balanced": int(
             abs(model_probabilities[0] - model_probabilities[2])
@@ -364,7 +380,7 @@ def _candidate_from_rows(
         model_probabilities=model_probabilities,
         calibrated_draw_probability=calibrated_draw_probability,
         xg_total=xg_a + xg_b,
-        source_count=len(market_sources),
+        source_count=source_count,
         market_sources=tuple(market_sources),
         market_scope=evidence.get("market_scope", ""),
         favorite_movement=favorite_movement,
@@ -500,7 +516,10 @@ def _capture_feature_snapshot(
     kickoff = _timestamp(evidence.get("kickoff_at"))
     if kickoff is None or captured > kickoff:
         return None
-    if list(features) != DRAW_MODEL_FEATURES:
+    if not _valid_snapshot_features(features):
+        return None
+    draw_odds = _number(domestic_draw_odds)
+    if draw_odds is None or not 1.01 <= draw_odds <= 100.0:
         return None
     payload = {
         "snapshot_schema_version": 1,
@@ -511,7 +530,7 @@ def _capture_feature_snapshot(
         "stage": str(prediction.get("stage") or ""),
         "captured_at": captured.isoformat(),
         "kickoff_at": str(evidence.get("kickoff_at") or ""),
-        "domestic_draw_odds": float(domestic_draw_odds),
+        "domestic_draw_odds": draw_odds,
         "features": features,
     }
     if not all(payload[name] for name in ("date", "match_id", "team_a", "team_b")):
@@ -524,6 +543,18 @@ def _capture_feature_snapshot(
     path = Path(root) / "data" / "draw_feature_snapshots" / f"{timestamp}-{digest}.json"
     _atomic_create_json(path, payload)
     return path
+
+
+def _valid_snapshot_features(features: dict) -> bool:
+    if not isinstance(features, dict) or list(features) != DRAW_MODEL_FEATURES:
+        return False
+    for name, bounds in DRAW_MODEL_FEATURE_RANGES.items():
+        value = _number(features.get(name))
+        if value is None or not bounds[0] <= value <= bounds[1]:
+            return False
+        if name in DRAW_MODEL_INTEGER_FEATURES and not value.is_integer():
+            return False
+    return True
 
 
 def _snapshot_write_time(value: datetime | None) -> datetime:

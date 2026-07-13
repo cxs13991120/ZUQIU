@@ -56,6 +56,7 @@ class MarketHeatCollectorTest(unittest.TestCase):
     def test_same_provider_multiple_snapshots_do_not_increase_source_count(self):
         market = {
             "question": "Norway vs England",
+            "sportsMarketType": "moneyline",
             "outcomes": '["Norway", "Draw", "England"]',
             "outcomePrices": '["0.20", "0.25", "0.55"]',
             "volume": "1200",
@@ -121,6 +122,40 @@ class MarketHeatCollectorTest(unittest.TestCase):
 
         self.assertIsNone(collector.parse_polymarket_90m(market, "Norway", "England"))
 
+    def test_polymarket_bare_matchup_requires_moneyline_market_type(self):
+        base = {
+            "question": "Norway vs England",
+            "outcomes": '["Norway", "Draw", "England"]',
+            "outcomePrices": '["0.20", "0.25", "0.55"]',
+        }
+        self.assertIsNone(collector.parse_polymarket_90m(base, "Norway", "England"))
+        for market_type in (
+            "first_half_moneyline",
+            "soccer_halftime_result",
+            "soccer_extra_time",
+            "soccer_team_to_advance",
+            "unknown_scope",
+        ):
+            with self.subTest(market_type=market_type):
+                market = {**base, "sportsMarketType": market_type}
+                self.assertIsNone(
+                    collector.parse_polymarket_90m(market, "Norway", "England")
+                )
+
+        accepted = {**base, "sportsMarketType": "moneyline"}
+        self.assertIsNotNone(
+            collector.parse_polymarket_90m(accepted, "Norway", "England")
+        )
+
+        conflicting = {
+            **base,
+            "question": "Norway vs England - Full Time Result",
+            "sportsMarketType": "first_half_moneyline",
+        }
+        self.assertIsNone(
+            collector.parse_polymarket_90m(conflicting, "Norway", "England")
+        )
+
     def test_polymarket_accepts_only_whitelisted_full_time_match_titles(self):
         full_time_titles = (
             "Norway vs England",
@@ -132,6 +167,7 @@ class MarketHeatCollectorTest(unittest.TestCase):
             with self.subTest(title=title):
                 market = {
                     "question": title,
+                    "sportsMarketType": "moneyline",
                     "outcomes": '["Norway", "Tie", "England"]',
                     "outcomePrices": '["0.20", "0.25", "0.55"]',
                 }
@@ -171,6 +207,7 @@ class MarketHeatCollectorTest(unittest.TestCase):
             with self.subTest(outcomes=outcomes, prices=prices):
                 market = {
                     "question": "Norway vs England",
+                    "sportsMarketType": "moneyline",
                     "outcomes": outcomes,
                     "outcomePrices": prices,
                 }
@@ -191,6 +228,7 @@ class MarketHeatCollectorTest(unittest.TestCase):
     def test_polymarket_rejects_nonfinite_and_out_of_range_numbers(self):
         base = {
             "question": "Norway vs England",
+            "sportsMarketType": "moneyline",
             "outcomes": '["Norway", "Draw", "England"]',
             "outcomePrices": '["0.20", "0.25", "0.55"]',
             "volume": "1200",

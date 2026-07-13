@@ -77,6 +77,14 @@ def _is_whitelisted_90m_label(value: Any, home: str, away: str) -> bool:
     return re.fullmatch(allowed, label) is not None
 
 
+def _has_explicit_90m_scope(value: Any) -> bool:
+    label = _normalized_market_text(value)
+    return re.search(
+        r"(?:full(?:[\s-]?time)|90(?:\s*m|[\s-]*(?:minutes?|mins?)))",
+        label,
+    ) is not None
+
+
 def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
     home_name = _normalized_market_text(team_a)
     away_name = _normalized_market_text(team_b)
@@ -96,6 +104,15 @@ def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
     if not labels or not all(
         _is_whitelisted_90m_label(label, home_name, away_name) for label in labels
     ):
+        return None
+    market_types = {
+        _normalized_market_text(market[field])
+        for field in ("sportsMarketType", "sports_market_type")
+        if market.get(field) not in (None, "")
+    }
+    if market_types and market_types != {"moneyline"}:
+        return None
+    if not market_types and not any(_has_explicit_90m_scope(label) for label in labels):
         return None
     try:
         outcomes = json.loads(market.get("outcomes") or "[]")
