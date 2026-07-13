@@ -83,6 +83,111 @@ class MarketHeatCollectorTest(unittest.TestCase):
         self.assertIsNone(collector.parse_polymarket_90m(qualification, "Norway", "England"))
         self.assertIsNone(collector.parse_polymarket_90m(extra_time, "Norway", "England"))
 
+    def test_polymarket_rejects_non_full_time_market_scopes(self):
+        scoped_titles = (
+            "Norway vs England - First Half Result",
+            "Norway vs England - First-Half Result",
+            "Norway vs England - 1H Result",
+            "Norway vs England - Halftime Result",
+            "Norway vs England - \u4e0a\u534a\u573a\u8d5b\u679c",
+            "Norway vs England - First Quarter Result",
+            "Norway vs England - First Period Result",
+            "Norway vs England - Qualification",
+            "Norway vs England - To Qualify",
+            "Norway vs England - Advance",
+            "Norway vs England - Including Extra Time",
+            "Norway vs England - Penalties Winner",
+            "Norway vs England - Total Corners",
+            "Norway vs England - Total Goals",
+            "Norway vs England - Match Result",
+            "Who will win: Norway vs England",
+        )
+        for title in scoped_titles:
+            with self.subTest(title=title):
+                market = {
+                    "question": title,
+                    "outcomes": '["Norway", "Draw", "England"]',
+                    "outcomePrices": '["0.20", "0.25", "0.55"]',
+                }
+                self.assertIsNone(collector.parse_polymarket_90m(market, "Norway", "England"))
+
+    def test_polymarket_rejects_ambiguous_title_even_when_question_is_bare_matchup(self):
+        market = {
+            "title": "Norway vs England - First Half Result",
+            "question": "Norway vs England",
+            "outcomes": '["Norway", "Draw", "England"]',
+            "outcomePrices": '["0.20", "0.25", "0.55"]',
+        }
+
+        self.assertIsNone(collector.parse_polymarket_90m(market, "Norway", "England"))
+
+    def test_polymarket_accepts_only_whitelisted_full_time_match_titles(self):
+        full_time_titles = (
+            "Norway vs England",
+            "Norway v England",
+            "Norway vs England - Full Time Result",
+            "Norway v England: 90 Minute Result",
+        )
+        for title in full_time_titles:
+            with self.subTest(title=title):
+                market = {
+                    "question": title,
+                    "outcomes": '["Norway", "Tie", "England"]',
+                    "outcomePrices": '["0.20", "0.25", "0.55"]',
+                }
+                parsed = collector.parse_polymarket_90m(market, "Norway", "England")
+                self.assertIsNotNone(parsed)
+                self.assertEqual(90, parsed["settlement_minutes"])
+
+        title_only_market = {
+            "title": "Full Time Result: Norway vs England",
+            "outcomes": '["Norway", "Draw", "England"]',
+            "outcomePrices": '["0.20", "0.25", "0.55"]',
+        }
+        self.assertIsNotNone(
+            collector.parse_polymarket_90m(title_only_market, "Norway", "England")
+        )
+
+    def test_polymarket_requires_exact_home_draw_away_structure(self):
+        malformed_structures = (
+            (
+                '["Norway", "Draw", "England", "Other"]',
+                '["0.20", "0.25", "0.55", "0.00"]',
+            ),
+            (
+                '["Norway", "Draw", "England"]',
+                '["0.20", "0.25", "0.55", "0.00"]',
+            ),
+            (
+                '["England", "Draw", "Norway"]',
+                '["0.55", "0.25", "0.20"]',
+            ),
+            (
+                '["Norway", "England", "Draw"]',
+                '["0.20", "0.55", "0.25"]',
+            ),
+        )
+        for outcomes, prices in malformed_structures:
+            with self.subTest(outcomes=outcomes, prices=prices):
+                market = {
+                    "question": "Norway vs England",
+                    "outcomes": outcomes,
+                    "outcomePrices": prices,
+                }
+                self.assertIsNone(collector.parse_polymarket_90m(market, "Norway", "England"))
+
+    def test_ambiguous_polymarket_market_is_not_labeled_as_90_minutes(self):
+        market = {
+            "question": "Norway vs England - First Half Result",
+            "outcomes": '["Norway", "Draw", "England"]',
+            "outcomePrices": '["0.20", "0.25", "0.55"]',
+        }
+
+        evidence = collector.build_evidence(fixture(), {}, [market])
+
+        self.assertNotIn("polymarket", evidence["sources"])
+        self.assertEqual(2, evidence["source_count"])
+
     def test_polymarket_rejects_nonfinite_and_out_of_range_numbers(self):
         base = {
             "question": "Norway vs England",

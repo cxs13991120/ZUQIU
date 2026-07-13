@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import os
+import re
 import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -58,33 +59,65 @@ def odds_movement(
     return movement if math.isfinite(movement) and -1.0 <= movement <= 1.0 else 0.0
 
 
-def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
-    question = str(market.get("question") or "").casefold()
-    blocked = (
-        "qualify",
-        "qualification",
-        "advance",
-        "win the world cup",
-        "lift the trophy",
-        "extra time",
-        "penalt",
-        "加时",
-        "晋级",
+def _normalized_market_text(value: Any) -> str:
+    return " ".join(str(value).strip().casefold().split())
+
+
+def _is_whitelisted_90m_label(value: Any, home: str, away: str) -> bool:
+    label = _normalized_market_text(value)
+    if label.endswith("?"):
+        label = label[:-1].rstrip()
+    matchup = rf"{re.escape(home)}\s+(?:vs\.?|v)\s+{re.escape(away)}"
+    scope = (
+        r"(?:full(?:[\s-]?time)|90(?:\s*m|[\s-]*(?:minutes?|mins?)))"
+        r"(?:\s+result)?"
     )
-    if any(word in question for word in blocked):
+    separator = r"\s*(?:-|:|\u2013|\u2014)\s*"
+    allowed = rf"(?:{matchup}|{matchup}{separator}{scope}|{scope}{separator}{matchup})"
+    return re.fullmatch(allowed, label) is not None
+
+
+def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
+    home_name = _normalized_market_text(team_a)
+    away_name = _normalized_market_text(team_b)
+    if (
+        not home_name
+        or not away_name
+        or home_name == away_name
+        or home_name in {"draw", "tie"}
+        or away_name in {"draw", "tie"}
+    ):
         return None
-    if team_a.casefold() not in question or team_b.casefold() not in question:
+    labels = [
+        market[field]
+        for field in ("question", "title")
+        if market.get(field) not in (None, "")
+    ]
+    if not labels or not all(
+        _is_whitelisted_90m_label(label, home_name, away_name) for label in labels
+    ):
         return None
     try:
         outcomes = json.loads(market.get("outcomes") or "[]")
-        prices = [float(value) for value in json.loads(market.get("outcomePrices") or "[]")]
+        raw_prices = json.loads(market.get("outcomePrices") or "[]")
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    mapping = {str(name).casefold(): price for name, price in zip(outcomes, prices)}
-    home = mapping.get(team_a.casefold())
-    away = mapping.get(team_b.casefold())
-    draw = next((price for name, price in mapping.items() if name in {"draw", "tie"}), None)
-    if any(value is None or not math.isfinite(value) or value < 0 or value > 1 for value in (home, draw, away)):
+    if not isinstance(outcomes, list) or not isinstance(raw_prices, list):
+        return None
+    if len(outcomes) != 3 or len(raw_prices) != 3:
+        return None
+    normalized_outcomes = tuple(_normalized_market_text(outcome) for outcome in outcomes)
+    if (
+        normalized_outcomes[0] != home_name
+        or normalized_outcomes[1] not in {"draw", "tie"}
+        or normalized_outcomes[2] != away_name
+    ):
+        return None
+    try:
+        home, draw, away = (float(value) for value in raw_prices)
+    except (TypeError, ValueError):
+        return None
+    if any(not math.isfinite(value) or value < 0 or value > 1 for value in (home, draw, away)):
         return None
     raw_volume = market.get("volume")
     volume = _optional_float(raw_volume)
