@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add one daily value-gated 90-minute draw alert, split into cold-draw and balanced-draw subtypes, with independent settlement, reporting, and guarded long-term learning.
+**Goal:** Add zero to four daily value-gated 90-minute draw alerts, split into cold-draw and balanced-draw subtypes, with independent settlement, reporting, and guarded long-term learning.
 
 **Architecture:** Keep the existing forecast and betting-plan pipeline intact. Add focused modules for market evidence, pure draw classification, alert generation, settlement metrics, and champion/challenger learning; exchange versioned JSON/CSV files so a failed optional source cannot block the daily report.
 
@@ -14,10 +14,12 @@
 - Display and settle plans with Sporttery odds; use ZGZCW Sporttery data only as the domestic fallback.
 - External professional markets provide analysis evidence and never replace the saved domestic plan price.
 - Compare only 90-minute win/draw/loss markets; never mix qualification, extra time, or penalties into the draw label.
-- Publish at most one draw alert per day and publish none when probability, expected value, or data-quality gates fail.
+- Publish at most four draw alerts per day, at most two from the same league, and publish none when probability, expected value, or data-quality gates fail.
 - Require calibrated draw probability `>= 0.27`, edge over the de-vigged domestic draw probability `>= 0.04`, and `probability * domestic_draw_odds >= 1.05`.
+- Apply progressively stricter rank gates: `29%/5pp/1.07` for the second alert, `31%/6pp/1.09` for the third, and `33%/7pp/1.11` for the fourth.
 - Cold draws and balanced draws each remain zero-additional-stake observations until that subtype has 30 settled alerts and passes every promotion gate.
 - A draw alert that overlaps the main plan must reuse the main stake and settlement; it must never add a second stake or duplicate profit.
+- Cap total additional draw-alert stake at 80 yuan per day before applying the 500-yuan overall cap.
 - Total daily additional simulated stake must remain `<= 500` yuan.
 - Generate the base forecast at 12:15, refresh the draw alert around 13:30, settle at 13:45, and email the rebuilt report at 14:00 Beijing time.
 - Model training must be time ordered, reproducible, versioned, reversible, and free of post-match data leakage.
@@ -27,7 +29,7 @@
 
 - Create `draw_alert_core.py`: pure probability normalization, data classes, subtype classification, and candidate ranking.
 - Create `collect_market_heat.py`: build timestamped same-scope market evidence from Sporttery snapshots, ZGZCW professional odds, and optional Polymarket public data.
-- Create `generate_draw_alert.py`: join predictions, evidence, main plan, and subtype metrics; write the single daily alert.
+- Create `generate_draw_alert.py`: join predictions, evidence, main plan, and subtype metrics; write zero to four ranked daily alerts.
 - Create `draw_alert_ledger.py`: settle alerts on 90-minute scores, calculate independent subtype gates, and write the ledger and metrics.
 - Create `draw_model_learning.py`: build chronological samples, train/evaluate champion and challenger models, maintain registry state, and supply calibrated draw probabilities.
 - Modify `betting_config.json`: add exact draw-alert thresholds, stake limits, feature version, and learning gates.
@@ -364,32 +366,49 @@ git commit -m "feat: collect timestamped draw market evidence"
 
 **Interfaces:**
 - Consumes: daily predictions CSV, domestic odds JSON, market-heat JSON, main betting plan CSV, draw metrics JSON, and optional champion model.
-- Produces: `output/draw_alert_<date>.csv` containing zero or one row with `subtype`, probabilities, value, evidence, data timestamp, `additional_stake`, `linked_main_stake`, `hypothetical_stake`, and `settlement_mode`.
+- Produces: `output/draw_alert_<date>.csv` containing zero to four ranked rows with `subtype`, probabilities, value, evidence, data timestamp, `additional_stake`, `linked_main_stake`, `hypothetical_stake`, and `settlement_mode`.
 
 - [ ] **Step 1: Write failing selection and duplicate-stake tests**
 
 ```python
 import unittest
-from generate_draw_alert import attach_stake, select_one
+from generate_draw_alert import attach_stake, select_alerts
 
 
 class GenerateDrawAlertTest(unittest.TestCase):
-    def test_selects_only_highest_ranked_candidate(self):
-        selected = select_one([{"score": 0.41, "match_id": "A"}, {"score": 0.48, "match_id": "B"}])
-        self.assertEqual("B", selected["match_id"])
+    def test_selects_up_to_four_with_progressive_gates(self):
+        candidates = [
+            {"score": 0.50, "match_id": "A", "stage": "L1", "model_draw_probability": 0.34, "draw_edge": 0.08, "expected_value": 1.12},
+            {"score": 0.49, "match_id": "B", "stage": "L1", "model_draw_probability": 0.33, "draw_edge": 0.07, "expected_value": 1.11},
+            {"score": 0.48, "match_id": "C", "stage": "L1", "model_draw_probability": 0.32, "draw_edge": 0.07, "expected_value": 1.10},
+            {"score": 0.47, "match_id": "D", "stage": "L2", "model_draw_probability": 0.33, "draw_edge": 0.07, "expected_value": 1.12},
+            {"score": 0.46, "match_id": "E", "stage": "L3", "model_draw_probability": 0.34, "draw_edge": 0.08, "expected_value": 1.13},
+        ]
+        selected = select_alerts(candidates)
+        self.assertEqual(["A", "B", "D", "E"], [row["match_id"] for row in selected])
+        self.assertEqual([1, 2, 3, 4], [row["rank"] for row in selected])
+
+    def test_fourth_alert_must_pass_fourth_gate(self):
+        candidates = [{"score": 1 - index / 10, "match_id": str(index), "stage": f"L{index}", "model_draw_probability": 0.32, "draw_edge": 0.06, "expected_value": 1.10} for index in range(5)]
+        self.assertEqual(3, len(select_alerts(candidates)))
 
     def test_overlap_reuses_main_stake_without_additional_money(self):
         alert = {"match_id": "001", "subtype": "cold_draw"}
         main = [{"match_id": "001", "stake": "100", "selection": "平"}]
-        result = attach_stake(alert, main, {"promoted": True}, 500, 30)
+        result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
         self.assertEqual(0, result["additional_stake"])
         self.assertEqual(100, result["linked_main_stake"])
         self.assertEqual("linked", result["settlement_mode"])
 
     def test_unpromoted_subtype_is_zero_stake_observation(self):
-        result = attach_stake({"match_id": "002", "subtype": "balanced_draw"}, [], {"promoted": False}, 500, 30)
+        result = attach_stake({"match_id": "002", "subtype": "balanced_draw"}, [], [], {"promoted": False}, 500, 80, 30)
         self.assertEqual(0, result["additional_stake"])
         self.assertEqual("observation", result["settlement_mode"])
+
+    def test_alert_budget_caps_total_additional_stake_at_80(self):
+        existing = [{"additional_stake": 30}, {"additional_stake": 30}]
+        result = attach_stake({"match_id": "003", "subtype": "cold_draw"}, [], existing, {"promoted": True}, 500, 80, 30)
+        self.assertEqual(20, result["additional_stake"])
 ```
 
 - [ ] **Step 2: Verify the tests fail**
@@ -416,6 +435,15 @@ Add this object to `betting_config.json`:
   "hypothetical_stake": 10,
   "min_promoted_stake": 10,
   "max_promoted_stake": 30,
+  "max_alerts": 4,
+  "max_per_league": 2,
+  "daily_additional_budget": 80,
+  "rank_gates": [
+    {"min_probability": 0.27, "min_edge": 0.04, "min_expected_value": 1.05},
+    {"min_probability": 0.29, "min_edge": 0.05, "min_expected_value": 1.07},
+    {"min_probability": 0.31, "min_edge": 0.06, "min_expected_value": 1.09},
+    {"min_probability": 0.33, "min_edge": 0.07, "min_expected_value": 1.11}
+  ],
   "promotion_roi": 0.05,
   "max_drawdown": 100.0
 }
@@ -423,14 +451,31 @@ Add this object to `betting_config.json`:
 
 - [ ] **Step 4: Implement alert generation**
 
-Implement `select_one` and `attach_stake` with the tested linked/observation/standalone states:
+Implement `select_alerts` and `attach_stake` with progressive gates and the tested linked/observation/standalone states:
 
 ```python
-def select_one(candidates: list[dict]) -> dict | None:
-    return max(candidates, key=lambda item: (float(item["score"]), item["match_id"]), default=None)
+RANK_GATES = ((0.27, 0.04, 1.05), (0.29, 0.05, 1.07), (0.31, 0.06, 1.09), (0.33, 0.07, 1.11))
 
 
-def attach_stake(alert: dict, main_plan: list[dict], subtype_metrics: dict, daily_budget: int, requested_stake: int) -> dict:
+def select_alerts(candidates: list[dict]) -> list[dict]:
+    selected = []
+    league_counts = {}
+    for candidate in sorted(candidates, key=lambda item: (float(item["score"]), item["match_id"]), reverse=True):
+        if len(selected) == 4:
+            break
+        league = candidate.get("stage") or "未知"
+        if league_counts.get(league, 0) >= 2:
+            continue
+        probability, edge, expected_value = RANK_GATES[len(selected)]
+        if candidate["model_draw_probability"] < probability or candidate["draw_edge"] < edge or candidate["expected_value"] < expected_value:
+            continue
+        row = {**candidate, "rank": len(selected) + 1}
+        selected.append(row)
+        league_counts[league] = league_counts.get(league, 0) + 1
+    return selected
+
+
+def attach_stake(alert: dict, main_plan: list[dict], existing_alerts: list[dict], subtype_metrics: dict, daily_budget: int, alert_budget: int, requested_stake: int) -> dict:
     result = dict(alert)
     linked = next((row for row in main_plan if row.get("match_id") == alert["match_id"] and row.get("selection") == "平"), None)
     result["hypothetical_stake"] = 10
@@ -440,12 +485,15 @@ def attach_stake(alert: dict, main_plan: list[dict], subtype_metrics: dict, dail
         result.update(additional_stake=0, linked_main_stake=0, settlement_mode="observation")
     else:
         used = sum(int(float(row.get("stake") or 0)) for row in main_plan)
-        available = max(0, daily_budget - used)
-        result.update(additional_stake=min(requested_stake, available), linked_main_stake=0, settlement_mode="standalone")
+        alert_used = sum(int(float(row.get("additional_stake") or 0)) for row in existing_alerts)
+        available = max(0, min(daily_budget - used - alert_used, alert_budget - alert_used))
+        stake = min(requested_stake, available)
+        state = "standalone" if stake else "budget_capped_observation"
+        result.update(additional_stake=stake, linked_main_stake=0, settlement_mode=state)
     return result
 ```
 
-Use a quarter-Kelly fraction capped to 10-30 yuan only for promoted standalone alerts, then cap against `500 - sum(main_plan.stake)`. Build `DrawInputs` from prediction/evidence rows, ask `draw_model_learning.predict_draw_probability()` for the calibrated value, reject missing domestic draw odds, and write an empty CSV with headers when nothing qualifies.
+Use a quarter-Kelly fraction capped to 10-30 yuan only for promoted standalone alerts, allocate in rank order, then apply both the 80-yuan alert cap and `500 - main stakes - earlier alert stakes`. Build `DrawInputs` from prediction/evidence rows, ask `draw_model_learning.predict_draw_probability()` for the calibrated value, reject missing domestic draw odds, and write an empty CSV with headers when nothing qualifies.
 
 Derive structural signals before classification with one deterministic function: add `knockout_caution` when `stage` is in the configured knockout stages; add `low_total` when `xg_a + xg_b <= 2.35`; add `similar_strength` when the two de-vigged win probabilities differ by at most 0.10; add `underdog_resistance` when calibrated draw probability exceeds the underdog win probability and underdog non-loss probability is at least 0.35. Do not infer injuries or lineups when no timestamped source exists.
 
@@ -453,7 +501,7 @@ Use this output schema exactly:
 
 ```python
 FIELDS = [
-    "date", "match_id", "match", "stage", "subtype", "selection", "domestic_draw_odds",
+    "date", "rank", "match_id", "match", "stage", "subtype", "selection", "domestic_draw_odds",
     "market_draw_probability", "model_draw_probability", "draw_edge", "expected_value", "xg_total",
     "evidence_json", "data_quality", "captured_at", "alert_level", "additional_stake",
     "linked_main_stake", "hypothetical_stake", "settlement_mode", "strategy_version", "feature_version",
@@ -681,13 +729,13 @@ from build_site import render_draw_alert
 
 class DrawAlertReportingTest(unittest.TestCase):
     def test_linked_alert_copy_does_not_claim_extra_stake(self):
-        html = render_draw_alert({"subtype": "cold_draw", "match": "挪威 vs 英格兰", "settlement_mode": "linked", "linked_main_stake": "100", "model_draw_probability": "0.32", "market_draw_probability": "0.27", "domestic_draw_odds": "3.60", "expected_value": "1.15", "captured_at": "2026-07-12T13:30:00+08:00"})
+        html = render_draw_alert([{"rank": "1", "subtype": "cold_draw", "match": "挪威 vs 英格兰", "settlement_mode": "linked", "linked_main_stake": "100", "model_draw_probability": "0.32", "market_draw_probability": "0.27", "domestic_draw_odds": "3.60", "expected_value": "1.15", "captured_at": "2026-07-12T13:30:00+08:00"}])
         self.assertIn("冷门平局", html)
         self.assertIn("复用主方案金额", html)
         self.assertNotIn("额外投入 100", html)
 
     def test_empty_alert_has_neutral_copy(self):
-        self.assertIn("今日无符合门槛", render_draw_alert(None))
+        self.assertIn("今日无符合门槛", render_draw_alert([]))
 ```
 
 - [ ] **Step 2: Verify the rendering tests fail**
@@ -698,7 +746,7 @@ Expected: FAIL because `render_draw_alert` is not defined.
 
 - [ ] **Step 3: Add website rendering**
 
-Add `read_draw_alert(display_date)`, `read_draw_alert_metrics()`, `read_draw_model_registry()`, and `render_draw_alert(alert)` to `build_site.py`. Place the un-nested full-width section after the main plan and before observations. Show subtype, match, domestic draw odds, model/market probabilities, edge, expected value, evidence, quality, capture time, linked/observation/standalone state, and each subtype’s `count/30` promotion progress. Escape all external evidence text with `html.escape`.
+Add `read_draw_alert(display_date)`, `read_draw_alert_metrics()`, `read_draw_model_registry()`, and `render_draw_alert(alerts)` to `build_site.py`. Place the un-nested full-width section after the main plan and before observations. Show zero to four ranked alerts with subtype, match, domestic draw odds, model/market probabilities, edge, expected value, evidence, quality, capture time, linked/observation/standalone state, and each subtype’s `count/30` promotion progress. Escape all external evidence text with `html.escape`.
 
 The rendering state labels are fixed as follows:
 
@@ -708,21 +756,25 @@ SETTLEMENT_LABELS = {
     "linked": "复用主方案金额，不重复投入",
     "observation": "零金额观察",
     "standalone": "独立小额模拟",
+    "budget_capped_observation": "达到当日预警预算上限，零新增金额观察",
 }
 
 
-def render_draw_alert(alert: dict | None) -> str:
-    if not alert:
+def render_draw_alert(alerts: list[dict]) -> str:
+    if not alerts:
         return '<section class="draw-alert"><h2>平局预警</h2><p>今日无符合门槛的平局预警</p></section>'
-    subtype = SUBTYPE_LABELS[alert["subtype"]]
-    state = SETTLEMENT_LABELS[alert["settlement_mode"]]
-    match = html.escape(alert["match"])
-    return f'<section class="draw-alert"><h2>平局预警 · {subtype}</h2><strong>{match}</strong><p>{state}</p></section>'
+    rows = []
+    for alert in alerts:
+        subtype = SUBTYPE_LABELS[alert["subtype"]]
+        state = SETTLEMENT_LABELS[alert["settlement_mode"]]
+        match = html.escape(alert["match"])
+        rows.append(f'<article><span>第{alert["rank"]}场 · {subtype}</span><strong>{match}</strong><p>{state}</p></article>')
+    return f'<section class="draw-alert"><h2>平局预警</h2>{"".join(rows)}</section>'
 ```
 
 - [ ] **Step 4: Add daily-image rendering with stable dimensions**
 
-Extend the precomputed image height by a fixed 230 pixels when an alert exists and 100 pixels when it does not. Draw the same fields as the website, wrap evidence to two lines, and use the existing 7-8 pixel corner radius and restrained green/gold/red palette. Ensure the alert block never changes the width of the plan or ledger columns.
+Extend the precomputed image height by `100 + 170 * alert_count` pixels. Draw zero to four ranked rows with the same fields as the website, wrap each evidence summary to two lines, and use the existing 7-8 pixel corner radius and restrained green/gold/red palette. Ensure the alert block never changes the width of the plan or ledger columns.
 
 - [ ] **Step 5: Run rendering and image smoke tests**
 
@@ -848,7 +900,7 @@ python build_site.py
 python build_daily_image.py
 ```
 
-Expected: every command exits 0; there is at most one alert row; total additional stake is at most 500; HTML and PNG are rebuilt.
+Expected: every command exits 0; there are zero to four alert rows, at most two per league; total additional alert stake is at most 80 and all daily stakes are at most 500; HTML and PNG are rebuilt.
 
 - [ ] **Step 4: Inspect generated report at desktop and mobile widths**
 
