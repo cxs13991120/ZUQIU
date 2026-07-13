@@ -826,6 +826,15 @@ class DrawAlertReportingTest(unittest.TestCase):
 
     def test_empty_alert_has_neutral_copy(self):
         self.assertIn("今日无符合门槛", render_draw_alert([]))
+
+    def test_external_evidence_is_html_escaped(self):
+        html = render_draw_alert([{"rank": "1", "subtype": "cold_draw", "match": "A < B", "settlement_mode": "observation", "evidence_json": "{\"source\": \"<script>alert(1)</script>\"}"}])
+        self.assertNotIn("<script>", html)
+
+    def test_four_rows_keep_fixed_rank_order(self):
+        alerts = [{"rank": str(rank), "subtype": "balanced_draw", "match": f"A{rank} vs B{rank}", "settlement_mode": "observation"} for rank in (4, 2, 1, 3)]
+        html = render_draw_alert(alerts)
+        self.assertLess(html.index("第1场"), html.index("第4场"))
 ```
 
 - [ ] **Step 2: Verify the rendering tests fail**
@@ -836,7 +845,9 @@ Expected: FAIL because `render_draw_alert` is not defined.
 
 - [ ] **Step 3: Add website rendering**
 
-Add `read_draw_alert(display_date)`, `read_draw_alert_metrics()`, `read_draw_model_registry()`, and `render_draw_alert(alerts)` to `build_site.py`. Place the un-nested full-width section after the main plan and before observations. Show zero to four ranked alerts with subtype, match, domestic draw odds, model/market probabilities, edge, expected value, evidence, quality, capture time, linked/observation/standalone state, and each subtype’s `count/30` promotion progress. Escape all external evidence text with `html.escape`.
+Add `read_draw_alert(display_date)`, `read_draw_alert_metrics()`, `read_draw_model_registry()`, and `render_draw_alert(alerts, metrics=None, registry=None)` to `build_site.py`; the optional arguments preserve the simple test call. Place the un-nested full-width section after the main plan and before observations. Show zero to four ranked alerts in numeric rank order with subtype, match, domestic draw odds, model/market probabilities, edge, expected value, xG total, concise evidence-source summary, quality, capture time, linked/observation/standalone state, and actual additional or linked amount where applicable. Show each subtype's `count/30` progress and the champion/challenger version, challenger shadow days, sample/bet progress, paused leagues, and last training error without claiming guaranteed improvement. Escape every external string, including parsed evidence values and registry errors, with `html.escape`.
+
+Keep the section full-width and un-nested. Individual repeated alert rows may use the existing restrained card treatment at no more than 8px radius. Add responsive grid constraints so the longest Chinese state label wraps on 390px screens without overlapping probabilities, odds, or the following section.
 
 The rendering state labels are fixed as follows:
 
@@ -850,7 +861,7 @@ SETTLEMENT_LABELS = {
 }
 
 
-def render_draw_alert(alerts: list[dict]) -> str:
+def render_draw_alert(alerts: list[dict], metrics: dict | None = None, registry: dict | None = None) -> str:
     if not alerts:
         return '<section class="draw-alert"><h2>平局预警</h2><p>今日无符合门槛的平局预警</p></section>'
     rows = []
@@ -864,7 +875,7 @@ def render_draw_alert(alerts: list[dict]) -> str:
 
 - [ ] **Step 4: Add daily-image rendering with stable dimensions**
 
-Extend the precomputed image height by `100 + 170 * alert_count` pixels. Draw zero to four ranked rows with the same fields as the website, wrap each evidence summary to two lines, and use the existing 7-8 pixel corner radius and restrained green/gold/red palette. Ensure the alert block never changes the width of the plan or ledger columns.
+Extend the precomputed image height by exactly `100 + 170 * alert_count` pixels, including the 100-pixel neutral block when there are zero alerts. Draw zero to four numerically ranked rows with the same fields and state meaning as the website, wrap each evidence summary to at most two lines, and use the existing 7-8 pixel corner radius and restrained green/gold/red palette. Include compact subtype progress and champion/challenger state in the alert heading. Ensure the alert block never changes the width of the plan or ledger columns and no text extends beyond the image bounds.
 
 - [ ] **Step 5: Run rendering and image smoke tests**
 
