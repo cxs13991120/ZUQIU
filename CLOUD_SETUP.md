@@ -1,43 +1,65 @@
 # 云端自动运行设置
 
-这个项目可以用 GitHub Actions 云端自动运行。设置完成后，你的电脑关机也不影响每天生成预测和结算。
+本项目通过 GitHub Actions 运行每日预测、平局预警、结算、学习和邮件日报。完成设置后，电脑无需保持开机。系统只做概率分析和模拟记账，不保证盈利；竞彩和外部市场来源也可能暂时不可用。
 
-## 自动任务
+不需要 Google 日历或任何日历集成。
 
-- 北京时间 11:30：抓取竞彩网在售比赛，生成预测、投注方案和网站。
-- 北京时间 12:00：抓取前一天竞彩网赛果，结算盈亏并刷新网站。
+## 启用仓库功能
 
-对应文件：
+1. 将项目推送到 GitHub 仓库，并使用 `main` 作为生产分支。
+2. 在仓库打开 `Settings -> Actions -> General`：允许 Actions 运行，并把 `Workflow permissions` 设为 **Read and write permissions**。工作流需要写回报告、结算与赛前快照。
+3. 在 `Settings -> Pages` 中把 `Source` 设为 **GitHub Actions**。每次报告重建后会由工作流发布 Pages。
+4. 在 `Settings -> Secrets and variables -> Actions` 新建仓库机密：
+   - 名称：`GMAIL_APP_PASSWORD`
+   - 内容：Gmail 为该邮箱生成的应用专用密码。
 
-- `.github/workflows/daily-forecast.yml`
-- `.github/workflows/noon-settlement.yml`
+应用专用密码只能保存在这个仓库机密中；不要把密码、访问令牌或其截图写进代码、文档、提交信息或 Actions 日志。仓库中无需保存任何 Google 日历凭据。
 
-## 第一次设置
+## 生产工作流
 
-1. 新建一个 GitHub 仓库。
-2. 把本文件夹里的所有文件上传到仓库。
-3. 打开仓库的 `Settings -> Actions -> General`：
-   - 允许 GitHub Actions 运行。
-   - `Workflow permissions` 选择 `Read and write permissions`。
-4. 打开 `Settings -> Pages`：
-   - `Source` 选择 `GitHub Actions`。
-5. 到 `Actions` 页面手动运行一次 `Daily Sporttery Forecast`。
-6. 运行成功后，GitHub Pages 会给你一个网页地址。
+以下是当前使用的五个工作流文件：
 
-## Google 日历
+| 文件 | 北京时间 | 作用 |
+| --- | --- | --- |
+| `.github/workflows/daily-forecast.yml` | 12:15 | 导入基础 Sporttery 数据，生成预测、主方案、第一版平局预警、网页和日报图片。 |
+| `.github/workflows/draw-alert-refresh.yml` | 13:30 | 刷新市场数据与平局预警，并重建报告；可选来源失败时复用最近一次完整报告。 |
+| `.github/workflows/noon-settlement.yml` | 13:45、14:05 | 结算前一天的 90 分钟结果、更新指标、训练模型并重建报告；14:05 是重试。 |
+| `.github/workflows/email-report.yml` | 14:00 | 用 Gmail 发送最新已提交的 `web/daily-report.png`，必要时等待正在执行的结算。 |
+| `.github/workflows/odds-snapshot.yml` | 每 30 分钟 | 保存官方赔率快照。 |
 
-Google 日历里已经有两个每日提醒：
+所有生产任务只会在两种情形运行：按计划触发，或在 `main` 分支上手动触发。不要把功能分支上的手动运行当成生产发布。
 
-- 11:30 查看今日方案
-- 12:00 查看昨日盈亏
+## 为什么邮件会拿到最新报告
 
-云端运行后，把日历事件说明里的本地网页路径换成 GitHub Pages 地址即可。
+预测、刷新、结算、赔率快照和邮件都使用同一个仓库并发队列。写入仓库或发送邮件的任务会按顺序等待，而不会互相覆盖。邮件任务会从 `main` 重新取得最新已提交的 `web/daily-report.png`，因此在结算先完成时会发送结算后重建的图片；若排队很短，也可能稍作等待。
 
-## 注意
+这套机制减少旧报告被覆盖或过早发送的风险，但不能保证外部数据源始终成功。市场或结果来源延迟时，系统记录失败并在后续任务重试；不应把缺失来源当作有效市场证据。
 
-GitHub Actions 的定时任务按 UTC 写：
+## 手动运行
 
-- `30 3 * * *` = 北京时间 11:30
-- `0 4 * * *` = 北京时间 12:00
+1. 打开仓库的 `Actions` 页面。
+2. 选择要运行的工作流，例如 `Daily Sporttery Forecast`、`Draw Alert Refresh`、`Afternoon Sporttery Settlement`、`Email Daily Betting Report` 或 `Sporttery Odds Snapshots`。
+3. 点击 `Run workflow`。
+4. 在分支选择器中选择 `main`，再确认运行。
+5. 等待任务完成后，在 Actions 日志查看状态；网页报告由 GitHub Pages 发布，邮件任务只发送最新已提交的日报图片。
 
-竞彩数据来自竞彩网官方接口。若竞彩网接口临时不可访问，当天工作流会失败，可以在 GitHub Actions 页面手动重跑。
+若需要补跑完整日常报告，通常先运行基础预测，再运行预警刷新；结果已到位时再运行结算。请避免同时反复启动多个写入任务，队列会保证顺序，但重复任务仍会增加等待时间。
+
+## 平局预警与结算口径
+
+日报中的平局预警可以是 0 到 4 场；没有符合门槛的预警是正确结果。冷门平局和均势平局独立观察，每个子类型要有 30 场已结算样本，并通过 ROI、CLV、校准、回撤和近期稳定性检查后，才可有 10 至 30 元的独立模拟投入。每日预警新增投入最多 80 元，所有每日模拟投入最多 500 元。
+
+当预警与主方案是同一场比赛时，预警复用主方案的金额和结算，不重复投入或计算利润。所有这类预警和结算一律采用 90 分钟比分；加时赛与点球不改变结果。
+
+学习仅使用不可变赛前快照。候选模型先进行影子评估，只有概率准确度和模拟经济证据同时满足门槛才能替换冠军模型；联赛可被单独暂停，模型可回滚。训练失败时继续使用有效冠军模型或基础预测，不会因失败而扩大投入，也不承诺盈利。
+
+## 时间换算说明
+
+GitHub Actions 的定时表达式使用 UTC。当前工作流的时间已经按北京时间配置：
+
+- `15 4 * * *`：12:15 基础预测。
+- `30 5 * * *`：13:30 平局预警刷新。
+- `45 5 * * *`：13:45 结算与学习。
+- `0 6 * * *`：14:00 邮件日报。
+- `5 6 * * *`：14:05 结算重试。
+- `*/30 * * * *`：每 30 分钟赔率快照。
