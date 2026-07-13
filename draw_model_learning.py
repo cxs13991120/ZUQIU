@@ -4,6 +4,8 @@ import argparse
 import copy
 import csv
 import hashlib
+import hmac
+import io
 import json
 import math
 import os
@@ -60,6 +62,7 @@ MIN_SHADOW_BETS = 100
 TRAINING_INTERVAL_DAYS = 7
 WEIGHT_HALF_LIFE_DAYS = 180
 SNAPSHOT_FILENAME = re.compile(r"^(\d{8}T\d{6}Z)-([0-9a-f]{64})\.json$")
+ARTIFACT_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SIMULATION_POLICY_FIELDS = (
     "min_draw_probability",
     "min_draw_edge",
@@ -70,9 +73,35 @@ SIMULATION_POLICY_FIELDS = (
 
 
 def chronological_splits(dates: list[date], n_splits: int):
-    indices = list(range(len(dates)))
-    for train, validation in TimeSeriesSplit(n_splits=n_splits).split(indices):
-        yield list(train), list(validation)
+    unique_dates = sorted(set(dates))
+    effective_splits = min(n_splits, len(unique_dates) - 1)
+    if effective_splits < 1:
+        return
+    indices_by_date = {
+        match_date: [index for index, value in enumerate(dates) if value == match_date]
+        for match_date in unique_dates
+    }
+    if effective_splits == 1:
+        yield indices_by_date[unique_dates[0]], [
+            index
+            for match_date in unique_dates[1:]
+            for index in indices_by_date[match_date]
+        ]
+        return
+    for train_dates, validation_dates in TimeSeriesSplit(
+        n_splits=effective_splits
+    ).split(unique_dates):
+        train = [
+            index
+            for group_index in train_dates
+            for index in indices_by_date[unique_dates[group_index]]
+        ]
+        validation = [
+            index
+            for group_index in validation_dates
+            for index in indices_by_date[unique_dates[group_index]]
+        ]
+        yield train, validation
 
 
 def promotion_decision(challenger: dict, champion: dict) -> bool:
@@ -562,6 +591,7 @@ def _challenger_entry(artifact, root, path, current_date):
     return {
         "version": metadata["version"],
         "artifact": _relative_path(root, path),
+        "artifact_sha256": _artifact_sha256(path),
         "feature_order": list(artifact["feature_order"]),
         "model_kind": metadata["model_kind"],
         "created_on": current_date.isoformat(),
@@ -816,13 +846,32 @@ def _load_registry_artifact(root, entry):
     path = _registry_artifact_path(root, entry)
     if path.name != f"{entry.get('version')}.joblib":
         raise ValueError("model artifact filename must match its version")
-    artifact = _load_artifact(path)
+    artifact = joblib.load(io.BytesIO(_verified_artifact_bytes(path, entry)))
     _validate_artifact(artifact, entry)
     return artifact
 
 
 def _load_artifact(path):
     return joblib.load(path)
+
+
+def _verified_artifact_bytes(path, entry):
+    expected = entry.get("artifact_sha256")
+    if not isinstance(expected, str) or ARTIFACT_SHA256.fullmatch(expected) is None:
+        raise ValueError("registry artifact SHA-256 is missing or invalid")
+    artifact_bytes = Path(path).read_bytes()
+    actual = hashlib.sha256(artifact_bytes).hexdigest()
+    if not hmac.compare_digest(expected, actual):
+        raise ValueError("registry artifact SHA-256 does not match file bytes")
+    return artifact_bytes
+
+
+def _artifact_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _validate_artifact(artifact, entry=None):

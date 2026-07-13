@@ -54,6 +54,48 @@ class DrawModelLearningTest(unittest.TestCase):
                 min(dates[index] for index in validation),
             )
 
+    def test_chronological_splits_keep_each_match_day_on_one_side(self):
+        dates = [
+            date(2026, 1, 1),
+            date(2026, 1, 1),
+            date(2026, 1, 2),
+            date(2026, 1, 2),
+            date(2026, 1, 3),
+            date(2026, 1, 3),
+            date(2026, 1, 4),
+            date(2026, 1, 4),
+        ]
+
+        splits = list(chronological_splits(dates, n_splits=3))
+
+        self.assertEqual(3, len(splits))
+        for train, validation in splits:
+            train_dates = {dates[index] for index in train}
+            validation_dates = {dates[index] for index in validation}
+            self.assertTrue(train_dates)
+            self.assertTrue(validation_dates)
+            self.assertLess(max(train_dates), min(validation_dates))
+            self.assertFalse(train_dates & validation_dates)
+
+    def test_chronological_splits_reduce_folds_for_repeated_dates(self):
+        dates = [
+            date(2026, 1, 1),
+            date(2026, 1, 1),
+            date(2026, 1, 2),
+            date(2026, 1, 2),
+        ]
+
+        splits = list(chronological_splits(dates, n_splits=3))
+
+        self.assertEqual(1, len(splits))
+        train, validation = splits[0]
+        self.assertLess(max(dates[index] for index in train), min(dates[index] for index in validation))
+
+    def test_chronological_splits_return_no_folds_with_one_unique_date(self):
+        dates = [date(2026, 1, 1)] * 3
+
+        self.assertEqual([], list(chronological_splits(dates, n_splits=2)))
+
     def test_challenger_cannot_promote_before_four_weeks(self):
         challenger = self._promotion_metrics(shadow_days=27)
         self.assertFalse(promotion_decision(challenger, {"max_drawdown": 90}))
@@ -81,6 +123,62 @@ class DrawModelLearningTest(unittest.TestCase):
 
         self._write_champion(0.001, SMALL_SAMPLE_FEATURES)
         self.assertEqual(0.03, predict_draw_probability(features, root=self.temp_root))
+
+    def test_prediction_rejects_missing_artifact_digest_before_joblib_load(self):
+        self._write_champion(0.66, SMALL_SAMPLE_FEATURES)
+        registry = self._read_registry()
+        registry["champion"].pop("artifact_sha256")
+        self._write_registry(registry, populate_digests=False)
+
+        with patch("draw_model_learning.joblib.load") as loader:
+            self.assertEqual(
+                0.31,
+                predict_draw_probability(
+                    self._feature_values(0.31, 0.30), root=self.temp_root
+                ),
+            )
+        loader.assert_not_called()
+
+    def test_prediction_rejects_mismatched_artifact_digest_before_joblib_load(self):
+        self._write_champion(0.66, SMALL_SAMPLE_FEATURES)
+        registry = self._read_registry()
+        registry["champion"]["artifact_sha256"] = "0" * 64
+        self._write_registry(registry, populate_digests=False)
+
+        with patch("draw_model_learning.joblib.load") as loader:
+            self.assertEqual(
+                0.31,
+                predict_draw_probability(
+                    self._feature_values(0.31, 0.30), root=self.temp_root
+                ),
+            )
+        loader.assert_not_called()
+
+    def test_prediction_rejects_tampered_valid_artifact_before_joblib_load(self):
+        self._write_champion(0.66, SMALL_SAMPLE_FEATURES)
+        registry = self._read_registry()
+        artifact_path = self.temp_root / registry["champion"]["artifact"]
+        artifact_path.write_bytes(artifact_path.read_bytes() + b"tampered")
+
+        self.assertEqual(
+            0.31,
+            predict_draw_probability(self._feature_values(0.31, 0.30), root=self.temp_root),
+        )
+
+    def test_prediction_rejects_malformed_artifact_digest(self):
+        self._write_champion(0.66, SMALL_SAMPLE_FEATURES)
+        registry = self._read_registry()
+        registry["champion"]["artifact_sha256"] = "not-a-sha256"
+        self._write_registry(registry, populate_digests=False)
+
+        with patch("draw_model_learning.joblib.load") as loader:
+            self.assertEqual(
+                0.31,
+                predict_draw_probability(
+                    self._feature_values(0.31, 0.30), root=self.temp_root
+                ),
+            )
+        loader.assert_not_called()
 
     def test_full_feature_champion_fails_closed_when_required_feature_is_missing(self):
         artifact = self._artifact(0.66, FEATURES, "full-v1")
@@ -415,6 +513,10 @@ class DrawModelLearningTest(unittest.TestCase):
 
         registry = self._read_registry()
         self.assertIsNotNone(registry["challenger"])
+        self.assertEqual(
+            self._artifact_sha256(self.temp_root / registry["challenger"]["artifact"]),
+            registry["challenger"]["artifact_sha256"],
+        )
         self.assertEqual(self._simulation_policy(), registry["challenger"]["simulation_policy"])
         self.assertEqual("2026-07-12", registry["last_training_date"])
 
@@ -738,6 +840,12 @@ class DrawModelLearningTest(unittest.TestCase):
         update_draw_model(self.temp_root, as_of=date(2026, 7, 12))
         recovered = self._read_registry()
         self.assertEqual("previous-v1", recovered["champion"]["version"])
+        self.assertEqual(
+            self._artifact_sha256(
+                self.temp_root / recovered["champion"]["artifact"]
+            ),
+            recovered["champion"]["artifact_sha256"],
+        )
         self.assertIsNone(recovered["previous_champion"])
 
         recovered["champion"] = self._model_registry_entry(
@@ -793,6 +901,8 @@ class DrawModelLearningTest(unittest.TestCase):
         self.assertIsNone(registry["challenger"])
         self.assertEqual("data/models/challenger-v2.joblib", registry["champion"]["artifact"])
         self.assertEqual("data/models/champion-v1.joblib", registry["previous_champion"]["artifact"])
+        self.assertEqual(challenger_entry["artifact_sha256"], registry["champion"]["artifact_sha256"])
+        self.assertEqual(champion_entry["artifact_sha256"], registry["previous_champion"]["artifact_sha256"])
         self.assertEqual(champion_bytes, champion_path.read_bytes())
         self.assertEqual(challenger_bytes, challenger_path.read_bytes())
         self.assertFalse((self.temp_root / "data" / "models" / "draw_champion.joblib").exists())
@@ -821,6 +931,10 @@ class DrawModelLearningTest(unittest.TestCase):
         self.assertIsNone(registry["previous_champion"])
         self.assertEqual("rollback", registry["last_model_event"]["type"])
         self.assertEqual("data/models/good-v1.joblib", registry["champion"]["artifact"])
+        self.assertEqual(
+            registry["champion"]["artifact_sha256"],
+            self._artifact_sha256(previous_path),
+        )
         self.assertEqual("bad-v2", registry["last_model_event"]["displaced_champion"]["version"])
         self.assertEqual(champion_bytes, champion_path.read_bytes())
         self.assertEqual(previous_bytes, previous_path.read_bytes())
@@ -1047,10 +1161,9 @@ class DrawModelLearningTest(unittest.TestCase):
         policy.update(overrides)
         return policy
 
-    @staticmethod
-    def _model_registry_entry(version, artifact_path, feature_order=None):
+    def _model_registry_entry(self, version, artifact_path, feature_order=None):
         order = list(feature_order or SMALL_SAMPLE_FEATURES)
-        return {
+        entry = {
             "version": version,
             "artifact": artifact_path,
             "feature_order": order,
@@ -1060,6 +1173,10 @@ class DrawModelLearningTest(unittest.TestCase):
                 else "full_feature_logistic"
             ),
         }
+        path = self.temp_root / artifact_path
+        if path.exists():
+            entry["artifact_sha256"] = self._artifact_sha256(path)
+        return entry
 
     def _install_artifact(
         self, artifact, filename, role="champion", registry_version=None
@@ -1076,7 +1193,7 @@ class DrawModelLearningTest(unittest.TestCase):
         self._write_registry({role: entry})
         return entry
 
-    def _write_registry(self, updates):
+    def _write_registry(self, updates, populate_digests=True):
         registry = {
             "schema_version": 1,
             "champion": None,
@@ -1087,9 +1204,24 @@ class DrawModelLearningTest(unittest.TestCase):
             "last_training_error": None,
         }
         registry.update(updates)
+        if populate_digests:
+            for role in ("champion", "challenger", "previous_champion"):
+                entry = registry.get(role)
+                if not isinstance(entry, dict) or "artifact_sha256" in entry:
+                    continue
+                artifact_path = entry.get("artifact")
+                if not isinstance(artifact_path, str):
+                    continue
+                path = self.temp_root / artifact_path
+                if path.exists():
+                    entry["artifact_sha256"] = self._artifact_sha256(path)
         (self.temp_root / "output" / "draw_model_registry.json").write_text(
             json.dumps(registry), encoding="utf-8"
         )
+
+    @staticmethod
+    def _artifact_sha256(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
     def _read_registry(self):
         return json.loads(
