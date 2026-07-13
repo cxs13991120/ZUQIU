@@ -10,8 +10,9 @@ permissions:
   contents: write
 
 concurrency:
-  group: odds-snapshot
-  cancel-in-progress: true
+  group: sporttery-repository
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   snapshot:
@@ -28,7 +29,9 @@ jobs:
           python-version: "3.12"
 
       - name: Capture official odds snapshot
-        run: python capture_odds_snapshot.py
+        run: |
+          TARGET_DATE="$(date +%F)"
+          python capture_odds_snapshot.py
 
       - name: Commit snapshot
         uses: stefanzweifel/git-auto-commit-action@v5

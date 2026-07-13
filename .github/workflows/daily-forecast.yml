@@ -12,8 +12,9 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: sporttery-repository
   cancel-in-progress: false
+  queue: max
 
 jobs:
   forecast:
@@ -33,18 +34,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install image fonts and library
+      - name: Install learning dependencies and image fonts
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq fonts-noto-cjk
+          python -m pip install --quiet -r requirements.txt
           python -m pip install --quiet pillow
 
       - name: Generate daily forecast and plan
         run: |
-          python import_sporttery.py
+          TARGET_DATE="$(date +%F)"
+          python import_sporttery.py --date "$TARGET_DATE"
           python build_historical_features.py
-          python predict_today.py
-          python generate_betting_plan.py
+          python predict_today.py --date "$TARGET_DATE"
+          python generate_betting_plan.py --date "$TARGET_DATE"
+          python collect_market_heat.py --date "$TARGET_DATE"
+          python generate_draw_alert.py --date "$TARGET_DATE"
+          python draw_alert_ledger.py --settle
           python build_site.py
           python build_daily_image.py
 
@@ -52,7 +58,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update daily Sporttery forecast"
-          file_pattern: "data/*.csv data/*.json output/*.csv output/*.md output/*.json web/index.html web/daily-report.png"
+          file_pattern: "data/*.csv data/*.json data/market_heat_*.json data/draw_feature_snapshots/*.json data/models/*.joblib output/*.csv output/*.md output/*.json output/draw_alert*.csv output/draw_alert*.json output/draw_model_registry.json web/index.html web/daily-report.png"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

@@ -1,9 +1,11 @@
 """Settle 90-minute draw alerts and maintain subtype learning metrics."""
 
 import csv
+import argparse
 import json
 import math
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -301,3 +303,23 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--settle", action="store_true", help="refresh the draw alert ledger")
+    args = parser.parse_args(argv)
+    if not args.settle:
+        parser.error("--settle is required")
+    try:
+        ledger_path, metrics_path = update_draw_alert_ledger()
+    except Exception as error:
+        print(f"draw alert ledger update failed: {error}", file=sys.stderr)
+        return 1
+    print(ledger_path)
+    print(metrics_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

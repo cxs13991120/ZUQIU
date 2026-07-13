@@ -3,8 +3,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from draw_alert_ledger import compute_subtype_metrics, settle_alert, update_draw_alert_ledger
+from draw_alert_ledger import compute_subtype_metrics, main, settle_alert, update_draw_alert_ledger
 
 
 def settled_row(**overrides):
@@ -20,6 +21,19 @@ def settled_row(**overrides):
 
 
 class DrawAlertLedgerTest(unittest.TestCase):
+    def test_settle_cli_calls_ledger_update(self):
+        with patch(
+            "draw_alert_ledger.update_draw_alert_ledger",
+            return_value=(Path("ledger.csv"), Path("metrics.json")),
+        ) as update:
+            self.assertEqual(0, main(["--settle"]))
+
+        update.assert_called_once_with()
+
+    def test_settle_cli_returns_nonzero_when_ledger_update_fails(self):
+        with patch("draw_alert_ledger.update_draw_alert_ledger", side_effect=RuntimeError("write failed")):
+            self.assertEqual(1, main(["--settle"]))
+
     def test_90_minute_draw_wins_even_when_team_wins_extra_time(self):
         alert = {"date": "2026-07-11", "match": "挪威 vs 英格兰", "domestic_draw_odds": "3.60", "hypothetical_stake": "10", "settlement_mode": "observation"}
         result = {"home_goals": "1", "away_goals": "1"}

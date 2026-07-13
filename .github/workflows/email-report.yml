@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: sporttery-repository
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   email:
     runs-on: ubuntu-latest

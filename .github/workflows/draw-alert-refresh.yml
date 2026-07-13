@@ -1,0 +1,95 @@
+name: Draw Alert Refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 13:30 Beijing time, after new market snapshots are available.
+    - cron: "30 5 * * *"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: sporttery-repository
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout latest main report
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install learning dependencies and image fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+          python -m pip install --quiet -r requirements.txt
+          python -m pip install --quiet pillow
+
+      - name: Refresh Sporttery import
+        continue-on-error: true
+        run: |
+          TARGET_DATE="$(date +%F)"
+          python import_sporttery.py --date "$TARGET_DATE"
+
+      - name: Refresh predictions
+        continue-on-error: true
+        run: |
+          TARGET_DATE="$(date +%F)"
+          python predict_today.py --date "$TARGET_DATE"
+
+      - name: Refresh optional market evidence
+        continue-on-error: true
+        run: |
+          TARGET_DATE="$(date +%F)"
+          python collect_market_heat.py --date "$TARGET_DATE"
+
+      - name: Refresh draw alerts
+        continue-on-error: true
+        run: |
+          TARGET_DATE="$(date +%F)"
+          python generate_draw_alert.py --date "$TARGET_DATE"
+
+      - name: Refresh draw alert ledger
+        continue-on-error: true
+        run: python draw_alert_ledger.py --settle
+
+      - name: Rebuild report from the latest committed data
+        run: |
+          python build_site.py
+          python build_daily_image.py
+
+      - name: Commit refreshed files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Refresh draw alert report"
+          file_pattern: "data/*.csv data/*.json data/market_heat_*.json data/draw_feature_snapshots/*.json data/models/*.joblib output/*.csv output/*.md output/*.json output/draw_alert*.csv output/draw_alert*.json output/draw_model_registry.json web/index.html web/daily-report.png"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
