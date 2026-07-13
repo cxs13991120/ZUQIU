@@ -3,8 +3,8 @@ name: Daily Sporttery Forecast
 on:
   workflow_dispatch:
   schedule:
-    # 11:30 Beijing time
-    - cron: "30 3 * * *"
+    # 12:15 Beijing time, after the daily Sporttery data update.
+    - cron: "15 4 * * *"
 
 permissions:
   contents: write
