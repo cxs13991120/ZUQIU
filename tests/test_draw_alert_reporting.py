@@ -15,6 +15,19 @@ def deeply_nested_evidence(depth: int = 1200) -> str:
     return '{"nested":' * depth + '{"source":"<& deep source"}' + "}" * depth
 
 
+EVIDENCE_LINE_BREAKS = ("\n", "\r", "\t", "\v", "\f", "\u0085", "\u2028", "\u2029")
+
+
+def multiline_evidence_source() -> tuple[str, str]:
+    segments = [f"普通中文符号段{index:02d}甲乙" for index in range(10)]
+    segments[0] = "普通中文<&符号段00甲乙"
+    separators = ["\n", "\r", "\r\n", "\t", "\v", "\f", "\u0085", "\u2028", "\u2029"]
+    source = segments[0]
+    for separator, segment in zip(separators, segments[1:]):
+        source += separator + segment
+    return source, " ".join(segments)
+
+
 class DrawAlertReportingTest(unittest.TestCase):
     def test_linked_alert_copy_does_not_claim_extra_stake(self):
         html = render_draw_alert([
@@ -531,6 +544,119 @@ class DrawAlertReportingTest(unittest.TestCase):
         long_summary = build_site.evidence_source_summary(long_source)
         self.assertEqual("\u8bc1\u636e\u6765\u6e90\u5df2\u622a\u65ad", long_summary)
         self.assertLessEqual(len(long_summary), 160)
+
+    def test_evidence_summary_and_web_normalize_all_line_break_whitespace(self):
+        source, expected = multiline_evidence_source()
+        evidence = json.dumps({"source": source}, ensure_ascii=False)
+
+        summary = build_site.evidence_source_summary(evidence)
+        self.assertEqual(expected, summary)
+        for character in EVIDENCE_LINE_BREAKS:
+            self.assertNotIn(character, summary)
+
+        html = render_draw_alert([
+            {
+                "rank": "1",
+                "subtype": "cold_draw",
+                "match": "multiline evidence",
+                "settlement_mode": "observation",
+                "evidence_json": evidence,
+            }
+        ])
+        evidence_fragment = html.split("<p><span>\u8bc1\u636e\u6765\u6e90</span>", 1)[1].split("</p>", 1)[0]
+        self.assertIn("\u666e\u901a\u4e2d\u6587&lt;&amp;\u7b26\u53f7", evidence_fragment)
+        for character in EVIDENCE_LINE_BREAKS:
+            self.assertNotIn(character, evidence_fragment)
+
+    def test_evidence_input_limit_is_applied_before_json_parsing(self):
+        oversized = json.dumps(
+            {"source": "x" * (build_site.EVIDENCE_MAX_INPUT_CHARS + 1)},
+            ensure_ascii=False,
+        )
+        self.assertGreater(len(oversized), build_site.EVIDENCE_MAX_INPUT_CHARS)
+
+        with patch.object(build_site.json, "loads", side_effect=AssertionError("oversized evidence was parsed")) as loads:
+            summary = build_site.evidence_source_summary(oversized)
+
+        self.assertEqual(build_site.EVIDENCE_TRUNCATED, summary)
+        loads.assert_not_called()
+
+    def test_joined_evidence_sources_respect_160_character_summary_limit(self):
+        evidence = json.dumps(
+            [{"source": "甲" * 80}, {"provider": "乙" * 80}],
+            ensure_ascii=False,
+        )
+
+        summary = build_site.evidence_source_summary(evidence)
+
+        self.assertEqual(build_site.EVIDENCE_TRUNCATED, summary)
+        self.assertEqual(160, getattr(build_site, "EVIDENCE_MAX_SUMMARY_CHARS", None))
+        self.assertLessEqual(len(summary), 160)
+
+    def test_daily_image_evidence_draw_calls_are_single_line_and_stay_in_alert_row(self):
+        class RecordingDraw:
+            def __init__(self, drawing, calls):
+                self.drawing = drawing
+                self.calls = calls
+
+            def __getattr__(self, name):
+                return getattr(self.drawing, name)
+
+            def text(self, xy, text, *args, **kwargs):
+                self.calls.append((text, xy, kwargs))
+                return self.drawing.text(xy, text, *args, **kwargs)
+
+        source, expected = multiline_evidence_source()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            web = root / "web"
+            output.mkdir()
+            (output / "betting_plan_2026-07-13.csv").write_text("match,play,odds,stake,selection\n", encoding="utf-8")
+            (output / "betting_ledger.csv").write_text("date,play,match,selection,stake,status,profit\n", encoding="utf-8")
+            alert_path = output / "draw_alert_2026-07-13.csv"
+            fieldnames = ["date", "rank", "subtype", "match", "settlement_mode", "evidence_json"]
+            with alert_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "date": "2026-07-13",
+                        "rank": "1",
+                        "subtype": "cold_draw",
+                        "match": "multiline evidence",
+                        "settlement_mode": "observation",
+                        "evidence_json": json.dumps({"source": source}, ensure_ascii=False),
+                    }
+                )
+            calls = []
+            original_draw = build_daily_image.ImageDraw.Draw
+
+            with patch.object(build_daily_image, "OUTPUT_DIR", output), patch.object(build_daily_image, "WEB_DIR", web), patch.object(
+                build_daily_image.ImageDraw,
+                "Draw",
+                side_effect=lambda image: RecordingDraw(original_draw(image), calls),
+            ):
+                image_path = build_daily_image.draw_report()
+
+            with build_daily_image.Image.open(image_path) as image:
+                self.assertEqual((1600, 1060), image.size)
+
+        for text, _, _ in calls:
+            for character in EVIDENCE_LINE_BREAKS:
+                self.assertNotIn(character, text)
+        _, (_, title_y), _ = next(call for call in calls if call[0].startswith("\u7b2c1\u573a"))
+        alert_top = title_y - 14
+        evidence_calls = [call for call in calls if call[1][1] in {alert_top + 105, alert_top + 125}]
+        self.assertGreaterEqual(len(evidence_calls), 1)
+        self.assertLessEqual(len(evidence_calls), 2)
+        rendered_evidence = "".join(text for text, _, _ in evidence_calls)
+        self.assertIn("<&", rendered_evidence)
+        self.assertIn(expected.split(" ", 1)[0], rendered_evidence)
+        measurement = build_daily_image.ImageDraw.Draw(build_daily_image.Image.new("RGB", (1600, 10)))
+        for text, (x, y), kwargs in evidence_calls:
+            bounds = measurement.textbbox((x, y), text, font=kwargs["font"])
+            self.assertLessEqual(bounds[3], alert_top + 154, text)
 
     def test_deep_evidence_json_falls_back_safely_in_daily_image(self):
         class RecordingDraw:

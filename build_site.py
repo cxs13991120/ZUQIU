@@ -21,7 +21,7 @@ SETTLEMENT_LABELS = {
 EVIDENCE_MAX_DEPTH = 16
 EVIDENCE_MAX_NODES = 256
 EVIDENCE_MAX_INPUT_CHARS = 32_768
-EVIDENCE_MAX_SUMMARY_LENGTH = 160
+EVIDENCE_MAX_SUMMARY_CHARS = 160
 EVIDENCE_SOURCE_KEYS = ("source", "provider", "bookmaker", "name")
 EVIDENCE_TOO_DEEP = "证据结构过深"
 EVIDENCE_TRUNCATED = "证据来源已截断"
@@ -415,6 +415,10 @@ def evidence_json_exceeds_depth(value: str) -> bool:
     return False
 
 
+def normalize_evidence_whitespace(value: object) -> str:
+    return " ".join(external_text(value).split())
+
+
 def evidence_source_summary(value: object) -> str:
     """Return a bounded summary of named evidence sources without echoing raw JSON."""
     raw_evidence = external_text(value).strip()
@@ -445,10 +449,10 @@ def evidence_source_summary(value: object) -> str:
                 source = item.get(key)
                 if not isinstance(source, (str, int, float)):
                     continue
-                source_text = external_text(source).strip()
+                source_text = normalize_evidence_whitespace(source)
                 if not source_text or source_text in seen_sources:
                     continue
-                if len(source_text) > EVIDENCE_MAX_SUMMARY_LENGTH:
+                if len(source_text) > EVIDENCE_MAX_SUMMARY_CHARS:
                     return EVIDENCE_TRUNCATED
                 seen_sources.add(source_text)
                 if len(sources) < 3:
@@ -464,8 +468,8 @@ def evidence_source_summary(value: object) -> str:
             child_depth = depth + 1 if isinstance(child, (list, dict)) else depth
             stack.append((child, child_depth))
 
-    summary = "、".join(sources) if sources else "已记录来源"
-    return summary if len(summary) <= EVIDENCE_MAX_SUMMARY_LENGTH else EVIDENCE_TRUNCATED
+    summary = normalize_evidence_whitespace("、".join(sources) if sources else "已记录来源")
+    return summary if len(summary) <= EVIDENCE_MAX_SUMMARY_CHARS else EVIDENCE_TRUNCATED
 
 
 def draw_alert_value(alert: dict, key: str) -> float | None:
