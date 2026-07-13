@@ -804,6 +804,8 @@ git commit -m "feat: add guarded draw model learning"
 **Files:**
 - Modify: `build_site.py`
 - Modify: `build_daily_image.py`
+- Modify: `web/index.html`
+- Modify: `web/daily-report.png`
 - Create: `tests/test_draw_alert_reporting.py`
 
 **Interfaces:**
@@ -890,7 +892,7 @@ Expected: tests PASS; `web/index.html` and `web/daily-report.png` are regenerate
 - [ ] **Step 6: Commit reporting**
 
 ```bash
-git add build_site.py build_daily_image.py tests/test_draw_alert_reporting.py
+git add build_site.py build_daily_image.py tests/test_draw_alert_reporting.py web/index.html web/daily-report.png
 git commit -m "feat: show draw alerts in daily reports"
 ```
 
