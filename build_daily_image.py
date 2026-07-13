@@ -307,18 +307,18 @@ def draw_report() -> Path:
             y += 124
 
     draw.line((70, y, WIDTH - 70, y), fill=line, width=2)
-    y += 16
+    alert_header_y = y
     subtype_progress, model_progress, paused_leagues = draw_alert_heading(draw_alert_metrics, draw_model_registry)
-    draw.text((70, y), "平局预警", font=font(30), fill=ink)
-    draw_fitted_text(draw, (250, y + 6), subtype_progress, font(18), muted, WIDTH - 70 - 250)
-    draw_fitted_text(draw, (70, y + 28), model_progress, font(15), muted, 650)
-    draw_fitted_text(draw, (760, y + 28), paused_leagues, font(15), muted, WIDTH - 70 - 760)
+    draw.text((70, alert_header_y + 7), "平局预警", font=font(30), fill=ink)
+    draw_fitted_text(draw, (250, alert_header_y + 13), subtype_progress, font(18), muted, WIDTH - 70 - 250)
+    draw_fitted_text(draw, (70, alert_header_y + 45), model_progress, font(15), muted, 650)
+    draw_fitted_text(draw, (760, alert_header_y + 45), paused_leagues, font(15), muted, WIDTH - 70 - 760)
     training_error = external_text(draw_model_registry.get("last_training_error")).strip()
     if training_error:
-        draw_fitted_text(draw, (70, y + 46), f"最近训练异常：{training_error}", font(14), red, WIDTH - 140)
+        draw_fitted_text(draw, (70, alert_header_y + 63), f"最近训练异常：{training_error}", font(14), red, WIDTH - 140)
     if not draw_alerts:
-        draw.text((70, y + 65), "今日无符合门槛的平局预警", font=font(14), fill=muted)
-    y += 84
+        draw.text((70, alert_header_y + 80), "今日无符合门槛的平局预警", font=font(14), fill=muted)
+    y = alert_header_y + 100
 
     for alert in draw_alerts:
         subtype = SUBTYPE_LABELS.get(external_text(alert.get("subtype")), "待分类平局")

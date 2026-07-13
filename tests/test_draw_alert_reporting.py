@@ -186,6 +186,121 @@ class DrawAlertReportingTest(unittest.TestCase):
             observations_y = next(y for text, (_, y), _ in positions if text == "零金额观察单")
             self.assertLessEqual(empty_y + empty_font.getbbox("今日无符合门槛的平局预警")[3], observations_y)
 
+    def test_crowded_zero_alert_header_lines_do_not_overlap_inside_fixed_block(self):
+        class RecordingDraw:
+            def __init__(self, drawing, calls):
+                self.drawing = drawing
+                self.calls = calls
+
+            def __getattr__(self, name):
+                return getattr(self.drawing, name)
+
+            def text(self, xy, text, *args, **kwargs):
+                self.calls.append((text, xy, kwargs))
+                return self.drawing.text(xy, text, *args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            web = root / "web"
+            output.mkdir()
+            (output / "betting_plan_2026-07-13.csv").write_text("match,play,odds,stake,selection\n", encoding="utf-8")
+            (output / "betting_ledger.csv").write_text("date,play,match,selection,stake,status,profit\n", encoding="utf-8")
+            (output / "observation_plan_2026-07-13.csv").write_text(
+                "match,selection,odds,probability,raw_model_probability,market_probability\nA vs B,平,3.2,0.3,0.3,0.3\n",
+                encoding="utf-8",
+            )
+            (output / "draw_alert_metrics.json").write_text(
+                json.dumps(
+                    {
+                        "subtypes": {
+                            "cold_draw": {"count": 29},
+                            "balanced_draw": {"count": 30, "promoted": True},
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (output / "draw_model_registry.json").write_text(
+                json.dumps(
+                    {
+                        "champion": {"version": "冠军模型版本" * 12},
+                        "challenger": {
+                            "version": "挑战者模型版本" * 12,
+                            "shadow_days": 28,
+                            "sample_count": 30,
+                            "bet_count": 12,
+                        },
+                        "per_league": {"超长暂停联赛名称" * 12: {"paused": True}},
+                        "last_training_error": "训练错误详情" * 40,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            calls = []
+            original_draw = build_daily_image.ImageDraw.Draw
+
+            with patch.object(build_daily_image, "OUTPUT_DIR", output), patch.object(build_daily_image, "WEB_DIR", web), patch.object(
+                build_daily_image.ImageDraw,
+                "Draw",
+                side_effect=lambda image: RecordingDraw(original_draw(image), calls),
+            ):
+                image_path = build_daily_image.draw_report()
+
+            with build_daily_image.Image.open(image_path) as image:
+                self.assertEqual((1600, 1018), image.size)
+
+        def find_call(prefix: str, *, exact: bool = False):
+            return next(
+                call
+                for call in calls
+                if (call[0] == prefix if exact else call[0].startswith(prefix))
+            )
+
+        header_calls = {
+            "title": find_call("平局预警", exact=True),
+            "subtypes": find_call("冷门平局"),
+            "model": find_call("冠军 "),
+            "paused": find_call("暂停联赛："),
+            "error": find_call("最近训练异常："),
+            "empty": find_call("今日无符合门槛的平局预警", exact=True),
+        }
+        following_y = find_call("零金额观察单", exact=True)[1][1]
+        header_top = following_y - 100
+        header_bottom = following_y
+        measurement = build_daily_image.ImageDraw.Draw(build_daily_image.Image.new("RGB", (1600, 10)))
+        boxes = {
+            key: measurement.textbbox(call[1], call[0], font=call[2]["font"])
+            for key, call in header_calls.items()
+        }
+
+        for key, box in boxes.items():
+            self.assertGreaterEqual(box[1], header_top, key)
+            self.assertLessEqual(box[3], header_bottom, key)
+            self.assertGreaterEqual(box[0], 70, key)
+            self.assertLessEqual(box[2], build_daily_image.WIDTH - 70, key)
+
+        rows = [
+            ("title", "subtypes"),
+            ("model", "paused"),
+            ("error",),
+            ("empty",),
+        ]
+        row_bands = [
+            (min(boxes[key][1] for key in row), max(boxes[key][3] for key in row))
+            for row in rows
+        ]
+        for upper, lower in zip(row_bands, row_bands[1:]):
+            self.assertLessEqual(upper[1], lower[0], (upper, lower))
+
+        box_values = list(boxes.items())
+        for index, (left_key, left) in enumerate(box_values):
+            for right_key, right in box_values[index + 1:]:
+                intersects = left[0] < right[2] and right[0] < left[2] and left[1] < right[3] and right[1] < left[3]
+                self.assertFalse(intersects, (left_key, left, right_key, right))
+
     def test_daily_alert_reader_enriches_rows_from_alert_ledger(self):
         with TemporaryDirectory() as directory:
             output = Path(directory) / "output"
