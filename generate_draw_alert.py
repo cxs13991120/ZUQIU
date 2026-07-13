@@ -5,12 +5,13 @@ import csv
 import hashlib
 import importlib
 import json
+import math
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from draw_alert_core import DrawInputs, MarketEvidence, classify_candidate, fair_probabilities
+from draw_alert_core import COLD_RESISTANCE_SIGNALS, DrawInputs, MarketEvidence, classify_candidate, fair_probabilities, is_finite_between, valid_odds
 
 
 ROOT = Path(__file__).resolve().parent
@@ -40,6 +41,8 @@ def derive_structural_signals(
     config: dict,
 ) -> tuple[str, ...]:
     fair = fair_probabilities(*domestic_odds)
+    if fair is None:
+        return ()
     underdog_probability = min(model_probabilities[0], model_probabilities[2])
     signals = []
     if str(stage).casefold() in {str(value).casefold() for value in config.get("knockout_stages", [])}:
@@ -63,17 +66,50 @@ def same_match(alert: dict, row: dict) -> bool:
     )
 
 
+def _combo_draw_matches(alert: dict, row: dict) -> bool:
+    raw_legs = row.get("legs_json")
+    try:
+        legs = json.loads(raw_legs)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(legs, list):
+        return False
+    return any(
+        isinstance(leg, dict)
+        and leg.get("selection") == "平"
+        and same_match(alert, leg)
+        for leg in legs
+    )
+
+
 def select_alerts(candidates: list[dict], rank_gates=RANK_GATES, max_alerts: int = 4, max_per_league: int = 2) -> list[dict]:
     selected = []
     league_counts = {}
-    for candidate in sorted(candidates, key=lambda item: (float(item["score"]), item["match_id"]), reverse=True):
+    valid_candidates = []
+    for candidate in candidates:
+        try:
+            score = float(candidate["score"])
+            probability = float(candidate["model_draw_probability"])
+            edge = float(candidate["draw_edge"])
+            expected_value = float(candidate["expected_value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (
+            is_finite_between(score, -10.0, 10.0)
+            and is_finite_between(probability, 0.0, 1.0)
+            and is_finite_between(edge, -1.0, 1.0)
+            and is_finite_between(expected_value, 0.0, 100.0)
+        ):
+            continue
+        valid_candidates.append((candidate, score, probability, edge, expected_value))
+    for candidate, score, candidate_probability, candidate_edge, candidate_expected_value in sorted(valid_candidates, key=lambda item: (item[1], item[0]["match_id"]), reverse=True):
         if len(selected) == max_alerts:
             break
         league = candidate.get("stage") or "unknown"
         if league_counts.get(league, 0) >= max_per_league:
             continue
         probability, edge, expected_value = rank_gates[len(selected)]
-        if candidate["model_draw_probability"] < probability or candidate["draw_edge"] < edge or candidate["expected_value"] < expected_value:
+        if candidate_probability < probability or candidate_edge < edge or candidate_expected_value < expected_value:
             continue
         row = {**candidate, "rank": len(selected) + 1}
         selected.append(row)
@@ -83,7 +119,15 @@ def select_alerts(candidates: list[dict], rank_gates=RANK_GATES, max_alerts: int
 
 def attach_stake(alert: dict, main_plan: list[dict], existing_alerts: list[dict], subtype_metrics: dict, daily_budget: int, alert_budget: int, requested_stake: int, minimum_stake: int = 10) -> dict:
     result = dict(alert)
-    linked = next((row for row in main_plan if same_match(alert, row) and row.get("selection") == "平"), None)
+    linked = next(
+        (
+            row
+            for row in main_plan
+            if (same_match(alert, row) and row.get("selection") == "平")
+            or _combo_draw_matches(alert, row)
+        ),
+        None,
+    )
     result["hypothetical_stake"] = 10
     if linked:
         result.update(additional_stake=0, linked_main_stake=int(float(linked.get("stake") or 0)), settlement_mode="linked")
@@ -193,6 +237,8 @@ def _candidate_from_rows(
         xg_a, xg_b = float(prediction["xg_a"]), float(prediction["xg_b"])
     except (KeyError, TypeError, ValueError):
         return None
+    if not all(is_finite_between(value, 0.0, 10.0) for value in (xg_a, xg_b)):
+        return None
     fair = fair_probabilities(*odds)
     stage = str(prediction.get("stage", ""))
     knockout_stages = {
@@ -251,6 +297,17 @@ def _candidate_from_rows(
     classified = classify_candidate(inputs, draw_config)
     if not classified:
         return None
+    structure_count = len(set(signals))
+    if classified.subtype == "cold_draw":
+        structure_count = len(set(signals) & COLD_RESISTANCE_SIGNALS)
+    alert_level = (
+        "高级"
+        if calibrated_draw_probability >= 0.32
+        and classified.draw_edge >= 0.06
+        and classified.expected_value >= 1.08
+        and structure_count >= 3
+        else "中级"
+    )
     return {
         "date": prediction.get("date", ""),
         "match_id": match_id,
@@ -269,7 +326,7 @@ def _candidate_from_rows(
         "evidence_json": json.dumps(_qualifying_source_records(evidence), ensure_ascii=False, sort_keys=True),
         "data_quality": inputs.data_quality,
         "captured_at": snapshot_time.isoformat(),
-        "alert_level": f"rank_{len(signals)}",
+        "alert_level": alert_level,
         "strategy_version": app_config.get("strategy_version", ""),
         "feature_version": draw_config.get("feature_version", ""),
         "score": classified.score,
@@ -307,7 +364,20 @@ def _qualifying_source_records(evidence: dict) -> dict:
         and record.get("market_type") == "win_draw_loss"
         and _integer(record.get("settlement_minutes")) == 90
         and record.get("includes_extra_time") is False
+        and _source_probabilities_are_valid(record)
     }
+
+
+def _source_probabilities_are_valid(record: dict) -> bool:
+    fields = ("home_probability", "draw_probability", "away_probability")
+    present = [field for field in fields if field in record]
+    if not present:
+        return True
+    return len(present) == len(fields) and all(
+        (value := _number(record.get(field))) is not None
+        and is_finite_between(value, 0.0, 1.0)
+        for field in fields
+    )
 
 
 def _domestic_odds(domestic: dict, match_id: str) -> tuple[float, float, float] | None:
@@ -316,7 +386,7 @@ def _domestic_odds(domestic: dict, match_id: str) -> tuple[float, float, float] 
         odds = (float(had["h"]), float(had["d"]), float(had["a"]))
     except (KeyError, TypeError, ValueError):
         return None
-    return odds if all(value > 0 for value in odds) else None
+    return odds if valid_odds(odds) else None
 
 
 def _calibrated_probability(features: dict, fallback: float, root: Path = ROOT) -> float:
@@ -458,11 +528,12 @@ def _load_json(path: Path, default):
         return default
 
 
-def _number(value) -> float:
+def _number(value) -> float | None:
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _integer(value) -> int:

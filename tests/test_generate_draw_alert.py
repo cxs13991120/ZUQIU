@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import patch
 import joblib
 
 from draw_model_learning import FEATURES, _train_artifact, predict_draw_probability
-from generate_draw_alert import FIELDS, _calibrated_probability, _capture_feature_snapshot, attach_stake, derive_structural_signals, generate_alerts, select_alerts
+from generate_draw_alert import FIELDS, _calibrated_probability, _candidate_from_rows, _capture_feature_snapshot, _qualifying_source_records, attach_stake, derive_structural_signals, generate_alerts, select_alerts
 
 
 class GenerateDrawAlertTest(unittest.TestCase):
@@ -121,6 +122,94 @@ class GenerateDrawAlertTest(unittest.TestCase):
         candidates = [{"score": 1 - index / 10, "match_id": str(index), "stage": f"L{index}", "model_draw_probability": 0.32, "draw_edge": 0.06, "expected_value": 1.10} for index in range(5)]
         self.assertEqual(3, len(select_alerts(candidates)))
 
+    def test_rank_gate_rejects_nonfinite_or_out_of_range_candidate_numbers(self):
+        base = {"score": 0.50, "match_id": "A", "stage": "L1", "model_draw_probability": 0.34, "draw_edge": 0.08, "expected_value": 1.12}
+        for field, value in (
+            ("score", float("nan")),
+            ("model_draw_probability", float("inf")),
+            ("draw_edge", float("nan")),
+            ("expected_value", float("inf")),
+            ("model_draw_probability", 1.1),
+            ("draw_edge", 1.1),
+        ):
+            with self.subTest(field=field, value=value):
+                self.assertEqual([], select_alerts([{**base, field: value}]))
+
+    def test_alert_level_uses_approved_high_and_medium_thresholds(self):
+        evidence = {
+            "market_scope": "90m",
+            "quality": "high",
+            "favorite_movement": -0.05,
+            "regional_gap": 0.06,
+            "sources": {
+                "domestic": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+            },
+        }
+        domestic = {"001": {"had": {"h": "1.60", "d": "4.00", "a": "6.00"}}}
+        common = {
+            "date": "2026-07-12", "match_id": "001", "team_a": "A", "team_b": "B",
+            "stage": "quarterfinal", "xg_a": "1.0", "xg_b": "1.0", "p_a": "0.54", "p_b": "0.14",
+        }
+        draw_config = {
+            "min_draw_probability": 0.27, "min_draw_edge": 0.04, "min_expected_value": 1.05,
+            "max_xg_total": 2.5, "cold_favorite_probability": 0.55,
+            "balanced_max_win_gap": 0.1, "balanced_max_xg_total": 2.35,
+        }
+        app_config = {"knockout_stages": ["quarterfinal"]}
+        high = _candidate_from_rows(
+            {**common, "p_draw": "0.32"}, evidence, domestic, datetime(2026, 7, 12, tzinfo=timezone.utc),
+            draw_config, app_config,
+        )
+        medium = _candidate_from_rows(
+            {**common, "p_draw": "0.31"}, evidence, domestic, datetime(2026, 7, 12, tzinfo=timezone.utc),
+            draw_config, app_config,
+        )
+
+        self.assertEqual("高级", high["alert_level"])
+        self.assertEqual("中级", medium["alert_level"])
+
+    def test_candidate_rejects_an_unreasonable_individual_xg_value(self):
+        evidence = {
+            "market_scope": "90m", "quality": "high", "favorite_movement": -0.05, "regional_gap": 0.06,
+            "sources": {
+                "domestic": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+                "professional": {"market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False},
+            },
+        }
+        candidate = _candidate_from_rows(
+            {
+                "date": "2026-07-12", "match_id": "001", "team_a": "A", "team_b": "B", "stage": "quarterfinal",
+                "xg_a": "-1.0", "xg_b": "3.0", "p_a": "0.54", "p_draw": "0.32", "p_b": "0.14",
+            },
+            evidence, {"001": {"had": {"h": "1.60", "d": "4.00", "a": "6.00"}}},
+            datetime(2026, 7, 12, tzinfo=timezone.utc),
+            {
+                "min_draw_probability": 0.27, "min_draw_edge": 0.04, "min_expected_value": 1.05,
+                "max_xg_total": 2.5, "cold_favorite_probability": 0.55,
+                "balanced_max_win_gap": 0.1, "balanced_max_xg_total": 2.35,
+            },
+            {"knockout_stages": ["quarterfinal"]},
+        )
+
+        self.assertIsNone(candidate)
+
+    def test_nonfinite_market_probability_cannot_be_a_qualifying_source(self):
+        records = _qualifying_source_records({
+            "sources": {
+                "bad": {
+                    "market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False,
+                    "home_probability": float("nan"), "draw_probability": 0.25, "away_probability": 0.55,
+                },
+                "good": {
+                    "market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False,
+                    "home_probability": 0.20, "draw_probability": 0.25, "away_probability": 0.55,
+                },
+            },
+        })
+
+        self.assertEqual({"good"}, set(records))
+
     def test_overlap_reuses_main_stake_without_additional_money(self):
         alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
         main = [{"match_id": "001", "stake": "100", "selection": "平"}]
@@ -136,6 +225,52 @@ class GenerateDrawAlertTest(unittest.TestCase):
         self.assertEqual(0, result["additional_stake"])
         self.assertEqual(100, result["linked_main_stake"])
         self.assertEqual("linked", result["settlement_mode"])
+
+    def test_combo_draw_leg_reuses_the_combo_stake(self):
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
+        main = [{
+            "selection": "串关",
+            "stake": "60",
+            "legs_json": json.dumps([
+                {"match_id": "001", "team_a": "A", "team_b": "B", "selection": "平"},
+            ]),
+        }]
+
+        result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
+
+        self.assertEqual(0, result["additional_stake"])
+        self.assertEqual(60, result["linked_main_stake"])
+        self.assertEqual("linked", result["settlement_mode"])
+
+    def test_combo_draw_leg_uses_date_and_forward_team_order_as_fallback(self):
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
+        main = [{
+            "selection": "串关",
+            "stake": "60",
+            "legs_json": json.dumps([
+                {"date": "2026-07-12", "team_a": "B", "team_b": "A", "selection": "平"},
+                {"date": "2026-07-12", "team_a": "A", "team_b": "B", "selection": "平"},
+            ]),
+        }]
+
+        result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
+
+        self.assertEqual("linked", result["settlement_mode"])
+        self.assertEqual(60, result["linked_main_stake"])
+
+    def test_unparseable_combo_legs_fail_closed_without_matching_other_selections(self):
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
+        main = [{
+            "selection": "串关",
+            "stake": "60",
+            "legs_json": "not-json",
+        }]
+
+        result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
+
+        self.assertEqual("standalone", result["settlement_mode"])
+        self.assertEqual(30, result["additional_stake"])
+        self.assertEqual(0, result["linked_main_stake"])
 
     def test_unpromoted_subtype_is_zero_stake_observation(self):
         result = attach_stake({"match_id": "002", "subtype": "balanced_draw"}, [], [], {"promoted": False}, 500, 80, 30)
@@ -225,6 +360,7 @@ class GenerateDrawAlertTest(unittest.TestCase):
                     "champion": {
                         "version": artifact["metadata"]["version"],
                         "artifact": artifact_path.relative_to(root).as_posix(),
+                        "artifact_sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
                         "feature_order": artifact["feature_order"],
                         "model_kind": artifact["metadata"]["model_kind"],
                     },

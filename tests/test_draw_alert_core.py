@@ -31,7 +31,7 @@ def sample(**changes):
         ),
         market_scope="90m", favorite_movement=-0.06, regional_gap=0.07,
         underdog_win_probability=0.14, underdog_not_lose_probability=0.46,
-        structural_signals=("knockout_caution", "underdog_defense"), data_quality="high",
+        structural_signals=("knockout_caution", "underdog_defense", "underdog_resistance"), data_quality="high",
     )
     values.update(changes)
     return DrawInputs(**values)
@@ -41,6 +41,12 @@ class DrawAlertCoreTest(unittest.TestCase):
     def test_fair_probabilities_remove_overround(self):
         fair = fair_probabilities(1.90, 3.60, 4.00)
         self.assertAlmostEqual(1.0, sum(fair), places=9)
+
+    def test_fair_probabilities_reject_nonfinite_and_unreasonable_odds(self):
+        self.assertIsNone(fair_probabilities(float("nan"), 3.60, 4.00))
+        self.assertIsNone(fair_probabilities(1.90, float("inf"), 4.00))
+        self.assertIsNone(fair_probabilities(1.00, 3.60, 4.00))
+        self.assertIsNone(fair_probabilities(1.90, 3.60, 1000.00))
 
     def test_norway_england_shape_is_cold_draw(self):
         candidate = classify_candidate(sample(), CFG)
@@ -73,6 +79,18 @@ class DrawAlertCoreTest(unittest.TestCase):
     def test_favorite_risk_does_not_force_a_draw(self):
         self.assertIsNone(classify_candidate(sample(calibrated_draw_probability=0.25), CFG))
 
+    def test_cold_draw_requires_both_independent_overheat_signals(self):
+        self.assertIsNone(classify_candidate(sample(favorite_movement=-0.06, regional_gap=0.01), CFG))
+        self.assertIsNone(classify_candidate(sample(favorite_movement=-0.01, regional_gap=0.07), CFG))
+
+    def test_cold_draw_requires_two_unique_whitelisted_resistance_signals(self):
+        self.assertIsNone(classify_candidate(sample(
+            structural_signals=("underdog_resistance", "underdog_resistance", "similar_strength"),
+        ), CFG))
+        self.assertIsNone(classify_candidate(sample(
+            structural_signals=("knockout_caution", "low_total"),
+        ), CFG))
+
     def test_non_favorite_uneven_match_is_not_cold_draw(self):
         self.assertIsNone(classify_candidate(
             sample(domestic_odds=(1.90, 3.60, 4.00)), CFG
@@ -104,6 +122,21 @@ class DrawAlertCoreTest(unittest.TestCase):
 
     def test_unknown_data_quality_is_rejected(self):
         self.assertIsNone(classify_candidate(sample(data_quality="unknown"), CFG))
+
+    def test_nonfinite_or_out_of_range_numeric_inputs_are_rejected(self):
+        cases = (
+            {"domestic_odds": (1.60, float("nan"), 6.00)},
+            {"model_probabilities": (0.54, float("inf"), 0.14)},
+            {"calibrated_draw_probability": float("nan")},
+            {"xg_total": float("inf")},
+            {"favorite_movement": float("nan")},
+            {"regional_gap": float("inf")},
+            {"underdog_win_probability": 1.1},
+            {"underdog_not_lose_probability": float("nan")},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.assertIsNone(classify_candidate(sample(**changes), CFG))
 
     def test_non_90m_market_is_rejected(self):
         self.assertIsNone(classify_candidate(sample(market_scope="qualification"), CFG))

@@ -50,6 +50,9 @@ class MarketHeatCollectorTest(unittest.TestCase):
             all(item["includes_extra_time"] is False for item in evidence["sources"].values())
         )
 
+    def test_invalid_odds_cannot_create_a_probability_source(self):
+        self.assertIsNone(collector.probability_record((float("nan"), 3.60, 4.00), None))
+
     def test_same_provider_multiple_snapshots_do_not_increase_source_count(self):
         market = {
             "question": "Norway vs England",
@@ -79,6 +82,47 @@ class MarketHeatCollectorTest(unittest.TestCase):
 
         self.assertIsNone(collector.parse_polymarket_90m(qualification, "Norway", "England"))
         self.assertIsNone(collector.parse_polymarket_90m(extra_time, "Norway", "England"))
+
+    def test_polymarket_rejects_nonfinite_and_out_of_range_numbers(self):
+        base = {
+            "question": "Norway vs England",
+            "outcomes": '["Norway", "Draw", "England"]',
+            "outcomePrices": '["0.20", "0.25", "0.55"]',
+            "volume": "1200",
+        }
+        for field, value in (
+            ("outcomePrices", '["NaN", "0.25", "0.55"]'),
+            ("outcomePrices", '["0.20", "Infinity", "0.55"]'),
+            ("outcomePrices", '["0.20", "1.01", "0.55"]'),
+            ("volume", "NaN"),
+            ("volume", "Infinity"),
+            ("volume", "-1"),
+        ):
+            with self.subTest(field=field, value=value):
+                market = {**base, field: value}
+                self.assertIsNone(collector.parse_polymarket_90m(market, "Norway", "England"))
+
+    def test_public_market_response_has_a_hard_read_limit(self):
+        class OversizedResponse:
+            def __init__(self):
+                self.read_limits = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size=-1):
+                self.read_limits.append(size)
+                return b" " * (2 * 1024 * 1024 + 1)
+
+        response = OversizedResponse()
+        with patch.object(collector, "urlopen", return_value=response):
+            with self.assertRaisesRegex(collector.PublicMarketError, "response too large"):
+                collector.fetch_polymarket("Norway", "England")
+
+        self.assertEqual([2 * 1024 * 1024 + 1], response.read_limits)
 
     def test_write_payload_records_optional_source_failure(self):
         with tempfile.TemporaryDirectory() as folder:

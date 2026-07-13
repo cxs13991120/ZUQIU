@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import math
 import os
 import tempfile
 from datetime import date, datetime, timedelta, timezone
@@ -12,21 +13,25 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from draw_alert_core import fair_probabilities
+from draw_alert_core import fair_probabilities, valid_odds
 
 
 ROOT = Path(__file__).resolve().parent
 BEIJING = timezone(timedelta(hours=8))
 POLYMARKET_SEARCH_URL = "https://gamma-api.polymarket.com/public-search"
 POLYMARKET_TIMEOUT_SECONDS = 10
+PUBLIC_MARKET_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
 
 
 class PublicMarketError(RuntimeError):
     """A public-market response that should be recorded, not fabricated."""
 
 
-def probability_record(odds: tuple[float, float, float], volume: float | None) -> dict:
-    home, draw, away = fair_probabilities(*odds)
+def probability_record(odds: tuple[float, float, float], volume: float | None) -> dict | None:
+    fair = fair_probabilities(*odds)
+    if fair is None:
+        return None
+    home, draw, away = fair
     return {
         "market_scope": "90m",
         "market_type": "win_draw_loss",
@@ -43,11 +48,14 @@ def odds_movement(
     opening: tuple[float, float, float] | None,
     latest: tuple[float, float, float] | None,
 ) -> float:
-    if not opening or not latest:
+    if not opening or not latest or not valid_odds(opening) or not valid_odds(latest):
         return 0.0
     latest_fair = fair_probabilities(*latest)
+    if latest_fair is None:
+        return 0.0
     favorite = 0 if latest_fair[0] >= latest_fair[2] else 2
-    return latest[favorite] / opening[favorite] - 1.0
+    movement = latest[favorite] / opening[favorite] - 1.0
+    return movement if math.isfinite(movement) and -1.0 <= movement <= 1.0 else 0.0
 
 
 def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
@@ -76,7 +84,11 @@ def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
     home = mapping.get(team_a.casefold())
     away = mapping.get(team_b.casefold())
     draw = next((price for name, price in mapping.items() if name in {"draw", "tie"}), None)
-    if any(value is None or value < 0 or value > 1 for value in (home, draw, away)):
+    if any(value is None or not math.isfinite(value) or value < 0 or value > 1 for value in (home, draw, away)):
+        return None
+    raw_volume = market.get("volume")
+    volume = _optional_float(raw_volume)
+    if raw_volume not in (None, "") and volume is None:
         return None
     return {
         "market_scope": "90m",
@@ -86,7 +98,7 @@ def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
         "home_probability": home,
         "draw_probability": draw,
         "away_probability": away,
-        "volume": _optional_float(market.get("volume")),
+        "volume": volume,
     }
 
 
@@ -94,10 +106,14 @@ def build_evidence(fixture: dict, snapshots: dict, polymarket: list[dict]) -> di
     sources: dict[str, dict] = {}
     domestic = _odds_from_fields(fixture, "odds_a", "odds_draw", "odds_b")
     if domestic:
-        sources["domestic_sporttery"] = probability_record(domestic, volume=None)
+        record = probability_record(domestic, volume=None)
+        if record:
+            sources["domestic_sporttery"] = record
     professional = _odds_from_fields(fixture, "market_odds_a", "market_odds_draw", "market_odds_b")
     if professional:
-        sources["zgzcw_professional"] = probability_record(professional, volume=None)
+        record = probability_record(professional, volume=None)
+        if record:
+            sources["zgzcw_professional"] = record
 
     domestic_fair = fair_probabilities(*domestic) if domestic else None
     regional_gap = 0.0
@@ -131,7 +147,10 @@ def fetch_polymarket(team_a: str, team_b: str) -> list[dict]:
     url = f"{POLYMARKET_SEARCH_URL}?{urlencode({'q': f'{team_a} {team_b}'})}"
     try:
         with urlopen(url, timeout=POLYMARKET_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            body = response.read(PUBLIC_MARKET_RESPONSE_MAX_BYTES + 1)
+            if len(body) > PUBLIC_MARKET_RESPONSE_MAX_BYTES:
+                raise PublicMarketError("response too large")
+            payload = json.loads(body.decode("utf-8"))
     except HTTPError as error:
         raise PublicMarketError(f"HTTP {error.code}") from error
     except URLError as error:
@@ -267,14 +286,15 @@ def _odds_from_fields(record: dict, *keys: str) -> tuple[float, float, float] | 
         odds = tuple(float(record[key]) for key in keys)
     except (KeyError, TypeError, ValueError):
         return None
-    return odds if len(odds) == 3 and all(value > 0 for value in odds) else None
+    return odds if valid_odds(odds) else None
 
 
 def _optional_float(value: Any) -> float | None:
     try:
-        return float(value) if value not in (None, "") else None
+        parsed = float(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+    return parsed if parsed is not None and math.isfinite(parsed) and 0.0 <= parsed <= 1_000_000_000_000 else None
 
 
 def main() -> None:
