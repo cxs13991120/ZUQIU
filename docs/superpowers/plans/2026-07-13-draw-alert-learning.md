@@ -418,8 +418,16 @@ class GenerateDrawAlertTest(unittest.TestCase):
         self.assertEqual(3, len(select_alerts(candidates)))
 
     def test_overlap_reuses_main_stake_without_additional_money(self):
-        alert = {"match_id": "001", "subtype": "cold_draw"}
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
         main = [{"match_id": "001", "stake": "100", "selection": "平"}]
+        result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
+        self.assertEqual(0, result["additional_stake"])
+        self.assertEqual(100, result["linked_main_stake"])
+        self.assertEqual("linked", result["settlement_mode"])
+
+    def test_overlap_without_match_id_uses_date_and_teams(self):
+        alert = {"match_id": "001", "date": "2026-07-12", "team_a": "A", "team_b": "B", "subtype": "cold_draw"}
+        main = [{"date": "2026-07-12", "team_a": "A", "team_b": "B", "stake": "100", "selection": "平"}]
         result = attach_stake(alert, main, [], {"promoted": True}, 500, 80, 30)
         self.assertEqual(0, result["additional_stake"])
         self.assertEqual(100, result["linked_main_stake"])
@@ -482,6 +490,16 @@ Implement `select_alerts` and `attach_stake` with progressive gates and the test
 RANK_GATES = ((0.27, 0.04, 1.05), (0.29, 0.05, 1.07), (0.31, 0.06, 1.09), (0.33, 0.07, 1.11))
 
 
+def same_match(alert: dict, row: dict) -> bool:
+    if alert.get("match_id") and row.get("match_id"):
+        return alert["match_id"] == row["match_id"]
+    return (
+        alert.get("date") == row.get("date")
+        and alert.get("team_a") == row.get("team_a")
+        and alert.get("team_b") == row.get("team_b")
+    )
+
+
 def select_alerts(candidates: list[dict], rank_gates=RANK_GATES, max_alerts: int = 4, max_per_league: int = 2) -> list[dict]:
     selected = []
     league_counts = {}
@@ -502,7 +520,7 @@ def select_alerts(candidates: list[dict], rank_gates=RANK_GATES, max_alerts: int
 
 def attach_stake(alert: dict, main_plan: list[dict], existing_alerts: list[dict], subtype_metrics: dict, daily_budget: int, alert_budget: int, requested_stake: int) -> dict:
     result = dict(alert)
-    linked = next((row for row in main_plan if row.get("match_id") == alert["match_id"] and row.get("selection") == "平"), None)
+    linked = next((row for row in main_plan if same_match(alert, row) and row.get("selection") == "平"), None)
     result["hypothetical_stake"] = 10
     if linked:
         result.update(additional_stake=0, linked_main_stake=int(float(linked.get("stake") or 0)), settlement_mode="linked")
@@ -518,7 +536,7 @@ def attach_stake(alert: dict, main_plan: list[dict], existing_alerts: list[dict]
     return result
 ```
 
-Use a quarter-Kelly fraction capped to 10-30 yuan only for promoted standalone alerts, allocate in rank order, then apply both the 80-yuan alert cap and `500 - main stakes - earlier alert stakes`. Pass `rank_gates`, `max_alerts`, and `max_per_league` from `betting_config.json` into `select_alerts`. Build `DrawInputs` from prediction/evidence rows, reject missing domestic draw odds, and write an empty CSV with headers when nothing qualifies. Load `draw_model_learning.predict_draw_probability()` lazily; until Task 5 creates a valid champion model, or when model loading fails, use the existing blended `p_draw` value without interrupting generation.
+Use a quarter-Kelly fraction capped to 10-30 yuan only for promoted standalone alerts, allocate in rank order, then apply both the 80-yuan alert cap and `500 - main stakes - earlier alert stakes`. Pass `rank_gates`, `max_alerts`, and `max_per_league` from `betting_config.json` into `select_alerts`. Existing main-plan rows do not always contain `match_id`; deduplicate by non-empty `match_id` when both rows provide it, otherwise by exact `date`, `team_a`, and `team_b`. Build `DrawInputs` from prediction/evidence rows, reject missing domestic draw odds, and write an empty CSV with headers when nothing qualifies. Load `draw_model_learning.predict_draw_probability()` lazily; until Task 5 creates a valid champion model, or when model loading fails, use the existing blended `p_draw` value without interrupting generation.
 
 Derive structural signals before classification with one deterministic function: add `knockout_caution` when `stage` is in the configured knockout stages; add `low_total` when `xg_a + xg_b <= 2.35`; add `similar_strength` when the two de-vigged win probabilities differ by at most 0.10; add `underdog_resistance` when calibrated draw probability exceeds the underdog win probability and underdog non-loss probability is at least 0.35. Do not infer injuries or lineups when no timestamped source exists.
 
@@ -526,7 +544,7 @@ Use this output schema exactly:
 
 ```python
 FIELDS = [
-    "date", "rank", "match_id", "match", "stage", "subtype", "selection", "domestic_draw_odds",
+    "date", "rank", "match_id", "match", "team_a", "team_b", "stage", "subtype", "selection", "domestic_draw_odds",
     "market_draw_probability", "model_draw_probability", "draw_edge", "expected_value", "xg_total",
     "evidence_json", "data_quality", "captured_at", "alert_level", "additional_stake",
     "linked_main_stake", "hypothetical_stake", "settlement_mode", "strategy_version", "feature_version",
