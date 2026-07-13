@@ -77,6 +77,7 @@ def draw_report() -> Path:
     ledger = read_csv(OUTPUT_DIR / "betting_ledger.csv")
     all_metrics = read_metrics()
     metrics = all_metrics.get("overall", {})
+    active_metrics = all_metrics.get("active_strategy", {})
     clv_metrics = all_metrics.get("clv", {})
     plan_height = max(1, len(plan)) * 124
     ledger_height = max(1, len(ledger)) * 76
@@ -100,7 +101,7 @@ def draw_report() -> Path:
     hits = sum(1 for row in settled if row.get("status") == "命中")
     profit = sum(number(row, "profit") for row in settled)
     today_stake = sum(number(row, "stake") for row in plan)
-    brier = metrics.get("brier")
+    brier = active_metrics.get("brier")
     roi = metrics.get("roi")
     average_clv = clv_metrics.get("average_clv")
     stats = [
