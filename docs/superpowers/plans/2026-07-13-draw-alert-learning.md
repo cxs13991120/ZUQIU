@@ -273,6 +273,7 @@ class MarketHeatCollectorTest(unittest.TestCase):
         self.assertEqual(2, evidence["source_count"])
         self.assertIn("domestic_sporttery", evidence["sources"])
         self.assertIn("zgzcw_professional", evidence["sources"])
+        self.assertTrue(all(item["market_type"] == "win_draw_loss" for item in evidence["sources"].values()))
 
     def test_qualification_market_is_not_attached(self):
         market = {"question": "Will England qualify?", "outcomes": '["Yes", "No"]', "outcomePrices": '["0.7", "0.3"]'}
@@ -299,7 +300,7 @@ Implement `collect_market_heat.py` with these exact public functions and output 
 def probability_record(odds: tuple[float, float, float], volume: float | None) -> dict:
     home, draw, away = fair_probabilities(*odds)
     return {
-        "market_scope": "90m", "settlement_minutes": 90, "includes_extra_time": False,
+        "market_scope": "90m", "market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False,
         "home_probability": home, "draw_probability": draw, "away_probability": away,
         "volume": volume,
     }
@@ -324,7 +325,7 @@ def parse_polymarket_90m(market: dict, team_a: str, team_b: str) -> dict | None:
     draw = next((price for name, price in mapping.items() if name in {"draw", "tie"}), None)
     if draw is None:
         return None
-    return {"market_scope": "90m", "draw_probability": draw, "volume": float(market.get("volume") or 0)}
+    return {"market_scope": "90m", "market_type": "win_draw_loss", "settlement_minutes": 90, "includes_extra_time": False, "draw_probability": draw, "volume": float(market.get("volume") or 0)}
 
 
 def build_evidence(fixture: dict, snapshots: dict, polymarket: list[dict]) -> dict:
@@ -364,7 +365,7 @@ def write_payload(path: Path, target_date: str, matches: list[dict], errors: lis
     return path
 ```
 
-Use the official public Polymarket search endpoint `https://gamma-api.polymarket.com/public-search` with URL-encoded `q=<team_a> <team_b>` and a 10-second timeout. Record timeout, HTTP, JSON, and matching failures in the payload `errors` array; never synthesize probabilities. Extend `capture_odds_snapshot.py` to retain `market_h`, `market_d`, `market_a`, `market_type="win_draw_win"`, `settlement_minutes=90`, and `includes_extra_time=false`.
+Use the official public Polymarket search endpoint `https://gamma-api.polymarket.com/public-search` with URL-encoded `q=<team_a> <team_b>` and a 10-second timeout. Record timeout, HTTP, JSON, and matching failures in the payload `errors` array; never synthesize probabilities. Extend `capture_odds_snapshot.py` to retain `market_h`, `market_d`, `market_a`, `market_type="win_draw_loss"`, `settlement_minutes=90`, and `includes_extra_time=false`. Source dictionary keys are stable provider identifiers and Task 3 converts each source record into `MarketEvidence`; snapshots from the same provider never count as additional independent sources.
 
 The collector CLI accepts `--date YYYY-MM-DD` and `--offline`. Offline mode reads only committed fixtures and snapshots and skips external HTTP, which makes the end-to-end smoke test deterministic.
 
