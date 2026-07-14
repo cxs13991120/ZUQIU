@@ -1,40 +1,19 @@
-# 世界杯每日自动预测
+# 世界杯每日预测
 
-这是一个可本地运行的世界杯比赛预测工具。它按日期读取赛程和球队强度数据，自动生成当天比赛的胜平负概率、淘汰赛晋级概率、比分分布和简短结论。
+这是一个可在本地运行的足球比赛概率分析工具。它根据赛程、球队数据、竞彩赔率和赛前市场信息，生成胜平负概率、淘汰赛晋级倾向、比分分布、模拟方案和每日网页报告。
 
-## 预测方法
+结果是概率分析与模拟记账，不保证盈利或任何比赛结果。请把它当作复盘和研究工具，而不是收益承诺。
 
-模型采用足球预测里比较稳健的一套组合：
+## 预测内容
 
-- Elo 强度差：衡量两队长期实力差距。
-- 攻防修正：分别调整进攻火力和防守质量。
-- 近期状态：用最近比赛表现修正预期进球。
-- 休息天数：考虑体能影响。
-- 主场/准主场优势：东道主或明显地理优势可加权。
-- 市场赔率融合：如果录入赔率，会把市场隐含概率按权重并入模型。
-- Poisson 进球分布：生成比分概率、胜平负概率。
-- 淘汰赛晋级模拟：90 分钟打平后，用实力差估计加时/点球晋级倾向。
+- Elo、攻防能力、近期状态、休息时间和主场因素共同形成基础预测。
+- 泊松进球分布用于计算比分和 90 分钟胜平负概率；淘汰赛的晋级倾向单独展示，不会混入 90 分钟结算。
+- 保存的国内竞彩赔率用于方案展示和结算；外部市场只提供分析证据，不能替换国内方案赔率。
+- 主方案由 `generate_betting_plan.py` 生成，所有模拟投入每日合计不超过 500 元。
 
-## 文件
+## 本地运行
 
-- `data/fixtures.csv`：赛程。每天更新这里即可。
-- `data/team_ratings.csv`：球队评分。可每天根据新闻、伤停、赔率更新。
-- `config.json`：模型权重。
-- `predict_today.ps1`：主程序，Windows 自带 PowerShell 即可运行。
-- `predict_today.py`：Python 版本，适合已有 Python 环境时使用。
-- `build_site.py`：把预测结果生成成可每天查看的网站。
-- `generate_betting_plan.py`：按预算生成模拟投注方案，并根据赛果更新盈亏账本。
-- `web/index.html`：世界杯预测看板网页。
-- `open_website.ps1`：打开预测网站。
-- `serve_website.ps1`：启动本地网站服务，地址为 `http://127.0.0.1:8765/`。
-- `settle_bets.ps1`：录入赛果后更新模拟盈亏。
-- `run_daily.ps1`：每天运行一次并输出结果。
-- `install_daily_task.ps1`：在 Windows 上创建每日自动任务。
-- `output/`：生成的预测结果。
-
-## 运行
-
-预测今天：
+在 Windows PowerShell 中预测今天：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\predict_today.ps1
@@ -43,111 +22,89 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\predict_today.ps1
 预测指定日期：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\predict_today.ps1 -Date 2026-07-11
+powershell -NoProfile -ExecutionPolicy Bypass -File .\predict_today.ps1 -Date 2026-07-12
 ```
 
-只看控制台结果，不生成文件：
+只在控制台查看而不写入结果文件：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\predict_today.ps1 -Date 2026-07-11 -NoFiles
+powershell -NoProfile -ExecutionPolicy Bypass -File .\predict_today.ps1 -Date 2026-07-12 -NoFiles
 ```
 
-## 每天自动运行
-
-先确认 `install_daily_task.ps1` 里的时间是否合适，默认每天早上 08:00 运行。
+生成某日的完整本地报告，可按顺序运行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install_daily_task.ps1
+python predict_today.py --date 2026-07-12
+python generate_betting_plan.py --date 2026-07-12
+python collect_market_heat.py --date 2026-07-12 --offline
+python generate_draw_alert.py --date 2026-07-12
+python draw_alert_ledger.py --settle
+python build_site.py
+python build_daily_image.py
 ```
 
-之后每天会在 `output/` 下生成：
+`--offline` 不访问外部市场，只使用已保存的数据，适合复现和检查。日常在线采集时，`collect_market_heat.py` 会捕获并记录可选市场来源的错误，同时保留仍通过验证的可用来源；后续预警只按当前可用来源和数据质量门槛生成，绝不编造缺失数据。
 
-- `predictions_YYYY-MM-DD.md`
-- `predictions_YYYY-MM-DD.csv`
+## 平局预警
 
-同时会刷新：
+每日报告可出现 0 到 4 场平局预警。0 场不是故障，表示当天没有比赛同时通过概率、赔率价值和数据质量门槛。
 
-- `web/index.html`
+- **冷门平局**：一方被市场明显看好，但赛前证据显示其 90 分钟内存在被守平的合理风险。
+- **均势平局**：双方实力接近、预期总进球偏低，平局被模型判断为相对被低估的结果。
+- 排名第 2、3、4 的预警会使用比第 1 场更严格的概率、优势和预期价值门槛；不会为了凑满 4 场放宽标准。
+- 同一联赛最多出现 2 场预警，避免风险过度集中。
+- 预警和所有相关方案只按常规时间 90 分钟比分结算，加时赛和点球不改变平局结算结果。
 
-## 云端自动运行
+### 观察、晋级与去重
 
-如果不想让电脑一直开机，可以用 GitHub Actions 云端自动运行。设置方法见：
+冷门平局与均势平局分别独立观察。每个子类型在取得 **30 场已结算样本** 前，始终是零新增金额观察；达到 30 场后，仍需同时通过 ROI、CLV、概率校准、最大回撤和近期稳定性检查，才可能升级。
 
-- `CLOUD_SETUP.md`
+升级后的独立预警每场只做 10 至 30 元的模拟投入；当日全部预警的新增投入不超过 80 元，连同主方案在内的每日模拟投入不超过 500 元。
 
-云端默认时间：
+若预警与主方案命中同一场比赛，系统复用主方案的金额和结算记录，只添加预警标签和独立观察数据，不会重复投入，也不会重复计算利润。
 
-- 北京时间 11:30：生成当天预测和模拟投注方案。
-- 北京时间 12:00：抓取前一天赛果并结算盈亏。
+## 守护式学习
 
-## 打开网站
+学习模块只使用不可变的赛前快照，避免把赛后数据写回预测特征。新模型先以候选者身份进行影子评估，与当前冠军模型在相同的后续样本上比较。
+
+候选模型要同时证明概率准确度和模拟经济指标均达到要求，才会晋级。系统也会按联赛暂停表现不佳的付费预警，并保留可逆回滚：训练或验证失败时继续使用有效的冠军模型；没有有效冠军时回退到基础预测。学习过程不会承诺改善或盈利。
+
+## 每日云端流程（北京时间）
+
+| 时间 | 工作内容 |
+| --- | --- |
+| 12:15 | 导入基础竞彩数据，生成预测、主方案和第一版平局预警，并重建网页与日报图片。 |
+| 13:30 | 刷新市场与平局预警。若导入、预测、市场采集或预警生成的某个独立步骤以非零状态失败，流程仍会继续；该步骤未成功替换的 12:15 已提交产物会保留，网站和图片再用仓库中最新可用文件重建。 |
+| 13:45 | 结算前一天的 90 分钟结果，更新指标、训练模型并重建报告。 |
+| 14:00 | Gmail 发送最新已提交的 `web/daily-report.png`；如结算仍在进行，会在队列中短暂等待。 |
+| 14:05 | 再次尝试结算，处理结果延迟或首次任务未完成的情况。 |
+| 每 30 分钟 | 保存一次官方赔率快照，供赛前证据与复盘使用。 |
+
+云端部署、手动运行和 Gmail 密钥设置请阅读 [CLOUD_SETUP.md](CLOUD_SETUP.md)。不需要 Google 日历。
+
+## 常用文件
+
+- `data/fixtures.csv`：赛程。
+- `data/team_ratings.csv`：球队评分和状态数据。
+- `predict_today.py`：生成比赛预测。
+- `generate_betting_plan.py`：生成主方案与模拟记账输入。
+- `collect_market_heat.py`：收集或读取赛前市场证据。
+- `generate_draw_alert.py`：生成 0 到 4 场平局预警。
+- `draw_alert_ledger.py`：按 90 分钟结果结算预警和观察指标。
+- `draw_model_learning.py`：执行受保护的候选模型训练和评估。
+- `build_site.py`、`build_daily_image.py`：生成网页和邮件日报图片。
+- `web/index.html`、`web/daily-report.png`：最新网页与日报图片。
+
+## 查看报告
+
+直接打开网页：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\open_website.ps1
 ```
 
-也可以直接打开 `web/index.html`。
-
-## 模拟投注与结算
-
-每天默认模拟预算 300，最高不超过 500。当前分配：
-
-- 总进球：100
-- 胜平负：100
-- 半全场：50
-- 比分串：50，优先 4 串 1；可用比赛不足 4 场时自动降为 2 串 1
-
-每种玩法只选一个方案。赔率来自竞彩网官方接口；如果竞彩网没有给出某个选项赔率，该选项不会进入方案。
-
-第二天把赛果填到 `data/bet_results.csv`，格式如下：
-
-```csv
-date,team_a,team_b,home_goals,away_goals,half_home_goals,half_away_goals
-2026-07-11,Spain,Belgium,2,1,1,0
-```
-
-然后运行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\settle_bets.ps1
-```
-
-网站会更新累计投入、已结算注数、命中率和累计盈亏。
-
-每天中午 12 点自动结算可以安装计划任务：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install_noon_settlement_task.ps1
-```
-
-如果 Windows 提示权限不足，请用管理员权限打开 PowerShell 后再运行。
-
-如果想用浏览器地址访问：
+或启动本地服务后访问 `http://127.0.0.1:8765/`：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\serve_website.ps1
 ```
-
-然后打开：
-
-```text
-http://127.0.0.1:8765/
-```
-
-## 数据更新建议
-
-每天比赛前更新两张表：
-
-1. 在 `data/fixtures.csv` 添加当天比赛，淘汰赛的 `stage` 填 `knockout`、`quarterfinal`、`semifinal`、`final` 都可以。
-2. 在 `data/team_ratings.csv` 更新：
-   - `elo`：球队基础强度。
-   - `attack`：进攻修正，通常 -0.20 到 +0.25。
-   - `defense`：防守修正，越高表示防守越好，通常 -0.20 到 +0.25。
-   - `form`：近期状态，通常 -0.15 到 +0.15。
-   - `injury`：伤停惩罚，0 到 -0.20。
-   - `rest_days`：距上一场休息天数。
-   - `home_adv`：主场或地理优势，通常 0 到 +0.12。
-
-## 重要说明
-
-足球比赛随机性很高。这个工具输出的是概率，不是保证结果。专业使用时，重点看长期复盘的校准度，而不是单场命中。
