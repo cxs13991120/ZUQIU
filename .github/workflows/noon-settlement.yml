@@ -62,7 +62,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update Sporttery settlement"
-          file_pattern: "data/bet_results.csv data/team_history_features.csv data/market_heat_*.json data/draw_feature_snapshots/*.json data/models/*.joblib output/betting_ledger.csv output/observation_ledger.csv output/model_metrics.json output/draw_alert*.csv output/draw_alert*.json output/draw_model_registry.json web/index.html web/daily-report.png"
+          file_pattern: "data output web"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

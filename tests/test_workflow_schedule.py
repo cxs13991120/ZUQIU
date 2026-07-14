@@ -226,17 +226,7 @@ class WorkflowScheduleTest(unittest.TestCase):
             self.assertIn("python -m pip install --quiet pillow", step)
             self.assertIn("fonts-noto-cjk", step)
 
-    def test_commits_include_immutable_learning_and_report_outputs(self):
-        required = (
-            "data/market_heat_*.json",
-            "data/draw_feature_snapshots/*.json",
-            "data/models/*.joblib",
-            "output/draw_alert*.csv",
-            "output/draw_alert*.json",
-            "output/draw_model_registry.json",
-            "web/index.html",
-            "web/daily-report.png",
-        )
+    def test_generated_file_commits_do_not_require_optional_outputs(self):
         commit_steps = {
             "daily-forecast.yml": ("forecast", "Commit generated files"),
             "draw-alert-refresh.yml": ("refresh", "Commit refreshed files"),
@@ -244,8 +234,8 @@ class WorkflowScheduleTest(unittest.TestCase):
         }
         for name, (job_name, step_name) in commit_steps.items():
             step = self.step_block(self.read_workflow(name), job_name, step_name)
-            for pattern in required:
-                self.assertIn(pattern, step)
+            self.assertIn('file_pattern: "data output web"', step)
+            self.assertNotIn("*", step)
 
     def test_email_uses_the_queue_latest_main_checkout_and_secret_only_credentials(self):
         text = self.read_workflow("email-report.yml")

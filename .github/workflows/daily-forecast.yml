@@ -79,7 +79,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update daily Sporttery forecast"
-          file_pattern: "data/*.csv data/*.json data/market_heat_*.json data/draw_feature_snapshots/*.json data/models/*.joblib output/*.csv output/*.md output/*.json output/draw_alert*.csv output/draw_alert*.json output/draw_model_registry.json web/index.html web/daily-report.png"
+          file_pattern: "data output web"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
