@@ -1,0 +1,28 @@
+{
+  "subtypes": {
+    "cold_draw": {
+      "count": 0,
+      "hit_rate": null,
+      "roi": null,
+      "brier": null,
+      "market_brier": null,
+      "log_loss": null,
+      "average_clv": null,
+      "max_drawdown": 0.0,
+      "recent_brier": null,
+      "promoted": false
+    },
+    "balanced_draw": {
+      "count": 0,
+      "hit_rate": null,
+      "roi": null,
+      "brier": null,
+      "market_brier": null,
+      "log_loss": null,
+      "average_clv": null,
+      "max_drawdown": 0.0,
+      "recent_brier": null,
+      "promoted": false
+    }
+  }
+}
