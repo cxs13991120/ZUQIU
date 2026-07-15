@@ -1,0 +1,11 @@
+{
+  "challenger": null,
+  "champion": null,
+  "event_history": [],
+  "last_training_date": null,
+  "last_training_error": "ValueError: at least two settled samples are required",
+  "per_league": {},
+  "previous_champion": null,
+  "schema_version": 1,
+  "updated_at": "2026-07-15"
+}
