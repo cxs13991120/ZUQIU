@@ -8,6 +8,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WorkflowScheduleTest(unittest.TestCase):
     WORKFLOWS = ROOT / ".github" / "workflows"
+    REPORT_WORKFLOWS = {
+        "daily-forecast.yml": (
+            "forecast",
+            "Build final website and image",
+            "Commit generated files",
+            "forecast",
+            "$TARGET_DATE",
+        ),
+        "draw-alert-refresh.yml": (
+            "refresh",
+            "Rebuild report from the latest committed data",
+            "Commit refreshed files",
+            "decision",
+            "$TARGET_DATE",
+        ),
+        "noon-settlement.yml": (
+            "settlement",
+            "Update results, settle ledgers, and train the draw model",
+            "Commit settlement files",
+            "settlement",
+            "$TODAY",
+        ),
+    }
     WORKFLOW_JOBS = {
         "daily-forecast.yml": "forecast",
         "draw-alert-refresh.yml": "refresh",
@@ -34,11 +57,19 @@ class WorkflowScheduleTest(unittest.TestCase):
     def step_block(self, text, job_name, step_name):
         lines = self.job_block(text, job_name).splitlines()
         marker = f"      - name: {step_name}"
+        self.assertIn(marker, lines)
         start = lines.index(marker)
         for end in range(start + 1, len(lines)):
             if lines[end].startswith("      - name: "):
                 return "\n".join(lines[start:end])
         return "\n".join(lines[start:])
+
+    def assert_commands_in_order(self, text, commands):
+        cursor = 0
+        for command in commands:
+            position = text.find(command, cursor)
+            self.assertNotEqual(-1, position, f"missing ordered command: {command}")
+            cursor = position + len(command)
 
     def test_step_block_scopes_duplicate_step_names_to_the_requested_job(self):
         workflow = """jobs:
@@ -90,6 +121,44 @@ class WorkflowScheduleTest(unittest.TestCase):
             self.assertIn("uses: actions/checkout@v4", checkout)
             self.assertIn("with:\n          ref: main", checkout)
 
+    def test_report_workflows_define_optional_target_date_input(self):
+        input_contract = """workflow_dispatch:
+    inputs:
+      target_date:
+        description: Beijing business date (YYYY-MM-DD)
+        required: false
+        type: string"""
+        for name in self.REPORT_WORKFLOWS:
+            self.assertIn(input_contract, self.read_workflow(name))
+
+    def test_required_report_steps_validate_the_target_date_exactly(self):
+        required_steps = {
+            "daily-forecast.yml": (
+                "forecast",
+                "Generate required base forecast and plan",
+            ),
+            "draw-alert-refresh.yml": (
+                "refresh",
+                "Refresh required decision plan",
+            ),
+            "noon-settlement.yml": (
+                "settlement",
+                "Update results, settle ledgers, and train the draw model",
+            ),
+        }
+        expected = [
+            'TARGET_DATE="${{ inputs.target_date }}"',
+            'TARGET_DATE="${TARGET_DATE:-$(date +%F)}"',
+            'NORMALIZED_TARGET_DATE="$(date -d "$TARGET_DATE" +%F)"',
+            'if [ "$NORMALIZED_TARGET_DATE" != "$TARGET_DATE" ]; then',
+            "exit 1",
+        ]
+        for name, (job_name, step_name) in required_steps.items():
+            text = self.read_workflow(name)
+            self.assertIn("TZ: Asia/Shanghai", self.job_block(text, job_name))
+            step = self.step_block(text, job_name, step_name)
+            self.assert_commands_in_order(step, expected)
+
     def test_base_forecast_is_required_and_uses_beijing_target_date(self):
         text = self.read_workflow("daily-forecast.yml")
         self.assertIn("TZ: Asia/Shanghai", self.job_block(text, "forecast"))
@@ -97,14 +166,14 @@ class WorkflowScheduleTest(unittest.TestCase):
             text, "forecast", "Generate required base forecast and plan"
         )
         expected = [
-            'TARGET_DATE="$(date +%F)"',
+            'TARGET_DATE="${{ inputs.target_date }}"',
+            'TARGET_DATE="${TARGET_DATE:-$(date +%F)}"',
             'python import_sporttery.py --date "$TARGET_DATE"',
             "python build_historical_features.py",
             'python predict_today.py --date "$TARGET_DATE"',
             'python generate_betting_plan.py --date "$TARGET_DATE"',
         ]
-        positions = [step.index(command) for command in expected]
-        self.assertEqual(positions, sorted(positions))
+        self.assert_commands_in_order(step, expected)
         self.assertIn("id: base_forecast", step)
         self.assertNotIn("continue-on-error: true", step)
         self.assertNotIn("collect_market_heat.py", step)
@@ -138,7 +207,8 @@ class WorkflowScheduleTest(unittest.TestCase):
             self.assertIn("continue-on-error: true", step)
             self.assertIn(command, step)
             if uses_date:
-                self.assertIn('TARGET_DATE="$(date +%F)"', step)
+                self.assertIn('TARGET_DATE="${{ inputs.target_date }}"', step)
+                self.assertIn('TARGET_DATE="${TARGET_DATE:-$(date +%F)}"', step)
             positions.append(text.index(f"      - name: {step_name}"))
 
         build = self.step_block(text, "forecast", "Build final website and image")
@@ -171,12 +241,29 @@ class WorkflowScheduleTest(unittest.TestCase):
         self.assertLess(build_position, publication_positions[0])
         self.assertEqual(publication_positions, sorted(publication_positions))
 
-    def test_refresh_failure_isolation_binds_each_command_to_its_own_step(self):
+    def test_decision_refresh_requires_capture_generation_and_plan_locking(self):
+        text = self.read_workflow("draw-alert-refresh.yml")
+        step = self.step_block(text, "refresh", "Refresh required decision plan")
+        expected = [
+            'python import_sporttery.py --date "$TARGET_DATE"',
+            'python capture_odds_snapshot.py --date "$TARGET_DATE" --phase decision',
+            'if python plan_lock.py is-locked --date "$TARGET_DATE"; then',
+            'echo "Decision plan is already locked for $TARGET_DATE"',
+            "else",
+            'python predict_today.py --date "$TARGET_DATE"',
+            'python generate_betting_plan.py --date "$TARGET_DATE"',
+            "python plan_lock.py lock \\",
+            "--date \"$TARGET_DATE\" \\",
+            "--locked-at \"$(date --iso-8601=seconds)\" \\",
+            "--source sporttery",
+            "fi",
+        ]
+        self.assert_commands_in_order(step, expected)
+        self.assertNotIn("continue-on-error: true", step)
+
+    def test_decision_optional_refreshes_remain_isolated(self):
         text = self.read_workflow("draw-alert-refresh.yml")
         refresh_steps = {
-            "Refresh Sporttery import": 'python import_sporttery.py --date "$TARGET_DATE"',
-            "Capture decision-time odds": 'python capture_odds_snapshot.py --date "$TARGET_DATE" --phase decision',
-            "Refresh predictions": 'python predict_today.py --date "$TARGET_DATE"',
             "Refresh optional market evidence": 'python collect_market_heat.py --date "$TARGET_DATE"',
             "Refresh draw alerts": 'python generate_draw_alert.py --date "$TARGET_DATE"',
         }
@@ -184,7 +271,8 @@ class WorkflowScheduleTest(unittest.TestCase):
         for step_name, command in refresh_steps.items():
             step = self.step_block(text, "refresh", step_name)
             self.assertIn("continue-on-error: true", step)
-            self.assertIn('TARGET_DATE="$(date +%F)"', step)
+            self.assertIn('TARGET_DATE="${{ inputs.target_date }}"', step)
+            self.assertIn('TARGET_DATE="${TARGET_DATE:-$(date +%F)}"', step)
             self.assertIn(command, step)
             step_positions.append(text.index(f"      - name: {step_name}"))
         self.assertEqual(step_positions, sorted(step_positions))
@@ -215,8 +303,10 @@ class WorkflowScheduleTest(unittest.TestCase):
         text = self.read_workflow("noon-settlement.yml")
         step = self.step_block(text, "settlement", "Update results, settle ledgers, and train the draw model")
         expected = [
-            'TODAY="$(date +%F)"',
-            'SETTLEMENT_DATE="$(date -d \'yesterday\' +%F)"',
+            'TARGET_DATE="${{ inputs.target_date }}"',
+            'TARGET_DATE="${TARGET_DATE:-$(date +%F)}"',
+            'TODAY="$TARGET_DATE"',
+            'SETTLEMENT_DATE="$(date -d "$TODAY - 1 day" +%F)"',
             'python update_sporttery_results.py --date "$SETTLEMENT_DATE"',
             "python build_historical_features.py",
             "python generate_betting_plan.py --settle-only",
@@ -225,9 +315,51 @@ class WorkflowScheduleTest(unittest.TestCase):
             "python build_site.py",
             "python build_daily_image.py",
         ]
-        positions = [step.index(command) for command in expected]
-        self.assertEqual(positions, sorted(positions))
+        self.assert_commands_in_order(step, expected)
         self.assertNotIn('python update_sporttery_results.py --date "$TODAY"', step)
+
+    def test_phased_status_is_published_after_both_builders_and_before_publication(self):
+        for name, (
+            job_name,
+            build_step_name,
+            commit_step_name,
+            phase,
+            report_date,
+        ) in self.REPORT_WORKFLOWS.items():
+            text = self.read_workflow(name)
+            build = self.step_block(text, job_name, build_step_name)
+            expected_status = (
+                f'python report_status.py --date "{report_date}" --phase {phase}'
+            )
+            if phase == "settlement":
+                expected_status += ' --settled-through "$SETTLEMENT_DATE"'
+
+            build_id = (
+                f'REPORT_BUILD_ID="${{GITHUB_RUN_ID}}-'
+                f'${{GITHUB_RUN_ATTEMPT}}-{phase}"'
+            )
+            expected = [
+                build_id,
+                'export REPORT_BUILD_ID',
+                "python build_site.py",
+                "python build_daily_image.py",
+                'SOURCE_COMMIT_SHA="$(git rev-parse HEAD)"',
+                'GENERATED_AT_SHANGHAI="$(date --iso-8601=seconds)"',
+                expected_status,
+                '--build-id "$REPORT_BUILD_ID"',
+                '--source-commit "$SOURCE_COMMIT_SHA"',
+                '--generated-at "$GENERATED_AT_SHANGHAI"',
+            ]
+            self.assert_commands_in_order(build, expected)
+            self.assertNotIn("continue-on-error: true", build)
+            self.assertLess(
+                text.index(expected_status),
+                text.index(f"      - name: {commit_step_name}"),
+            )
+
+    def test_report_workflows_do_not_dispatch_email_report(self):
+        for name in self.REPORT_WORKFLOWS:
+            self.assertNotIn("email-report.yml", self.read_workflow(name))
 
     def test_base_refresh_and_settlement_install_learning_and_image_dependencies(self):
         jobs = {
