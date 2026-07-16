@@ -11,7 +11,7 @@
   "account": {
     "mode": "simulation",
     "required_settled_days": 30,
-    "completed_days": 0,
+    "completed_days": 1,
     "review_ready": false,
     "real_money_automation": false,
     "monthly_budget_cap": 3000.0,
