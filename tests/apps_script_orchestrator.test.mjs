@@ -33,6 +33,18 @@ function readyStatus(overrides = {}) {
   };
 }
 
+function dispatchStatus(overrides = {}) {
+  return {
+    schema_version: 1,
+    report_date: REPORT_DATE,
+    forecast_ready: false,
+    decision_snapshot_ready: false,
+    plan_ready: false,
+    settlement_ready: false,
+    ...overrides,
+  };
+}
+
 function response({ code = 200, json, bytes = [], text } = {}) {
   const body = text ?? (json === undefined ? "" : JSON.stringify(json));
   return {
@@ -187,23 +199,23 @@ function clockAt(hour, minute) {
 
 test("12:14 does not dispatch", () => {
   const { context } = makeHarness();
-  assert.equal(context.chooseDispatch_(clockAt(12, 14), {}, {}), null);
+  assert.equal(context.chooseDispatch_(clockAt(12, 14), dispatchStatus(), {}), null);
 });
 
 test("12:15 dispatches only forecast when forecast is missing", () => {
   const { context } = makeHarness();
-  assert.equal(context.chooseDispatch_(clockAt(12, 15), { forecast_ready: false }, {}), "daily-forecast.yml");
+  assert.equal(context.chooseDispatch_(clockAt(12, 15), dispatchStatus(), {}), "daily-forecast.yml");
 });
 
 test("13:30 waits for forecast before refresh", () => {
   const { context } = makeHarness();
-  assert.equal(context.chooseDispatch_(clockAt(13, 30), { forecast_ready: false }, {}), "daily-forecast.yml");
-  assert.equal(context.chooseDispatch_(clockAt(13, 30), { forecast_ready: true, decision_snapshot_ready: false, plan_ready: false }, {}), "draw-alert-refresh.yml");
+  assert.equal(context.chooseDispatch_(clockAt(13, 30), dispatchStatus(), {}), "daily-forecast.yml");
+  assert.equal(context.chooseDispatch_(clockAt(13, 30), dispatchStatus({ forecast_ready: true }), {}), "draw-alert-refresh.yml");
 });
 
 test("13:45 waits for decision before settlement", () => {
   const { context } = makeHarness();
-  const forecastOnly = { forecast_ready: true, decision_snapshot_ready: false, plan_ready: false };
+  const forecastOnly = dispatchStatus({ forecast_ready: true });
   assert.equal(context.chooseDispatch_(clockAt(13, 45), forecastOnly, {}), "draw-alert-refresh.yml");
   assert.equal(context.chooseDispatch_(clockAt(13, 45), { ...forecastOnly, decision_snapshot_ready: true, plan_ready: true, settlement_ready: false }, {}), "noon-settlement.yml");
 });
@@ -214,8 +226,8 @@ test("same phase dispatches respect the 30-minute cooldown", () => {
     LAST_FORECAST_DISPATCH_DATE: REPORT_DATE,
     LAST_FORECAST_DISPATCH_AT: String(clockAt(12, 15).nowMs),
   };
-  assert.equal(context.chooseDispatch_(clockAt(12, 44), { forecast_ready: false }, state), null);
-  assert.equal(context.chooseDispatch_(clockAt(12, 45), { forecast_ready: false }, state), "daily-forecast.yml");
+  assert.equal(context.chooseDispatch_(clockAt(12, 44), dispatchStatus(), state), null);
+  assert.equal(context.chooseDispatch_(clockAt(12, 45), dispatchStatus(), state), "daily-forecast.yml");
 });
 
 test("stale readiness flags cannot advance today's dispatch phase", () => {
@@ -224,6 +236,31 @@ test("stale readiness flags cannot advance today's dispatch phase", () => {
   assert.equal(context.chooseDispatch_(clockAt(13, 45), stale, {}), "daily-forecast.yml");
   assert.equal(context.chooseDispatch_(clockAt(13, 45), readyStatus({ report_date: "", settlement_ready: false }), {}), "daily-forecast.yml");
   assert.equal(context.chooseDispatch_(clockAt(13, 45), readyStatus({ schema_version: 0, settlement_ready: false }), {}), "daily-forecast.yml");
+});
+
+test("partial true flags without exact status identity cannot skip dispatch phases", () => {
+  const { context } = makeHarness();
+  const laterFlags = {
+    forecast_ready: true,
+    decision_snapshot_ready: true,
+    plan_ready: true,
+    settlement_ready: false,
+  };
+  const invalidStatuses = [
+    laterFlags,
+    { ...laterFlags, schema_version: 1 },
+    { ...laterFlags, report_date: REPORT_DATE },
+    { ...laterFlags, schema_version: 1, report_date: "" },
+    { ...laterFlags, schema_version: 1, report_date: "not-a-date" },
+    { ...laterFlags, schema_version: "", report_date: REPORT_DATE },
+    { ...laterFlags, schema_version: 2, report_date: REPORT_DATE },
+    null,
+    [],
+    "malformed",
+  ];
+  for (const status of invalidStatuses) {
+    assert.equal(context.chooseDispatch_(clockAt(13, 45), status, {}), "daily-forecast.yml");
+  }
 });
 
 test("beijingClock_ derives Beijing date and wall clock", () => {
@@ -262,6 +299,65 @@ test("reportReadiness_ fails closed for every required contract field", () => {
     assert.equal(context.reportReadiness_(readyStatus(overrides), REPORT_DATE, IMAGE_HASH).ready, false, name);
   }
   assert.equal(context.reportReadiness_(readyStatus(), REPORT_DATE, "").ready, false, "empty image bytes/hash");
+});
+
+test("reportReadiness_ rejects impossible and out-of-range ISO timestamps", () => {
+  const { context } = makeHarness();
+  const invalidTimestamps = [
+    "2026-02-30T13:30:00+08:00",
+    "2026-07-16T24:00:00+08:00",
+    "2026-07-16T13:60:00+08:00",
+    "2026-07-16T13:30:60+08:00",
+    "2026-07-16T13:30:00+24:00",
+    "2026-07-16T13:30:00+08:60",
+    "2026-07-16T13:30:00.1234567+08:00",
+    "2026-07-16T13:30:00",
+    "",
+  ];
+  for (const timestamp of invalidTimestamps) {
+    const status = readyStatus({ decision_odds_at_bjt: timestamp });
+    assert.equal(context.reportReadiness_(status, REPORT_DATE, IMAGE_HASH).ready, false, timestamp || "blank");
+  }
+});
+
+test("reportReadiness_ enforces decision then lock then generation ordering", () => {
+  const { context } = makeHarness();
+  const invalidOrders = [
+    {
+      decision_odds_at_bjt: "2026-07-16T14:01:00+08:00",
+      plan_locked_at_bjt: "2026-07-16T13:31:00+08:00",
+      generated_at_bjt: "2026-07-16T14:00:00+08:00",
+    },
+    {
+      decision_odds_at_bjt: "2026-07-16T13:31:00+08:00",
+      plan_locked_at_bjt: "2026-07-16T13:30:00+08:00",
+      generated_at_bjt: "2026-07-16T14:00:00+08:00",
+    },
+    {
+      decision_odds_at_bjt: "2026-07-16T13:30:00+08:00",
+      plan_locked_at_bjt: "2026-07-16T14:01:00+08:00",
+      generated_at_bjt: "2026-07-16T14:00:00+08:00",
+    },
+  ];
+  for (const timestamps of invalidOrders) {
+    assert.equal(context.reportReadiness_(readyStatus(timestamps), REPORT_DATE, IMAGE_HASH).ready, false);
+  }
+});
+
+test("reportReadiness_ accepts valid offsets, fractional seconds, and equal causal times", () => {
+  const { context } = makeHarness();
+  const status = readyStatus({
+    decision_odds_at_bjt: "2026-07-16T11:00:00.123456+05:30",
+    plan_locked_at_bjt: "2026-07-16T05:31:00.123456Z",
+    generated_at_bjt: "2026-07-16T13:31:00.123456+08:00",
+  });
+  assert.equal(context.reportReadiness_(status, REPORT_DATE, IMAGE_HASH).ready, true);
+  const equal = "2026-07-16T13:31:00.5+08:00";
+  assert.equal(context.reportReadiness_(readyStatus({
+    decision_odds_at_bjt: equal,
+    plan_locked_at_bjt: equal,
+    generated_at_bjt: equal,
+  }), REPORT_DATE, IMAGE_HASH).ready, true);
 });
 
 test("missingReasons_ identifies incomplete phases and malformed status", () => {

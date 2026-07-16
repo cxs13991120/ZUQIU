@@ -44,11 +44,41 @@ function validDateText_(value) {
 }
 
 function timestampMillis_(value) {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
-    return NaN;
-  }
-  var parsed = new Date(value).getTime();
-  return isFinite(parsed) ? parsed : NaN;
+  if (typeof value !== "string") return NaN;
+  var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))$/.exec(value);
+  if (!match) return NaN;
+
+  var year = Number(match[1]);
+  var month = Number(match[2]);
+  var day = Number(match[3]);
+  var hour = Number(match[4]);
+  var minute = Number(match[5]);
+  var second = Number(match[6]);
+  var offsetHour = match[8] === "Z" ? 0 : Number(match[10]);
+  var offsetMinute = match[8] === "Z" ? 0 : Number(match[11]);
+  if (year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 ||
+      offsetHour > 23 || offsetMinute > 59) return NaN;
+
+  var leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  var monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (day < 1 || day > monthDays[month - 1]) return NaN;
+
+  var local = new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, 0);
+  if (local.getUTCFullYear() !== year || local.getUTCMonth() + 1 !== month || local.getUTCDate() !== day ||
+      local.getUTCHours() !== hour || local.getUTCMinutes() !== minute || local.getUTCSeconds() !== second) return NaN;
+
+  var offsetSign = match[9] === "-" ? -1 : 1;
+  var offsetMillis = offsetSign * (offsetHour * 60 + offsetMinute) * 60 * 1000;
+  var instantMillis = local.getTime() - offsetMillis;
+  var roundTrip = new Date(instantMillis + offsetMillis);
+  if (roundTrip.getUTCFullYear() !== year || roundTrip.getUTCMonth() + 1 !== month || roundTrip.getUTCDate() !== day ||
+      roundTrip.getUTCHours() !== hour || roundTrip.getUTCMinutes() !== minute || roundTrip.getUTCSeconds() !== second) return NaN;
+
+  var fraction = match[7] || "";
+  while (fraction.length < 6) fraction += "0";
+  return instantMillis * 1000 + Number(fraction || "0");
 }
 
 function missingReasons_(status, expectedDate) {
@@ -71,6 +101,8 @@ function missingReasons_(status, expectedDate) {
   if (!isFinite(generatedAt)) reasons.push("generated timestamp invalid");
   if (!isFinite(decisionAt)) reasons.push("decision timestamp invalid");
   if (!isFinite(lockedAt)) reasons.push("plan lock timestamp invalid");
+  if (isFinite(decisionAt) && isFinite(lockedAt) && decisionAt > lockedAt) reasons.push("decision timestamp is later than plan lock");
+  if (isFinite(decisionAt) && isFinite(generatedAt) && decisionAt > generatedAt) reasons.push("decision timestamp is later than report generation");
   if (isFinite(generatedAt) && isFinite(lockedAt) && lockedAt > generatedAt) reasons.push("plan lock is later than report generation");
 
   if (typeof status.build_id !== "string" || !status.build_id.trim()) reasons.push("build id missing");
@@ -106,9 +138,9 @@ function cooldownAllows_(clock, state, phase) {
 }
 
 function chooseDispatch_(clock, status, state) {
-  var current = status || {};
-  if ((typeof current.report_date !== "undefined" && current.report_date !== clock.date) ||
-      (typeof current.schema_version !== "undefined" && current.schema_version !== 1)) current = {};
+  var trustedStatus = status !== null && typeof status === "object" && !Array.isArray(status) &&
+    status.schema_version === 1 && status.report_date === clock.date;
+  var current = trustedStatus ? status : {};
   var saved = state || {};
   if (clock.minutes >= 18 * 60) return null;
   if (!phaseReady_(current, "forecast")) {
