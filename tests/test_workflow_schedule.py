@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from pathlib import Path
@@ -448,6 +449,13 @@ class WorkflowScheduleTest(unittest.TestCase):
 
 class DeploymentDocumentationTest(unittest.TestCase):
     APPS_SCRIPT_README = ROOT / "apps-script" / "README.md"
+    CODE_PATH = ROOT / "apps-script" / "Code.gs"
+    MANIFEST_PATH = ROOT / "apps-script" / "appsscript.json"
+    OPERATOR_DOCS = (
+        ROOT / "README.md",
+        ROOT / "CLOUD_SETUP.md",
+        APPS_SCRIPT_README,
+    )
     REQUIRED_CONFIG_PROPERTIES = (
         "GITHUB_OWNER",
         "GITHUB_REPO",
@@ -469,6 +477,15 @@ class DeploymentDocumentationTest(unittest.TestCase):
             self.assertNotEqual(-1, position, f"missing ordered documentation text: {item}")
             cursor = position + len(item)
 
+    def function_body(self, text, name):
+        match = re.search(
+            rf"^function {re.escape(name)}\([^)]*\) \{{(?P<body>.*?)(?=^function |\Z)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, f"missing Apps Script function: {name}")
+        return match.group("body")
+
     def test_apps_script_readme_defines_the_sender_schedule_and_safety_contract(self):
         text = self.read_doc(self.APPS_SCRIPT_README)
         for literal in (
@@ -486,6 +503,7 @@ class DeploymentDocumentationTest(unittest.TestCase):
 
     def test_apps_script_readme_lists_exactly_seven_manual_config_properties(self):
         text = self.read_doc(self.APPS_SCRIPT_README)
+        code = self.read_doc(self.CODE_PATH)
         section = re.search(
             r"^### 必须手工配置的 7 项 Script Properties\n(?P<body>.*?)(?=^### )",
             text,
@@ -496,8 +514,128 @@ class DeploymentDocumentationTest(unittest.TestCase):
             r"^- `([A-Z][A-Z0-9_]+)`：", section.group("body"), re.MULTILINE
         )
         self.assertEqual(list(self.REQUIRED_CONFIG_PROPERTIES), property_names)
+        code_properties = set(re.findall(r'requiredProperty_\(properties, "([A-Z0-9_]+)"\)', code))
+        self.assertEqual(set(self.REQUIRED_CONFIG_PROPERTIES), code_properties)
         self.assertIn("运行状态属性由 `Code.gs` 自动写入", text)
         self.assertIn("`TEST_MODE` 是临时部署开关，不计入上述 7 项必填配置", text)
+
+    def test_docs_match_manifest_timezone_workflow_crons_and_pages_artifact_root(self):
+        apps_readme = self.read_doc(self.APPS_SCRIPT_README)
+        cloud_setup = self.read_doc(ROOT / "CLOUD_SETUP.md")
+        combined = "\n".join(self.read_doc(path) for path in self.OPERATOR_DOCS)
+        manifest = json.loads(self.read_doc(self.MANIFEST_PATH))
+        self.assertIn(f"`{manifest['timeZone']}`", combined)
+
+        scheduled_workflows = (
+            "daily-forecast.yml",
+            "draw-alert-refresh.yml",
+            "noon-settlement.yml",
+            "odds-snapshot.yml",
+            "email-report.yml",
+        )
+        for workflow_name in scheduled_workflows:
+            workflow = self.read_doc(ROOT / ".github" / "workflows" / workflow_name)
+            for cron in re.findall(r'cron: "([^"]+)"', workflow):
+                self.assertIn(f"`{cron}`", cloud_setup)
+
+        for workflow_name in (
+            "daily-forecast.yml",
+            "draw-alert-refresh.yml",
+            "noon-settlement.yml",
+        ):
+            workflow = self.read_doc(ROOT / ".github" / "workflows" / workflow_name)
+            self.assertRegex(
+                workflow,
+                r"uses: actions/upload-pages-artifact@v3\s+with:\s+path: web",
+            )
+
+        for text in (apps_readme, cloud_setup):
+            self.assertIn("仓库路径 `web/report-status.json`", text)
+            self.assertIn(
+                "`https://l18381527760-sketch.github.io/sporttery-prediction/report-status.json`",
+                text,
+            )
+            self.assertIn(
+                "`https://l18381527760-sketch.github.io/sporttery-prediction/daily-report.png`",
+                text,
+            )
+            self.assertIn(
+                "`https://l18381527760-sketch.github.io/sporttery-prediction/`",
+                text,
+            )
+        self.assertNotRegex(combined, r"https?://[^\s`)]+/web/report-status\.json")
+        self.assertNotRegex(combined, r"https?://[^\s`)]+/web/daily-report\.png")
+
+    def test_docs_describe_crons_and_apps_script_dispatch_as_independent(self):
+        combined = "\n".join(self.read_doc(path) for path in self.OPERATOR_DOCS)
+        for literal in (
+            "cron 定时运行与 Apps Script dispatch 彼此独立",
+            "Pages 更新前",
+            "同一阶段",
+            "额外的排队运行",
+            "共享并发队列",
+            "有效的方案锁",
+            "同日状态更新具备幂等性",
+        ):
+            self.assertIn(literal, combined)
+        for misleading in ("cron 后备", "后备触发", "cron fallback", "补调度"):
+            self.assertNotIn(misleading, combined)
+
+    def test_test_mode_and_gmail_recovery_docs_match_mail_state_code(self):
+        text = self.read_doc(self.APPS_SCRIPT_README)
+        code = self.read_doc(self.CODE_PATH)
+        for literal in (
+            "同一天安全试运行",
+            "不会写入 `LAST_SENT_DATE`",
+            "不会写入 `LAST_SENT_IMAGE_SHA256`",
+            "不会写入 `LAST_FAILURE_NOTICE_DATE`",
+            "不测试 Gmail 实际投递",
+            "生产发送失败不会写入发送状态",
+            "修复原因后",
+            "`TEST_MODE=false`",
+            "受控重试",
+        ):
+            self.assertIn(literal, text)
+
+        normal = self.function_body(code, "sendNormalReport_")
+        failure = self.function_body(code, "sendFailureNotice_")
+        self.assertLess(
+            normal.index("GmailApp.sendEmail"),
+            normal.index('setProperty("LAST_SENT_DATE"'),
+        )
+        self.assertLess(
+            failure.index("GmailApp.sendEmail"),
+            failure.index('setProperty("LAST_FAILURE_NOTICE_DATE"'),
+        )
+        normal_test_mode = re.search(
+            r'if \(properties\.getProperty\("TEST_MODE"\) === "true"\) \{(?P<body>.*?)\} else',
+            normal,
+            re.DOTALL,
+        )
+        failure_test_mode = re.search(
+            r'if \(properties\.getProperty\("TEST_MODE"\) === "true"\) \{(?P<body>.*?)\} else',
+            failure,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(normal_test_mode)
+        self.assertIsNotNone(failure_test_mode)
+        self.assertNotIn("setProperty", normal_test_mode.group("body"))
+        self.assertNotIn("setProperty", failure_test_mode.group("body"))
+
+    def test_edited_docs_and_apps_script_contain_no_token_shaped_secrets(self):
+        sensitive_files = self.OPERATOR_DOCS + (self.CODE_PATH,)
+        secret_patterns = (
+            r"\bghp_[A-Za-z0-9]{20,}\b",
+            r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+            r"\bgho_[A-Za-z0-9]{20,}\b",
+            r"\bghu_[A-Za-z0-9]{20,}\b",
+            r"\bghs_[A-Za-z0-9]{20,}\b",
+            r"\bghr_[A-Za-z0-9]{20,}\b",
+        )
+        for path in sensitive_files:
+            text = self.read_doc(path)
+            for pattern in secret_patterns:
+                self.assertNotRegex(text, pattern, f"token-shaped secret in {path}")
 
     def test_apps_script_readme_documents_least_privilege_token_and_deployment_order(self):
         text = self.read_doc(self.APPS_SCRIPT_README)

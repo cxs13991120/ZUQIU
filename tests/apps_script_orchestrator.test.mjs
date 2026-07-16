@@ -390,6 +390,21 @@ test("runAutomation dispatches at most one workflow with required GitHub request
   assert.equal(calls.lock.at(-1)[0], "release");
 });
 
+test("TEST_MODE preserves GitHub dispatch and cooldown state", () => {
+  const { context, calls, properties } = makeHarness({
+    now: "2026-07-16T04:15:00.000Z",
+    status: dispatchStatus(),
+    initialProperties: { TEST_MODE: "true" },
+  });
+  context.runAutomation();
+  context.runAutomation();
+  const dispatches = calls.fetch.filter((call) => call.url.includes("api.github.com"));
+  assert.equal(dispatches.length, 1);
+  assert.equal(properties.get("LAST_FORECAST_DISPATCH_DATE"), REPORT_DATE);
+  assert.equal(properties.has("LAST_SENT_DATE"), false);
+  assert.equal(properties.has("LAST_FAILURE_NOTICE_DATE"), false);
+});
+
 test("GitHub dispatch accepts only HTTP 204 and does not persist failed attempts", () => {
   const { context, properties } = makeHarness({
     now: "2026-07-16T04:15:00.000Z",
@@ -508,12 +523,44 @@ test("an unavailable lock exits without work and an acquired lock releases on fa
   assert.equal(failing.calls.lock.at(-1)[0], "release");
 });
 
-test("TEST_MODE logs sends without calling Gmail and records dedupe state", () => {
+test("TEST_MODE normal dry run leaves production mail state untouched and permits same-day send", () => {
   const { context, calls, properties } = makeHarness({ initialProperties: { TEST_MODE: "true" } });
   context.runAutomation();
   assert.equal(calls.mail.length, 0);
-  assert.ok(calls.logs.some((entry) => entry.includes("TEST_MODE")));
+  assert.ok(calls.logs.some((entry) => entry.includes("TEST_MODE normal report")));
+  assert.equal(properties.has("LAST_SENT_DATE"), false);
+  assert.equal(properties.has("LAST_SENT_IMAGE_SHA256"), false);
+  assert.equal(properties.has("LAST_FAILURE_NOTICE_DATE"), false);
+
+  properties.set("TEST_MODE", "false");
+  context.runAutomation();
+  context.runAutomation();
+  assert.equal(calls.mail.length, 1);
   assert.equal(properties.get("LAST_SENT_DATE"), REPORT_DATE);
+  assert.equal(properties.get("LAST_SENT_IMAGE_SHA256"), IMAGE_HASH);
+  assert.equal(properties.has("LAST_FAILURE_NOTICE_DATE"), false);
+});
+
+test("TEST_MODE failure dry run leaves production mail state untouched and permits same-day notice", () => {
+  const { context, calls, properties } = makeHarness({
+    now: "2026-07-16T10:00:00.000Z",
+    status: dispatchStatus(),
+    initialProperties: { TEST_MODE: "true" },
+  });
+  context.runAutomation();
+  assert.equal(calls.mail.length, 0);
+  assert.ok(calls.logs.some((entry) => entry.includes("TEST_MODE failure notice")));
+  assert.equal(properties.has("LAST_SENT_DATE"), false);
+  assert.equal(properties.has("LAST_SENT_IMAGE_SHA256"), false);
+  assert.equal(properties.has("LAST_FAILURE_NOTICE_DATE"), false);
+
+  properties.set("TEST_MODE", "false");
+  context.runAutomation();
+  context.runAutomation();
+  assert.equal(calls.mail.length, 1);
+  assert.equal(calls.mail[0][3]?.attachments, undefined);
+  assert.equal(properties.get("LAST_FAILURE_NOTICE_DATE"), REPORT_DATE);
+  assert.equal(properties.has("LAST_SENT_DATE"), false);
 });
 
 test("installAutomationTrigger deletes both legacy handlers and creates one 10-minute trigger", () => {

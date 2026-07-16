@@ -238,9 +238,9 @@ function sendNormalReport_(properties, clock, imageBlob, imageSha256) {
     Logger.log("TEST_MODE normal report send for " + clock.date);
   } else {
     GmailApp.sendEmail(recipient, subject, body, options);
+    properties.setProperty("LAST_SENT_DATE", clock.date);
+    properties.setProperty("LAST_SENT_IMAGE_SHA256", imageSha256);
   }
-  properties.setProperty("LAST_SENT_DATE", clock.date);
-  properties.setProperty("LAST_SENT_IMAGE_SHA256", imageSha256);
 }
 
 function escapeHtml_(value) {
@@ -257,8 +257,8 @@ function sendFailureNotice_(properties, clock, reasons) {
     Logger.log("TEST_MODE failure notice send for " + clock.date);
   } else {
     GmailApp.sendEmail(recipient, subject, body, options);
+    properties.setProperty("LAST_FAILURE_NOTICE_DATE", clock.date);
   }
-  properties.setProperty("LAST_FAILURE_NOTICE_DATE", clock.date);
 }
 
 function tryVerifiedSend_(properties, clock, status) {
