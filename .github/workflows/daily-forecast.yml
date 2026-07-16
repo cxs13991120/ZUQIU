@@ -51,8 +51,10 @@ jobs:
 
       - name: Generate required base forecast and plan
         id: base_forecast
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           NORMALIZED_TARGET_DATE="$(date -d "$TARGET_DATE" +%F)"
           if [ "$NORMALIZED_TARGET_DATE" != "$TARGET_DATE" ]; then
@@ -66,22 +68,28 @@ jobs:
 
       - name: Capture opening odds
         continue-on-error: true
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           python capture_odds_snapshot.py --date "$TARGET_DATE" --phase opening
 
       - name: Collect optional market evidence
         continue-on-error: true
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           python collect_market_heat.py --date "$TARGET_DATE"
 
       - name: Generate optional draw alerts
         continue-on-error: true
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           python generate_draw_alert.py --date "$TARGET_DATE"
 
@@ -91,8 +99,10 @@ jobs:
 
       - name: Build final website and image
         if: always() && steps.base_forecast.outcome == 'success'
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           NORMALIZED_TARGET_DATE="$(date -d "$TARGET_DATE" +%F)"
           if [ "$NORMALIZED_TARGET_DATE" != "$TARGET_DATE" ]; then

@@ -8,6 +8,31 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WorkflowScheduleTest(unittest.TestCase):
     WORKFLOWS = ROOT / ".github" / "workflows"
+    TARGET_DATE_STEPS = {
+        "daily-forecast.yml": (
+            "forecast",
+            (
+                "Generate required base forecast and plan",
+                "Capture opening odds",
+                "Collect optional market evidence",
+                "Generate optional draw alerts",
+                "Build final website and image",
+            ),
+        ),
+        "draw-alert-refresh.yml": (
+            "refresh",
+            (
+                "Refresh required decision plan",
+                "Refresh optional market evidence",
+                "Refresh draw alerts",
+                "Rebuild report from the latest committed data",
+            ),
+        ),
+        "noon-settlement.yml": (
+            "settlement",
+            ("Update results, settle ledgers, and train the draw model",),
+        ),
+    }
     REPORT_WORKFLOWS = {
         "daily-forecast.yml": (
             "forecast",
@@ -71,6 +96,13 @@ class WorkflowScheduleTest(unittest.TestCase):
             self.assertNotEqual(-1, position, f"missing ordered command: {command}")
             cursor = position + len(command)
 
+    def multiline_run_bodies(self, text):
+        return re.findall(
+            r"^        run: \|\n(.*?)(?=^      - name: |\Z)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+
     def test_step_block_scopes_duplicate_step_names_to_the_requested_job(self):
         workflow = """jobs:
   other:
@@ -131,6 +163,21 @@ class WorkflowScheduleTest(unittest.TestCase):
         for name in self.REPORT_WORKFLOWS:
             self.assertIn(input_contract, self.read_workflow(name))
 
+    def test_target_date_inputs_use_step_env_bridge_not_bash_interpolation(self):
+        env_bridge = (
+            "        env:\n"
+            "          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}"
+        )
+        for name, (job_name, step_names) in self.TARGET_DATE_STEPS.items():
+            text = self.read_workflow(name)
+            for run_body in self.multiline_run_bodies(text):
+                self.assertNotIn("inputs.target_date", run_body)
+            for step_name in step_names:
+                step = self.step_block(text, job_name, step_name)
+                self.assertIn(env_bridge, step)
+                self.assertIn('TARGET_DATE="$REQUESTED_TARGET_DATE"', step)
+                self.assertIn('TARGET_DATE="${TARGET_DATE:-$(date +%F)}"', step)
+
     def test_required_report_steps_validate_the_target_date_exactly(self):
         required_steps = {
             "daily-forecast.yml": (
@@ -147,7 +194,7 @@ class WorkflowScheduleTest(unittest.TestCase):
             ),
         }
         expected = [
-            'TARGET_DATE="${{ inputs.target_date }}"',
+            'TARGET_DATE="$REQUESTED_TARGET_DATE"',
             'TARGET_DATE="${TARGET_DATE:-$(date +%F)}"',
             'NORMALIZED_TARGET_DATE="$(date -d "$TARGET_DATE" +%F)"',
             'if [ "$NORMALIZED_TARGET_DATE" != "$TARGET_DATE" ]; then',
@@ -166,7 +213,7 @@ class WorkflowScheduleTest(unittest.TestCase):
             text, "forecast", "Generate required base forecast and plan"
         )
         expected = [
-            'TARGET_DATE="${{ inputs.target_date }}"',
+            'TARGET_DATE="$REQUESTED_TARGET_DATE"',
             'TARGET_DATE="${TARGET_DATE:-$(date +%F)}"',
             'python import_sporttery.py --date "$TARGET_DATE"',
             "python build_historical_features.py",
@@ -207,7 +254,7 @@ class WorkflowScheduleTest(unittest.TestCase):
             self.assertIn("continue-on-error: true", step)
             self.assertIn(command, step)
             if uses_date:
-                self.assertIn('TARGET_DATE="${{ inputs.target_date }}"', step)
+                self.assertIn('TARGET_DATE="$REQUESTED_TARGET_DATE"', step)
                 self.assertIn('TARGET_DATE="${TARGET_DATE:-$(date +%F)}"', step)
             positions.append(text.index(f"      - name: {step_name}"))
 
@@ -271,7 +318,7 @@ class WorkflowScheduleTest(unittest.TestCase):
         for step_name, command in refresh_steps.items():
             step = self.step_block(text, "refresh", step_name)
             self.assertIn("continue-on-error: true", step)
-            self.assertIn('TARGET_DATE="${{ inputs.target_date }}"', step)
+            self.assertIn('TARGET_DATE="$REQUESTED_TARGET_DATE"', step)
             self.assertIn('TARGET_DATE="${TARGET_DATE:-$(date +%F)}"', step)
             self.assertIn(command, step)
             step_positions.append(text.index(f"      - name: {step_name}"))
@@ -280,6 +327,7 @@ class WorkflowScheduleTest(unittest.TestCase):
         ledger_step = self.step_block(text, "refresh", "Refresh draw alert ledger")
         rebuild_step = self.step_block(text, "refresh", "Rebuild report from the latest committed data")
         self.assertIn("python draw_alert_ledger.py --settle", ledger_step)
+        self.assertNotIn("continue-on-error: true", ledger_step)
         self.assertIn("python build_site.py", rebuild_step)
         self.assertIn("python build_daily_image.py", rebuild_step)
         self.assertLess(
@@ -303,7 +351,7 @@ class WorkflowScheduleTest(unittest.TestCase):
         text = self.read_workflow("noon-settlement.yml")
         step = self.step_block(text, "settlement", "Update results, settle ledgers, and train the draw model")
         expected = [
-            'TARGET_DATE="${{ inputs.target_date }}"',
+            'TARGET_DATE="$REQUESTED_TARGET_DATE"',
             'TARGET_DATE="${TARGET_DATE:-$(date +%F)}"',
             'TODAY="$TARGET_DATE"',
             'SETTLEMENT_DATE="$(date -d "$TODAY - 1 day" +%F)"',

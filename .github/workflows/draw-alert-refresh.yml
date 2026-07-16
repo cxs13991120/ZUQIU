@@ -50,8 +50,10 @@ jobs:
           python -m pip install --quiet pillow
 
       - name: Refresh required decision plan
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           NORMALIZED_TARGET_DATE="$(date -d "$TARGET_DATE" +%F)"
           if [ "$NORMALIZED_TARGET_DATE" != "$TARGET_DATE" ]; then
@@ -73,25 +75,30 @@ jobs:
 
       - name: Refresh optional market evidence
         continue-on-error: true
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           python collect_market_heat.py --date "$TARGET_DATE"
 
       - name: Refresh draw alerts
         continue-on-error: true
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           python generate_draw_alert.py --date "$TARGET_DATE"
 
       - name: Refresh draw alert ledger
-        continue-on-error: true
         run: python draw_alert_ledger.py --settle
 
       - name: Rebuild report from the latest committed data
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           NORMALIZED_TARGET_DATE="$(date -d "$TARGET_DATE" +%F)"
           if [ "$NORMALIZED_TARGET_DATE" != "$TARGET_DATE" ]; then

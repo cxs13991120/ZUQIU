@@ -52,8 +52,10 @@ jobs:
           python -m pip install --quiet pillow
 
       - name: Update results, settle ledgers, and train the draw model
+        env:
+          REQUESTED_TARGET_DATE: ${{ inputs.target_date }}
         run: |
-          TARGET_DATE="${{ inputs.target_date }}"
+          TARGET_DATE="$REQUESTED_TARGET_DATE"
           TARGET_DATE="${TARGET_DATE:-$(date +%F)}"
           NORMALIZED_TARGET_DATE="$(date -d "$TARGET_DATE" +%F)"
           if [ "$NORMALIZED_TARGET_DATE" != "$TARGET_DATE" ]; then
