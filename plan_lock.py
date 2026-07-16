@@ -1,11 +1,18 @@
 import argparse
+import errno
 import hashlib
 import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 BEIJING = timezone(timedelta(hours=8))
@@ -36,6 +43,54 @@ def _artifact_paths(root: Path, target_date: date) -> tuple[Path, Path]:
 
 def _lock_path(root: Path, target_date: date) -> Path:
     return root / "output" / f"plan_lock_{target_date.isoformat()}.json"
+
+
+def _try_process_lock(handle) -> bool:
+    handle.seek(0)
+    try:
+        if os.name == "nt":
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        busy_errors = {errno.EACCES, errno.EAGAIN}
+        if exc.errno in busy_errors:
+            return False
+        raise
+    return True
+
+
+def _release_process_lock(handle) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _process_lock(lock_path: Path):
+    handle = lock_path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+
+    acquired = False
+    deadline = time.monotonic() + CLAIM_WAIT_SECONDS
+    try:
+        while not _try_process_lock(handle):
+            if time.monotonic() >= deadline:
+                raise PlanLockError(
+                    f"timed out waiting for plan lock owner: {lock_path}"
+                )
+            time.sleep(CLAIM_POLL_SECONDS)
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            _release_process_lock(handle)
+        handle.close()
 
 
 def _existing_lock(root: Path, target_date: date, lock_path: Path) -> dict | None:
@@ -112,44 +167,32 @@ def lock_plan(
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = lock_path.with_name(lock_path.name + ".tmp")
-    deadline = time.monotonic() + CLAIM_WAIT_SECONDS
-    while True:
+    process_lock_path = lock_path.with_name(lock_path.name + ".lock")
+    with _process_lock(process_lock_path):
+        existing = _existing_lock(root, target_date, lock_path)
+        if existing is not None:
+            return existing
+
+        handle = temp_path.open("w", encoding="utf-8")
+        published = False
         try:
-            handle = temp_path.open("x", encoding="utf-8")
-            break
-        except FileExistsError as exc:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            handle.close()
+
             existing = _existing_lock(root, target_date, lock_path)
             if existing is not None:
                 return existing
-            if time.monotonic() >= deadline:
-                raise PlanLockError(
-                    f"timed out waiting for plan lock claim: {temp_path}"
-                ) from exc
-            time.sleep(CLAIM_POLL_SECONDS)
-
-    published = False
-    try:
-        existing = _existing_lock(root, target_date, lock_path)
-        if existing is not None:
-            return existing
-
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-        handle.close()
-
-        existing = _existing_lock(root, target_date, lock_path)
-        if existing is not None:
-            return existing
-        temp_path.replace(lock_path)
-        published = True
-        return payload
-    finally:
-        if not handle.closed:
-            handle.close()
-        if not published:
-            temp_path.unlink(missing_ok=True)
+            temp_path.replace(lock_path)
+            published = True
+            return payload
+        finally:
+            if not handle.closed:
+                handle.close()
+            if not published:
+                temp_path.unlink(missing_ok=True)
 
 
 def _parse_date(value: str) -> date:

@@ -49,6 +49,21 @@ def _concurrent_lock_worker(
         result_queue.put(("ok", payload))
 
 
+def _abandon_lock_worker(root_text: str) -> None:
+    import plan_lock
+
+    def terminate_before_publication(path: Path, target: Path) -> None:
+        os._exit(23)
+
+    Path.replace = terminate_before_publication
+    plan_lock.lock_plan(
+        Path(root_text),
+        TARGET_DATE,
+        datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
+        "sporttery",
+    )
+
+
 class PlanLockTest(unittest.TestCase):
     def make_artifacts(self, root: Path) -> None:
         (root / "output").mkdir()
@@ -256,6 +271,33 @@ class PlanLockTest(unittest.TestCase):
             self.assertFalse(
                 (root / "output" / "plan_lock_2026-07-16.json.tmp").exists()
             )
+
+    def test_rerun_recovers_after_owner_death_leaves_stale_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            context = multiprocessing.get_context("spawn")
+            process = context.Process(target=_abandon_lock_worker, args=(str(root),))
+            process.start()
+            process.join(timeout=15)
+
+            self.assertFalse(process.is_alive())
+            self.assertEqual(23, process.exitcode)
+            temp_path = root / "output" / "plan_lock_2026-07-16.json.tmp"
+            process_lock_path = root / "output" / "plan_lock_2026-07-16.json.lock"
+            self.assertTrue(temp_path.exists())
+            self.assertTrue(process_lock_path.exists())
+            self.assertFalse(self.lock_path(root).exists())
+
+            try:
+                with patch("plan_lock.CLAIM_WAIT_SECONDS", 0.05):
+                    payload = self.make_lock(root)
+            except RuntimeError as exc:
+                self.fail(f"dead owner must not block rerun: {exc}")
+
+            self.assertEqual(payload, read_valid_lock(root, TARGET_DATE))
+            self.assertFalse(temp_path.exists())
+            self.assertTrue(process_lock_path.exists())
 
     def test_publisher_does_not_remove_a_successor_temp_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
