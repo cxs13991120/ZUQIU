@@ -1,7 +1,8 @@
 import unittest
+from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 
-from official_markets import normalize_market
+from official_markets import THREE_WAY_SELECTIONS, normalize_market
 from value_candidates import (
     ValueCandidate,
     build_candidates,
@@ -134,6 +135,143 @@ class ValueCandidateTest(unittest.TestCase):
         home = next(candidate for candidate in candidates if candidate.market_type == "had" and candidate.selection == "胜")
         self.assertEqual("medium", home.data_quality)
 
+    def test_naive_beijing_kickoff_compares_with_aware_decision_capture(self):
+        prediction = _prediction()
+        prediction["kickoff_at"] = "2026-07-18 20:00"
+        snapshot = _snapshot(kickoff_at="2026-07-18 20:00")
+        snapshot["captured_at"] = "2026-07-17T04:00:00+00:00"
+
+        candidates = build_candidates(
+            [prediction], _official_odds(), snapshot, _config(), {}
+        )
+
+        self.assertTrue(candidates)
+
+    def test_invalid_decision_or_kickoff_timestamp_excludes_without_raising(self):
+        invalid_capture = _snapshot()
+        invalid_capture["captured_at"] = "not-a-timestamp"
+        invalid_kickoff = _snapshot(kickoff_at="not-a-timestamp")
+        prediction = _prediction()
+        prediction["kickoff_at"] = "not-a-timestamp"
+
+        self.assertEqual(
+            [], build_candidates([_prediction()], _official_odds(), invalid_capture, _config(), {})
+        )
+        self.assertEqual(
+            [], build_candidates([prediction], _official_odds(), invalid_kickoff, _config(), {})
+        )
+
+    def test_aware_decision_capture_preserves_its_offset_when_checked_against_naive_kickoff(self):
+        prediction = _prediction()
+        prediction["kickoff_at"] = "2026-07-17 10:00"
+        snapshot = _snapshot(kickoff_at="2026-07-17 10:00")
+        snapshot["captured_at"] = "2026-07-17T04:00:00+00:00"
+
+        self.assertEqual(
+            [], build_candidates([prediction], _official_odds(), snapshot, _config(), {})
+        )
+
+    def test_global_settled_samples_controls_gate_and_weight_for_every_market(self):
+        config = _config()
+        strategy = config["value_strategy"]
+        strategy.update({
+            "strict_model_edge_weight_base": 0.0,
+            "strict_model_edge_weight_max": 0.0,
+            "model_edge_weight_base": 1.0,
+            "model_edge_weight_max": 1.0,
+            "strict_min_probability_edge": 1.0,
+            "min_probability_edge": -1.0,
+            "strict_min_expected_return": 0.0,
+            "min_expected_return": 0.0,
+        })
+        candidates = build_candidates(
+            [_prediction()],
+            _official_odds(),
+            _snapshot(),
+            config,
+            {"Test League": {"enabled": True, "adjustment": 0.05, "sample_count": 200}},
+        )
+        selections = (
+            _candidate(candidates, "had", THREE_WAY_SELECTIONS["h"]),
+            _candidate(candidates, "had", THREE_WAY_SELECTIONS["d"]),
+            _candidate(candidates, "hhad", THREE_WAY_SELECTIONS["h"]),
+            _candidate(candidates, "ttg"),
+        )
+
+        for candidate in selections:
+            with self.subTest(candidate_id=candidate.candidate_id):
+                self.assertAlmostEqual(
+                    candidate.official_market_probability,
+                    candidate.conservative_probability,
+                )
+                self.assertIn("probability_edge", candidate.value_gate_reasons)
+
+    def test_only_complete_embedded_opening_snapshot_can_be_high_quality(self):
+        snapshot = _snapshot()
+        snapshot["opening"] = _opening_snapshot()
+
+        candidates = build_candidates(
+            [_prediction()], _official_odds(), snapshot, _config(), {}
+        )
+
+        home = _candidate(candidates, "had", THREE_WAY_SELECTIONS["h"])
+        self.assertEqual("high", home.data_quality)
+        self.assertEqual(1.0, home.data_quality_multiplier)
+
+    def test_invalid_opening_evidence_stays_medium_and_does_not_drive_volatility(self):
+        cases = {
+            "bare matches": lambda snapshot: snapshot.update(
+                {"opening_matches": _opening_snapshot()["matches"]}
+            ),
+            "wrong identity": lambda snapshot: snapshot.update(
+                {"opening": _opening_snapshot_with_team("Other Home")}
+            ),
+            "missing market": lambda snapshot: snapshot.update(
+                {"opening": _opening_snapshot_without_market()}
+            ),
+            "missing price": lambda snapshot: snapshot.update(
+                {"opening": _opening_snapshot_without_price()}
+            ),
+            "wrong source": lambda snapshot: snapshot.update(
+                {"opening": _opening_snapshot(source="external-consensus")}
+            ),
+            "wrong phase": lambda snapshot: snapshot.update(
+                {"opening": _opening_snapshot(phase="monitoring")}
+            ),
+            "late capture": lambda snapshot: snapshot.update(
+                {"opening": _opening_snapshot(captured_at="2026-07-17T13:00:00+08:00")}
+            ),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                snapshot = _snapshot()
+                mutate(snapshot)
+                opening = snapshot.get("opening")
+                if isinstance(opening, dict) and name not in {"missing market", "missing price"}:
+                    opening["matches"][0]["markets"]["had"]["h"] = 3.50
+
+                candidates = build_candidates(
+                    [_prediction()], _official_odds(), snapshot, _config(), {}
+                )
+
+                home = _candidate(candidates, "had", THREE_WAY_SELECTIONS["h"])
+                self.assertEqual("medium", home.data_quality)
+                self.assertEqual(0.6, home.data_quality_multiplier)
+                self.assertEqual("stable", home.volatility_band)
+
+    def test_opening_handicap_line_must_match_before_high_quality_is_allowed(self):
+        snapshot = _snapshot()
+        opening = _opening_snapshot()
+        opening["matches"][0]["markets"]["hhad"]["goalLine"] = "-1"
+        snapshot["opening"] = opening
+
+        candidates = build_candidates(
+            [_prediction()], _official_odds(), snapshot, _config(), {}
+        )
+
+        handicap_home = _candidate(candidates, "hhad", THREE_WAY_SELECTIONS["h"])
+        self.assertEqual("medium", handicap_home.data_quality)
+
     def test_conservative_probability_and_volatility_controls(self):
         self.assertEqual(0.001, conservative_probability(0.0, 0.0, 1.0))
         self.assertEqual(0.999, conservative_probability(1.0, 1.0, 1.0))
@@ -208,6 +346,48 @@ def _snapshot(
             "single_eligibility": {"had": single_had, "hhad": False, "ttg": False},
         }],
     }
+
+
+def _opening_snapshot(
+    *,
+    source: str = "sporttery",
+    phase: str = "opening",
+    captured_at: str = "2026-07-17T11:00:00+08:00",
+) -> dict:
+    match = deepcopy(_snapshot()["matches"][0])
+    return {
+        "captured_at": captured_at,
+        "capture_phase": phase,
+        "source": source,
+        "matches": [match],
+    }
+
+
+def _opening_snapshot_without_price() -> dict:
+    opening = _opening_snapshot()
+    del opening["matches"][0]["markets"]["had"]["h"]
+    return opening
+
+
+def _opening_snapshot_with_team(team_a: str) -> dict:
+    opening = _opening_snapshot()
+    opening["matches"][0]["team_a"] = team_a
+    return opening
+
+
+def _opening_snapshot_without_market() -> dict:
+    opening = _opening_snapshot()
+    del opening["matches"][0]["markets"]["had"]
+    return opening
+
+
+def _candidate(candidates, market_type: str, selection: str | None = None):
+    return next(
+        candidate
+        for candidate in candidates
+        if candidate.market_type == market_type
+        and (selection is None or candidate.selection == selection)
+    )
 
 
 def _config() -> dict:

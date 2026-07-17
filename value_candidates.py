@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import math
 
 from official_markets import (
@@ -96,7 +96,6 @@ def build_candidates(
     decision_matches, captured_at = _decision_matches(snapshot)
     if captured_at is None:
         return []
-    opening_matches = _opening_matches(snapshot)
     value_config = config.get("value_strategy", {}) if isinstance(config, dict) else {}
     candidates = []
     for prediction in predictions:
@@ -115,10 +114,9 @@ def build_candidates(
                 continue
             if not _decision_market_matches(decision, market):
                 continue
-            opening = opening_matches.get(match_id)
-            if not _same_snapshot_identity(prediction, opening):
-                opening = None
-            quality, quality_multiplier = _data_quality(market, opening)
+            opening = _opening_match(snapshot, prediction, decision, captured_at)
+            opening_market = _validated_opening_market(opening, market)
+            quality, quality_multiplier = _data_quality(market, opening_market)
             if quality == "low":
                 continue
             selection_data = _selection_probabilities(prediction, market, league_calibrations)
@@ -126,7 +124,6 @@ def build_candidates(
                 continue
             single_eligibility = decision.get("single_eligibility", {})
             single_eligible = bool(single_eligibility.get(market_type)) if isinstance(single_eligibility, dict) else False
-            opening_market = _market_from_snapshot(opening, market_type)
             for selection, raw_probability, calibrated_probability, samples in selection_data:
                 decision_price = market.prices[selection]
                 risk = odds_volatility(
@@ -134,13 +131,13 @@ def build_candidates(
                 )
                 if not risk.eligible:
                     continue
-                model_weight = _model_weight(value_config, samples)
+                model_weight = _model_weight(value_config)
                 conservative = conservative_probability(
                     calibrated_probability, market.fair_probabilities[selection], model_weight
                 )
                 edge = conservative - market.fair_probabilities[selection]
                 expected_value = conservative * decision_price - 1.0
-                reasons = _gate_reasons(value_config, samples, edge, expected_value)
+                reasons = _gate_reasons(value_config, edge, expected_value)
                 candidates.append(
                     ValueCandidate(
                         candidate_id=f"{match_id}:{market_type}:{selection}",
@@ -192,19 +189,42 @@ def _decision_matches(snapshot: dict) -> tuple[dict[str, dict], datetime | None]
     }, captured_at
 
 
-def _opening_matches(snapshot: dict) -> dict[str, dict]:
+def _opening_match(
+    snapshot: dict,
+    prediction: dict,
+    decision: dict,
+    decision_captured_at: datetime,
+) -> dict | None:
     if not isinstance(snapshot, dict):
-        return {}
-    opening = snapshot.get("opening_matches")
-    if opening is None and isinstance(snapshot.get("opening"), dict):
-        opening = snapshot["opening"].get("matches")
-    if not isinstance(opening, list):
-        return {}
-    return {
-        row["match_id"]: row
-        for row in opening
-        if isinstance(row, dict) and isinstance(row.get("match_id"), str)
-    }
+        return None
+    opening = snapshot.get("opening")
+    if not isinstance(opening, dict):
+        return None
+    if opening.get("capture_phase", opening.get("phase")) != "opening":
+        return None
+    if opening.get("source") != "sporttery":
+        return None
+    opening_captured_at = _datetime(opening.get("captured_at"))
+    kickoff = _datetime(decision.get("kickoff_at"))
+    if (
+        opening_captured_at is None
+        or kickoff is None
+        or opening_captured_at >= decision_captured_at
+        or opening_captured_at >= kickoff
+    ):
+        return None
+    matches = opening.get("matches")
+    if not isinstance(matches, list):
+        return None
+    match_id = prediction.get("match_id")
+    for match in matches:
+        if (
+            isinstance(match, dict)
+            and match.get("match_id") == match_id
+            and _same_snapshot_identity(prediction, match)
+        ):
+            return match
+    return None
 
 
 def _same_match(prediction: dict, decision: dict, captured_at: datetime) -> bool:
@@ -242,10 +262,27 @@ def _decision_market_matches(decision: dict, market: OfficialMarket) -> bool:
     return all(_same_price(_snapshot_price(prices, selection), price) for selection, price in market.prices.items())
 
 
-def _data_quality(market: OfficialMarket, opening: dict | None) -> tuple[str, float]:
+def _validated_opening_market(
+    opening: dict | None, market: OfficialMarket
+) -> dict | None:
+    prices = _market_from_snapshot(opening, market.market_type)
+    if prices is None:
+        return None
+    if market.market_type == "hhad":
+        try:
+            if parse_handicap(prices.get("goalLine")) != market.line:
+                return None
+        except ValueError:
+            return None
+    if any(_snapshot_price(prices, selection) is None for selection in market.prices):
+        return None
+    return prices
+
+
+def _data_quality(market: OfficialMarket, opening_market: dict | None) -> tuple[str, float]:
     if market.source not in TRUSTED_SOURCES:
         return "low", 0.0
-    if market.source == "sporttery" and _market_from_snapshot(opening, market.market_type) is not None:
+    if market.source == "sporttery" and opening_market is not None:
         return "high", 1.0
     if market.source:
         return "medium", 0.6
@@ -290,9 +327,9 @@ def _selection_probabilities(
     return [(selection, probability, probability, 0) for selection, probability in probabilities.items()]
 
 
-def _model_weight(value_config: dict, samples: int) -> float:
-    settled = int(value_config.get("settled_samples", samples) or 0)
-    strict = settled < int(value_config.get("strict_until_samples", 100))
+def _model_weight(value_config: dict) -> float:
+    settled = _settled_samples(value_config)
+    strict = settled < _nonnegative_integer(value_config.get("strict_until_samples"), 100)
     base = _number(value_config.get("strict_model_edge_weight_base" if strict else "model_edge_weight_base"))
     maximum = _number(value_config.get("strict_model_edge_weight_max" if strict else "model_edge_weight_max"))
     base = 0.0 if base is None else base
@@ -301,8 +338,10 @@ def _model_weight(value_config: dict, samples: int) -> float:
     return min(1.0, max(0.0, base + (maximum - base) * settled / (settled + prior)))
 
 
-def _gate_reasons(value_config: dict, samples: int, edge: float, expected_value: float) -> tuple[str, ...]:
-    strict = int(value_config.get("settled_samples", samples) or 0) < int(value_config.get("strict_until_samples", 100))
+def _gate_reasons(value_config: dict, edge: float, expected_value: float) -> tuple[str, ...]:
+    strict = _settled_samples(value_config) < _nonnegative_integer(
+        value_config.get("strict_until_samples"), 100
+    )
     edge_key = "strict_min_probability_edge" if strict else "min_probability_edge"
     return_key = "strict_min_expected_return" if strict else "min_expected_return"
     edge_threshold = _number(value_config.get(edge_key)) or 0.0
@@ -364,10 +403,22 @@ def _number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _settled_samples(value_config: dict) -> int:
+    return _nonnegative_integer(value_config.get("settled_samples"), 0)
+
+
+def _nonnegative_integer(value: object, default: int) -> int:
+    number = _number(value)
+    return max(0, int(number)) if number is not None else default
+
+
 def _datetime(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+    return parsed
