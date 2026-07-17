@@ -3,7 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -65,7 +65,34 @@ class CaptureOddsSnapshotCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             snapshot = root / "snapshot.json"
-            snapshot.write_text("{}", encoding="utf-8")
+            snapshot.write_text(
+                json.dumps({"matches": [{"match_id": "001"}]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(0, self.run_main(root, "decision", snapshot))
+
+    def test_decision_rejects_an_unproven_empty_written_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps({"matches": []}), encoding="utf-8")
+
+            self.assertNotEqual(0, self.run_main(root, "decision", snapshot))
+
+    def test_decision_accepts_a_proven_empty_written_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = next(iter(OFFICIAL_FIXTURE_SOURCES))
+            self.write_source_status(root, {
+                "source": source,
+                "target_date": TARGET_DATE,
+                "fixture_count": 0,
+                "no_fixtures": True,
+            })
+            self.write_fixtures(root)
+            snapshot = root / "snapshot.json"
+            snapshot.write_text(json.dumps({"matches": []}), encoding="utf-8")
+
             self.assertEqual(0, self.run_main(root, "decision", snapshot))
 
     def test_decision_returns_zero_for_each_official_zero_fixture_proof(self):
@@ -196,6 +223,101 @@ class CaptureOddsSnapshotCliTest(unittest.TestCase):
         for phase in ("opening", "monitoring"):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
                 self.assertEqual(0, self.run_main(Path(tmp), phase, None))
+
+
+class CaptureOddsSnapshotProductionTest(unittest.TestCase):
+    def test_capture_keeps_an_empty_direct_schedule_without_fallback(self):
+        captured_at = datetime(2026, 7, 16, 13, 30, tzinfo=timezone(timedelta(hours=8)))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            capture_odds_snapshot, "SNAPSHOT_DIR", Path(tmp)
+        ), patch.object(
+            capture_odds_snapshot, "fetch_selling_matches", return_value=[]
+        ) as fetch_direct, patch.object(
+            capture_odds_snapshot, "fetch_zgzcw_matches"
+        ) as fetch_fallback, patch.object(
+            capture_odds_snapshot, "_load_odds", return_value={}
+        ):
+            output = capture_odds_snapshot.capture(date(2026, 7, 16), captured_at=captured_at)
+            self.assertIsNotNone(output)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual("sporttery", payload["source"])
+        self.assertEqual([], payload["matches"])
+        fetch_direct.assert_called_once_with(date(2026, 7, 16))
+        fetch_fallback.assert_not_called()
+
+    def test_capture_preserves_direct_sporttery_market_eligibility(self):
+        direct_match = {
+            "matchId": "001",
+            "matchNumStr": "001",
+            "homeTeam": "Home",
+            "awayTeam": "Away",
+            "kickoff_at": "2026-07-16 20:00",
+            "isSingleHad": True,
+            "isSingleHhad": True,
+            "isSingleTtg": True,
+        }
+        captured_at = datetime(2026, 7, 16, 13, 30, tzinfo=timezone(timedelta(hours=8)))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            capture_odds_snapshot, "SNAPSHOT_DIR", Path(tmp)
+        ), patch.object(
+            capture_odds_snapshot,
+            "fetch_selling_matches",
+            return_value=[direct_match],
+            create=True,
+        ) as fetch_direct, patch.object(
+            capture_odds_snapshot, "fetch_zgzcw_matches"
+        ) as fetch_fallback, patch.object(
+            capture_odds_snapshot,
+            "_load_odds",
+            return_value={"001": {"had": {}, "hhad": {}, "ttg": {}}},
+        ):
+            output = capture_odds_snapshot.capture(date(2026, 7, 16), captured_at=captured_at)
+            self.assertIsNotNone(output)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual("sporttery", payload["source"])
+        self.assertEqual(
+            {"had": True, "hhad": True, "ttg": True},
+            payload["matches"][0]["single_eligibility"],
+        )
+        fetch_direct.assert_called_once_with(date(2026, 7, 16))
+        fetch_fallback.assert_not_called()
+
+    def test_capture_uses_had_only_zgzcw_fallback_after_direct_failure(self):
+        fallback_match = {
+            "matchId": "001",
+            "matchNumStr": "001",
+            "homeTeam": "Home",
+            "awayTeam": "Away",
+            "kickoff_at": "2026-07-16 20:00",
+            "isSingleHad": True,
+        }
+        captured_at = datetime(2026, 7, 16, 13, 30, tzinfo=timezone(timedelta(hours=8)))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            capture_odds_snapshot, "SNAPSHOT_DIR", Path(tmp)
+        ), patch.object(
+            capture_odds_snapshot,
+            "fetch_selling_matches",
+            side_effect=RuntimeError("Sporttery unavailable"),
+            create=True,
+        ) as fetch_direct, patch.object(
+            capture_odds_snapshot, "fetch_zgzcw_matches", return_value=[fallback_match]
+        ) as fetch_fallback, patch.object(
+            capture_odds_snapshot,
+            "_load_odds",
+            return_value={"001": {"had": {}, "hhad": {}, "ttg": {}}},
+        ):
+            output = capture_odds_snapshot.capture(date(2026, 7, 16), captured_at=captured_at)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual("zgzcw", payload["source"])
+        self.assertEqual(
+            {"had": True, "hhad": False, "ttg": False},
+            payload["matches"][0]["single_eligibility"],
+        )
+        fetch_direct.assert_called_once_with(date(2026, 7, 16))
+        fetch_fallback.assert_called_once_with(date(2026, 7, 16))
 
 
 if __name__ == "__main__":

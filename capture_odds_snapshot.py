@@ -4,7 +4,11 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from import_sporttery import fetch_zgzcw_matches, single_eligibility
+from import_sporttery import (
+    fetch_selling_matches,
+    fetch_zgzcw_matches,
+    single_eligibility,
+)
 from report_status import verified_zero_fixture_day
 
 
@@ -27,8 +31,14 @@ def capture(
     if phase not in CAPTURE_PHASES:
         raise ValueError(f"unsupported capture phase: {phase}")
     captured_at = _beijing_time(captured_at or datetime.now(BEIJING))
+    source = "injected"
     if matches is None:
-        matches = fetch_zgzcw_matches(target_date)
+        try:
+            matches = fetch_selling_matches(target_date)
+            source = "sporttery"
+        except Exception:
+            matches = fetch_zgzcw_matches(target_date)
+            source = "zgzcw"
     if odds_by_match is None:
         odds_by_match = _load_odds(target_date)
     normalized_matches = []
@@ -50,9 +60,11 @@ def capture(
         odds = odds_by_match.get(match_id, {})
         if not isinstance(odds, dict):
             odds = {}
-        had = odds.get("had", {})
-        if not isinstance(had, dict):
-            had = {}
+        markets = {
+            market: value if isinstance(value := odds.get(market), dict) else {}
+            for market in ("had", "hhad", "ttg")
+        }
+        had = markets["had"]
         normalized_matches.append(
             {
                 "match_id": match_id,
@@ -62,11 +74,7 @@ def capture(
                 "kickoff_at": item.get("kickoff_at", ""),
                 "capture_phase": match_phase,
                 "minutes_to_kickoff": minutes_to_kickoff,
-                "markets": {
-                    "had": had,
-                    "hhad": odds.get("hhad", {}),
-                    "ttg": odds.get("ttg", {}),
-                },
+                "markets": markets,
                 "single_eligibility": single_eligibility(item),
                 "h": item.get("h", "") or had.get("h", ""),
                 "d": item.get("d", "") or had.get("d", ""),
@@ -83,7 +91,7 @@ def capture(
         "target_date": target_date.isoformat(),
         "captured_at": captured_at.isoformat(),
         "capture_phase": phase,
-        "source": "zgzcw",
+        "source": source,
         "matches": normalized_matches,
     }
     if not payload["matches"] and matches:
@@ -115,6 +123,17 @@ def _load_odds(target_date: date) -> dict[str, dict]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _snapshot_has_matches(path: Path | None) -> bool:
+    if not isinstance(path, Path) or not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    matches = payload.get("matches") if isinstance(payload, dict) else None
+    return isinstance(matches, list) and bool(matches)
+
+
 def _kickoff_time(value) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -134,14 +153,9 @@ def main() -> int:
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     output = capture(target_date, phase=args.phase)
     if args.phase == "decision":
-        snapshot_written = (
-            isinstance(output, Path)
-            and output.is_file()
-            and output.stat().st_size > 0
-        )
-        if not snapshot_written and not verified_zero_fixture_day(ROOT, target_date):
+        if not _snapshot_has_matches(output) and not verified_zero_fixture_day(ROOT, target_date):
             print(
-                "Decision snapshot capture failed: no non-empty snapshot and no verified zero-fixture proof.",
+                "Decision snapshot capture failed: no snapshot matches and no verified zero-fixture proof.",
                 file=sys.stderr,
             )
             return 1

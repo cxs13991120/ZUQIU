@@ -245,6 +245,31 @@ class DecisionSnapshotTest(unittest.TestCase):
         self.assertEqual([], payload["matches"])
         self.assertEqual(captured_at.isoformat(), payload["captured_at"])
 
+    def test_snapshot_normalizes_malformed_market_values_to_empty_dicts(self):
+        captured_at = datetime(2026, 7, 12, 13, 30, tzinfo=timezone(timedelta(hours=8)))
+        matches = [{
+            "matchId": "001",
+            "homeTeam": "Home",
+            "awayTeam": "Away",
+            "kickoff_at": "2026-07-12 20:00",
+        }]
+        odds_by_match = {"001": {"had": "bad", "hhad": [], "ttg": None}}
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(snapshot, "SNAPSHOT_DIR", Path(folder)):
+                output = snapshot.capture(
+                    date(2026, 7, 12),
+                    captured_at=captured_at,
+                    matches=matches,
+                    odds_by_match=odds_by_match,
+                )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            {"had": {}, "hhad": {}, "ttg": {}},
+            payload["matches"][0]["markets"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
