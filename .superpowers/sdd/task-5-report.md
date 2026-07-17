@@ -39,3 +39,61 @@ git diff --check: passed
 ## Commit
 
 Feature commit: `04599c6` (`feat: add immutable idempotent betting ledger`).
+
+## Review fixes
+
+### Scope
+
+- Kept conflict rows unavailable across repeated captures, preserved the first score, and merged `|`-delimited provenance as sorted unique tokens.
+- Cleared all plan-supplied settlement state on new locked rows, stored authoritative normalized lock source and `plan_sha256`, and rejected mismatched row sources.
+- Made correction mode reopening-only and idempotent, including canonical offending-leg tracking for abnormal parlays.
+- Required parseable timezone-aware result capture timestamps, reserved `legacy_match:` for the private migration path, and retained full Decimal odds precision until money serialization.
+- Replaced date/team result-row collapsing with ordered rows plus deterministic row selection so duplicate legacy rows and unknown columns survive.
+
+### RED chronology and exact output
+
+An initial test invocation stopped at import with `SyntaxError: invalid syntax` on a test fixture using `return` as a keyword. It was not counted as RED. After correcting only that test syntax, the required focused command produced the valid RED run below:
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results -v
+
+test_atomic_writer_is_deterministic_utf8_sig_and_preserves_unknown_fields ... FAIL
+test_malformed_identity_fails_closed (match_id='legacy_match:forbidden') ... FAIL
+test_malformed_identity_fails_closed (parlay leg match_id='legacy_match:forbidden') ... FAIL
+test_new_locked_row_clears_plan_settlement_fields_and_uses_authoritative_lock_metadata ... FAIL
+test_abnormal_parlay_reopens_by_offending_leg_then_requires_ordinary_settlement ... ERROR
+test_correction_mode_never_settles_pending_rows ... FAIL
+test_locked_odds_keep_full_decimal_precision_until_money_is_quantized ... FAIL
+test_unproven_results_do_not_mutate_pending_and_correction_is_explicit (captured_at_bjt='not-a-timestamp') ... FAIL
+test_unproven_results_do_not_mutate_pending_and_correction_is_explicit (captured_at_bjt='2026-07-17T11:00:00') ... FAIL
+test_unproven_results_do_not_mutate_pending_and_correction_is_explicit ... FAIL
+test_conflict_survives_repeated_and_later_captures_idempotently ... FAIL
+test_duplicate_legacy_rows_and_unknown_columns_survive_migration_in_order ... FAIL
+
+----------------------------------------------------------------------
+Ran 20 tests in 0.134s
+
+FAILED (failures=11, errors=1)
+```
+
+### GREEN verification
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results -v
+Ran 20 tests in 0.064s
+OK
+
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_value_portfolio tests.test_report_status -v
+Ran 69 tests in 1.161s
+OK
+
+.\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m py_compile betting_ledger.py update_sporttery_results.py tests\test_betting_ledger.py tests\test_update_sporttery_results.py
+Exit code: 0
+
+git diff --check
+Exit code: 0
+```
+
+Fix commit: `ed5950f0932f47fbf689ef15faa31f0dd25a5942` (`fix: harden betting ledger review invariants`).
+
+Immediately after the fix commit, `git status --short` produced no output (clean worktree).
