@@ -150,41 +150,74 @@ def stake_for(candidate: ValueCandidate, bankroll: float, kelly_fraction: float)
 
 def build_two_leg_candidates(candidates: list[ValueCandidate], config: dict) -> list[ParlayCandidate]:
     """Build deterministic, legal two-leg parlay candidates from independent legs."""
+    return _build_two_leg_candidates_with_reasons(candidates, config)[0]
+
+
+def _build_two_leg_candidates_with_reasons(
+    candidates: list[ValueCandidate], config: dict
+) -> tuple[list[ParlayCandidate], tuple[str, ...]]:
     strategy = _strategy(config)
     gates = _combo_gates(strategy)
     if gates is None:
-        return []
-    legs = [candidate for candidate in _unique_candidates(candidates) if _parlay_leg_reason(candidate, gates) is None]
+        return [], ("parlay_invalid_config",)
+    unique_candidates, duplicate_reasons = _unique_candidates_with_reasons(candidates)
+    rejections = list(duplicate_reasons)
+    legs = []
+    for candidate in unique_candidates:
+        reason = _parlay_leg_reason(candidate, gates)
+        if reason is not None:
+            rejections.append(f"{candidate.candidate_id}:parlay_{reason}")
+            continue
+        legs.append(candidate)
     parlays = []
     for index, left in enumerate(legs):
         for right in legs[index + 1 :]:
-            if left.match_id == right.match_id or _correlated(left, right):
+            ordered = tuple(sorted((left, right), key=lambda candidate: candidate.candidate_id))
+            pair_id = "|".join(candidate.candidate_id for candidate in ordered)
+            if left.match_id == right.match_id:
+                rejections.append(f"{pair_id}:parlay_same_match")
+                continue
+            if _correlated(left, right):
+                rejections.append(f"{pair_id}:parlay_correlated")
                 continue
             probability = left.conservative_probability * right.conservative_probability
             odds = left.official_odds * right.official_odds
             expected_value = probability * odds - 1.0
             if not _finite_positive(probability) or not _finite_number(odds) or odds <= 1.0 or expected_value <= 0:
+                rejections.append(f"{pair_id}:parlay_invalid_combined_value")
                 continue
             if expected_value < gates["combined_ev"]:
+                rejections.append(f"{pair_id}:parlay_combined_ev")
                 continue
             multiplier = _parlay_multiplier((left, right))
             if multiplier is None:
+                rejections.append(f"{pair_id}:parlay_invalid_multiplier")
                 continue
             growth = _expected_log_growth(probability, odds, QUARTER_KELLY * full_kelly(probability, odds) * multiplier)
             if growth is None or growth <= 0:
+                rejections.append(f"{pair_id}:parlay_nonpositive_growth")
                 continue
-            ordered = tuple(sorted((left, right), key=lambda candidate: candidate.candidate_id))
             parlays.append(
                 ParlayCandidate(
                     legs=ordered,
-                    pair_id="|".join(candidate.candidate_id for candidate in ordered),
+                    pair_id=pair_id,
                     combined_probability=probability,
                     combined_odds=odds,
                     expected_value=expected_value,
                     expected_log_growth=growth,
                 )
             )
-    return sorted(parlays, key=lambda parlay: (-parlay.expected_log_growth, -parlay.expected_value, parlay.pair_id))
+    return (
+        sorted(
+            parlays,
+            key=lambda parlay: (
+                -parlay.expected_log_growth,
+                -parlay.expected_value,
+                parlay.pair_id,
+            ),
+        ),
+        tuple(sorted(set(rejections))),
+    )
 
 
 def allocate_portfolio(
@@ -249,7 +282,7 @@ def allocate_portfolio(
             ),
         )
         if stake < limit_values.min_single_stake:
-            rejections.append(f"{candidate.candidate_id}:single_limit")
+            rejections.append(f"{candidate.candidate_id}:min_single_stake")
             continue
         singles.append(
             AllocatedSingle(
@@ -271,7 +304,11 @@ def allocate_portfolio(
 
     parlay = None
     parlay_config = _combo_config_from_limits(limit_values)
-    for candidate in build_two_leg_candidates(unique_candidates, parlay_config):
+    parlay_candidates, parlay_rejections = _build_two_leg_candidates_with_reasons(
+        unique_candidates, parlay_config
+    )
+    rejections.extend(parlay_rejections)
+    for candidate in parlay_candidates:
         if selected_matches.intersection(candidate.match_ids):
             rejections.append(f"{candidate.pair_id}:parlay_reuses_single_match")
             continue
@@ -293,7 +330,7 @@ def allocate_portfolio(
             ),
         )
         if stake < limit_values.min_parlay_stake:
-            rejections.append(f"{candidate.pair_id}:parlay_limit")
+            rejections.append(f"{candidate.pair_id}:min_parlay_stake")
             continue
         parlay = AllocatedParlay(
             parlay=candidate,
@@ -349,17 +386,17 @@ def _parlay_leg_reason(candidate: ValueCandidate, gates: dict[str, float]) -> st
 def _common_candidate_reason(candidate: ValueCandidate) -> str | None:
     if not _nonempty_text(candidate.match_id):
         return "invalid_match_id"
-    if candidate.market_type not in SUPPORTED_MARKETS:
+    if not isinstance(candidate.market_type, str) or candidate.market_type not in SUPPORTED_MARKETS:
         return "unsupported_market"
-    if candidate.play != PLAY_BY_MARKET[candidate.market_type]:
+    if not isinstance(candidate.play, str) or candidate.play != PLAY_BY_MARKET[candidate.market_type]:
         return "unsupported_play"
     if not _valid_market_identity(candidate):
         return "invalid_market_identity"
-    if candidate.data_quality not in QUALITY_RANK:
+    if not isinstance(candidate.data_quality, str) or candidate.data_quality not in QUALITY_RANK:
         return "data_quality"
-    if candidate.volatility_band not in VOLATILITY_RANK:
+    if not isinstance(candidate.volatility_band, str) or candidate.volatility_band not in VOLATILITY_RANK:
         return "volatility_band"
-    if candidate.odds_source not in TRUSTED_SOURCES or not _nonempty_text(candidate.source_record_id) or not _nonempty_text(candidate.captured_at_bjt):
+    if not isinstance(candidate.odds_source, str) or candidate.odds_source not in TRUSTED_SOURCES or not _nonempty_text(candidate.source_record_id) or not _nonempty_text(candidate.captured_at_bjt):
         return "unlocked_domestic_odds"
     probability = _finite_number(candidate.conservative_probability)
     market_probability = _finite_number(candidate.official_market_probability)
@@ -380,7 +417,7 @@ def _common_candidate_reason(candidate: ValueCandidate) -> str | None:
         or market_probability is None
         or not 0 < market_probability < 1
         or probability_edge is None
-        or any(value is None or not 0 < value < 1 for value in probability_layers)
+        or any(value is None or not 0 <= value <= 1 for value in probability_layers)
         or odds is None
         or odds <= 1
         or expected_value is None
@@ -409,6 +446,8 @@ def _common_candidate_reason(candidate: ValueCandidate) -> str | None:
 
 
 def _valid_market_identity(candidate: ValueCandidate) -> bool:
+    if not isinstance(candidate.selection, str):
+        return False
     if candidate.market_type == "had":
         return candidate.line is None and candidate.selection in THREE_WAY_SELECTION_LABELS
     if candidate.market_type == "hhad":
@@ -645,12 +684,11 @@ def _capped_stake(
     minimum = min(float(raw_stake), *(value for _, value in parsed_caps))
     stake = _round_down(minimum, unit)
     applied = []
-    if minimum < raw_stake:
-        applied.extend(
-            name
-            for name, value in parsed_caps
-            if math.isclose(value, minimum, rel_tol=0.0, abs_tol=1e-12)
-        )
+    applied.extend(
+        name
+        for name, value in parsed_caps
+        if math.isclose(value, minimum, rel_tol=0.0, abs_tol=1e-12)
+    )
     if stake < minimum:
         applied.append("stake_unit")
     return stake, tuple(sorted(set(applied)))
@@ -698,6 +736,12 @@ def _risk_checks(
             all(item.stake <= limits.max_single_stake for item in singles),
         ),
         RiskCheck(
+            "min_single_stake",
+            float(min((item.stake for item in singles), default=0)),
+            float(limits.min_single_stake),
+            not singles or all(item.stake >= limits.min_single_stake for item in singles),
+        ),
+        RiskCheck(
             "max_one_single_per_match",
             float(max(single_counts.values(), default=0)),
             1.0,
@@ -720,6 +764,12 @@ def _risk_checks(
             float(parlay_total),
             float(limits.max_parlay_stake),
             parlay_total <= limits.max_parlay_stake,
+        ),
+        RiskCheck(
+            "min_parlay_stake",
+            float(parlay_total),
+            float(limits.min_parlay_stake),
+            parlay is None or parlay_total >= limits.min_parlay_stake,
         ),
         RiskCheck(
             "max_daily_stake",

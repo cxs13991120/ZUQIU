@@ -144,6 +144,12 @@ class PortfolioAllocationTest(unittest.TestCase):
             replace(_candidate(), correlation_tags=None),
             replace(_candidate(), correlation_tags=("league:x", 1)),
             replace(_candidate(), match_id=""),
+            replace(_candidate(), market_type=[]),
+            replace(_candidate(), play=[]),
+            replace(_candidate(), selection=[]),
+            replace(_candidate(), data_quality=[]),
+            replace(_candidate(), volatility_band=[]),
+            replace(_candidate(), odds_source=[]),
             replace(_candidate(), raw_model_probability="0.60"),
             replace(_candidate(), value_gate_reasons=""),
             replace(_candidate(), conservative_probability="0.60"),
@@ -169,9 +175,11 @@ class PortfolioAllocationTest(unittest.TestCase):
                 "stake_unit",
                 "max_match_exposure",
                 "max_one_single_per_match",
+                "min_single_stake",
                 "max_single_count",
                 "single_budget_cap",
                 "max_parlay_stake",
+                "min_parlay_stake",
                 "max_daily_stake",
                 "monthly_budget_cap",
                 "monthly_stop_loss",
@@ -181,6 +189,22 @@ class PortfolioAllocationTest(unittest.TestCase):
             }.issubset(checks)
         )
         self.assertTrue(all(check.passed for check in checks.values()))
+
+    def test_raw_and_calibrated_probability_endpoints_remain_eligible(self):
+        candidate = replace(
+            _candidate(), raw_model_probability=0.0, calibrated_model_probability=1.0
+        )
+        self.assertGreater(
+            allocate_portfolio([candidate], _limits(), _account()).total_stake, 0
+        )
+
+    def test_cap_equal_to_kelly_stake_is_recorded_as_binding(self):
+        candidate = _candidate(conservative_probability=0.54)
+        portfolio = allocate_portfolio(
+            [candidate], _limits(max_single_stake=100), _account()
+        )
+        self.assertEqual(100, portfolio.singles[0].kelly_stake)
+        self.assertIn("max_single_stake", portfolio.singles[0].applied_limits)
 
     def test_pending_monthly_stake_consumes_budget_but_profit_alias_is_supported(self):
         candidate = _candidate(conservative_probability=0.70)
@@ -306,6 +330,36 @@ class ParlayTest(unittest.TestCase):
         left = _candidate(candidate_id="left", match_id="left", single_eligible=False)
         right = _candidate(candidate_id="right", match_id="right", single_eligible=False)
         self.assertEqual(1, len(build_two_leg_candidates([left, right], config)))
+
+    def test_allocator_reports_every_parlay_rejection_category(self):
+        low_probability = _candidate(
+            candidate_id="low", match_id="low", single_eligible=False,
+            conservative_probability=0.40,
+        )
+        same_left = _candidate(
+            candidate_id="same-left", match_id="same", single_eligible=False,
+        )
+        same_right = _candidate(
+            candidate_id="same-right", match_id="same", single_eligible=False,
+        )
+        correlated_left = _candidate(
+            candidate_id="corr-left", match_id="corr-left", single_eligible=False,
+            correlation_tags=("team:shared",),
+        )
+        correlated_right = _candidate(
+            candidate_id="corr-right", match_id="corr-right", single_eligible=False,
+            correlation_tags=("team:shared",),
+        )
+        portfolio = allocate_portfolio(
+            [low_probability, same_left, same_right, correlated_left, correlated_right],
+            _limits(min_combo_ev=0.50),
+            _account(),
+        )
+        reasons = "\n".join(portfolio.rejections)
+        self.assertIn("parlay_leg_probability", reasons)
+        self.assertIn("parlay_same_match", reasons)
+        self.assertIn("parlay_correlated", reasons)
+        self.assertIn("parlay_combined_ev", reasons)
 
 
 def _candidate(**overrides) -> ValueCandidate:
