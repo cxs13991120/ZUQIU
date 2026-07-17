@@ -127,10 +127,10 @@ def simulation_account_state(
     configured_budget = _number(policy.get("monthly_budget_cap"))
     configured_stop_loss = _number(policy.get("monthly_stop_loss"))
     monthly_budget_cap = max(
-        0.0, 3000.0 if configured_budget is None else configured_budget
+        0.0, 5000.0 if configured_budget is None else configured_budget
     )
     monthly_stop_loss = max(
-        0.0, 500.0 if configured_stop_loss is None else configured_stop_loss
+        0.0, 5000.0 if configured_stop_loss is None else configured_stop_loss
     )
     month_prefix = target_date.strftime("%Y-%m-")
     target_text = target_date.isoformat()
@@ -235,12 +235,10 @@ def build_daily_decision(
 
 
 def combo_leg_limit(strategy: dict, completed_days: int) -> int:
-    configured = int(_number(strategy.get("combo_max_legs")) or 3)
-    configured = min(3, max(2, configured))
-    required_days = max(
-        30, int(_number(strategy.get("three_leg_min_settled_days")) or 30)
-    )
-    return min(configured, 2) if completed_days < required_days else configured
+    configured = _number(strategy.get("combo_max_legs"))
+    if configured != 2:
+        raise ValueError("value-v4 requires exactly two parlay legs")
+    return 2
 
 
 def _brier(probabilities: list[float], outcomes: list[float]) -> float | None:

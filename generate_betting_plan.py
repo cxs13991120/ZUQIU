@@ -2,10 +2,13 @@ import csv
 import itertools
 import json
 import math
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from betting_ledger import settle_pending, stable_bet_id, write_ledger_atomic
 from model_metrics import play_family, summarize, write_metrics
+from official_markets import normalize_market
 from strategy_controls import (
     apply_league_draw_calibration,
     build_daily_decision,
@@ -13,6 +16,8 @@ from strategy_controls import (
     fit_league_draw_calibrations,
     simulation_account_state,
 )
+from value_candidates import ValueCandidate, build_candidates
+from value_portfolio import Portfolio, PortfolioLimits, allocate_portfolio
 
 
 ROOT = Path(__file__).resolve().parent
@@ -360,9 +365,9 @@ def build_plan(target_date: date) -> list[dict]:
     return plan
 
 
-def build_value_plan(target_date: date) -> tuple[list[dict], list[dict]]:
+def build_legacy_value_plan(target_date: date) -> tuple[list[dict], list[dict]]:
     config = read_json(ROOT / "betting_config.json")
-    strategy_version = str(config.get("strategy_version") or "value-v2")
+    strategy_version = str(config.get("legacy_strategy_version") or "legacy-v3")
     value = config.get("value_strategy", {})
     predictions = load_predictions(target_date)
     odds_by_match = load_odds(target_date)
@@ -537,9 +542,9 @@ def build_value_plan(target_date: date) -> tuple[list[dict], list[dict]]:
 
     available = [item for item in combo_legs if (item["row"]["team_a"], item["row"]["team_b"]) not in used_matches]
     best_by_size = {}
-    maximum_combo_legs = combo_leg_limit(
-        value, int(account_state.get("completed_days") or 0)
-    )
+    # The retained comparison path is deliberately fixed at two legs; v4 owns
+    # the public configuration validator and the paid portfolio constraints.
+    maximum_combo_legs = 2
     for size in range(int(value.get("combo_min_legs", 2)), maximum_combo_legs + 1):
         for selected in itertools.combinations(available, size):
             probability = math.prod(item["probability"] for item in selected)
@@ -575,6 +580,296 @@ def build_value_plan(target_date: date) -> tuple[list[dict], list[dict]]:
         reason = f"零金额观察单；保守概率{pct(item['probability'])}，联赛校准概率{pct(item['league_calibrated_probability'])}，原模型{pct(item['raw_probability'])}，市场公平概率{pct(item['market_probability'])}，仅用于概率校准和CLV，不计入盈亏"
         observations.append(make_item(item["row"], "观察单", item["selection"], item["probability"], item["odds"], 0, reason, market_probability=item["market_probability"], value_edge=item["value_edge"], raw_model_probability=item["raw_probability"], league_calibrated_probability=item["league_calibrated_probability"], league_calibration_samples=item["league_calibration_samples"], strategy_version=strategy_version))
     return plan, observations
+
+
+# Kept as a compatibility entry point for the pre-v4 comparison tests/readers.
+build_value_plan = build_legacy_value_plan
+
+
+BEIJING = timezone(timedelta(hours=8))
+_LAST_VALUE_V4_AUDIT: dict = {}
+
+
+@dataclass(frozen=True)
+class StrategyOutputs:
+    active_plan: list[dict]
+    observations: list[dict]
+    shadow_plan: list[dict]
+    audit: dict
+
+
+def load_value_snapshot(target_date: date) -> dict:
+    """Load the latest decision snapshot for a date, failing closed on bad data."""
+    snapshots = DATA_DIR / "odds_snapshots"
+    candidates = sorted(snapshots.glob(f"{target_date.isoformat()}-*-decision.json"))
+    for path in reversed(candidates):
+        try:
+            payload = read_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("target_date") == target_date.isoformat()
+            and payload.get("capture_phase") == "decision"
+        ):
+            return payload
+    return {"target_date": target_date.isoformat(), "capture_phase": "decision", "matches": []}
+
+
+def load_official_decision_markets(target_date: date) -> dict[str, dict]:
+    """Normalize only markets evidenced by the decision snapshot."""
+    snapshot = load_value_snapshot(target_date)
+    markets: dict[str, dict] = {}
+    for match in snapshot.get("matches", []) if isinstance(snapshot, dict) else []:
+        if not isinstance(match, dict) or not isinstance(match.get("match_id"), str):
+            continue
+        match_id = match["match_id"]
+        raw_markets = match.get("markets")
+        if not isinstance(raw_markets, dict):
+            continue
+        captured_at = snapshot.get("captured_at")
+        source = snapshot.get("source")
+        for market_type in ("had", "hhad", "ttg"):
+            raw = raw_markets.get(market_type)
+            if not isinstance(raw, dict):
+                continue
+            enriched = dict(raw)
+            enriched.setdefault("source", source)
+            enriched.setdefault("source_record_id", f"{match_id}:{market_type}:{captured_at}")
+            enriched.setdefault("captured_at_bjt", captured_at)
+            market = normalize_market(match_id, market_type, enriched)
+            if market is not None:
+                markets.setdefault(match_id, {})[market_type] = market
+    return markets
+
+
+def _aware_locked_at(locked_at: datetime) -> datetime:
+    if not isinstance(locked_at, datetime) or locked_at.tzinfo is None or locked_at.utcoffset() is None:
+        raise ValueError("locked_at must be an aware ISO-8601 datetime")
+    return locked_at.astimezone(BEIJING)
+
+
+def _v4_config(config: dict) -> dict:
+    """Adapt the public net-EV names to the candidate builder's value gate."""
+    payload = json.loads(json.dumps(config))
+    value = payload.setdefault("value_strategy", {})
+    value["strict_min_expected_value"] = value.get("strict_min_ev")
+    value["min_expected_value"] = value.get("min_ev")
+    return payload
+
+
+def _v4_limits(config: dict, account: dict) -> PortfolioLimits:
+    value = config.get("value_strategy", {})
+    strict = int(value.get("settled_samples", 0)) < int(value.get("strict_until_samples", 100))
+    return PortfolioLimits(
+        bankroll=float(value.get("reference_bankroll", 5000)),
+        kelly_fraction=float(value.get("strict_kelly_fraction" if strict else "kelly_fraction", 0.25)),
+        stake_unit=int(value.get("stake_unit", 2)),
+        max_match_exposure=int(value.get("max_match_exposure", 200)),
+        max_single_stake=int(value.get("strict_max_single_stake" if strict else "max_single_stake", 200)),
+        single_budget_cap=int(value.get("strict_single_budget_cap" if strict else "single_budget_cap", 200)),
+        max_single_count=int(value.get("max_single_count", 2)),
+        min_single_stake=int(value.get("min_single_stake", value.get("stake_unit", 2))),
+        max_parlay_stake=int(value.get("max_daily_combo_stake", 30)),
+        min_parlay_stake=int(value.get("stake_unit", 2)),
+        max_daily_stake=int(config.get("max_daily_budget", 500)),
+        monthly_budget_cap=int(account.get("monthly_budget_cap", 5000)),
+        monthly_stop_loss=int(account.get("monthly_stop_loss", 5000)),
+        settled_samples=int(value.get("settled_samples", 0)),
+        strict_until_samples=int(value.get("strict_until_samples", 100)),
+        min_combo_leg_probability=float(value.get("min_combo_leg_probability", 0.45)),
+        min_combo_leg_edge=float(value.get("strict_min_combo_leg_edge" if strict else "min_combo_leg_edge", 0.01)),
+        min_combo_leg_ev=float(value.get("strict_min_combo_leg_ev" if strict else "min_combo_leg_ev", 0.01)),
+        min_combo_ev=float(value.get("strict_min_combo_ev" if strict else "min_combo_ev", 0.03)),
+    )
+
+
+def _candidate_plan_row(
+    candidate: ValueCandidate,
+    stake: int,
+    *,
+    locked_at: datetime,
+    portfolio_rank: int,
+    full_kelly: float = 0.0,
+    kelly_fraction: float = 0.25,
+    binding_limits: tuple[str, ...] = (),
+    market_type: str | None = None,
+    play: str | None = None,
+    selection: str | None = None,
+    odds: float | None = None,
+    probability: float | None = None,
+    legs: list[dict] | None = None,
+) -> dict:
+    market_type = market_type or candidate.market_type
+    odds = candidate.official_odds if odds is None else odds
+    probability = candidate.conservative_probability if probability is None else probability
+    row = {
+        "date": candidate.date,
+        "report_date": candidate.date,
+        "strategy_version": "value-v4",
+        "model_version": "value-v4",
+        "stage": candidate.stage,
+        "match": f"{candidate.team_a} vs {candidate.team_b}",
+        "team_a": candidate.team_a,
+        "team_b": candidate.team_b,
+        "match_id": candidate.match_id if market_type != "parlay" else "",
+        "kickoff_local": candidate.kickoff_at,
+        "play": play or candidate.play,
+        "market_type": market_type,
+        "market_line": "" if candidate.line is None else str(candidate.line),
+        "selection": selection or candidate.selection,
+        "probability": probability,
+        "raw_probability": candidate.raw_model_probability,
+        "raw_model_probability": candidate.raw_model_probability,
+        "calibrated_probability": candidate.calibrated_model_probability,
+        "league_calibrated_probability": candidate.calibrated_model_probability,
+        "league_calibration_samples": candidate.calibration_samples,
+        "official_market_probability": candidate.official_market_probability,
+        "market_probability": candidate.official_market_probability,
+        "conservative_probability": probability,
+        "edge": candidate.probability_edge,
+        "value_edge": candidate.probability_edge,
+        "net_ev": probability * odds - 1.0,
+        "expected_value": probability * odds - 1.0,
+        "expected_return": probability * odds,
+        "expected_profit": stake * (probability * odds - 1.0),
+        "odds": odds,
+        "locked_odds": odds,
+        "locked_at_bjt": locked_at.isoformat(),
+        "odds_source": candidate.odds_source,
+        "odds_source_record_id": candidate.source_record_id,
+        "odds_captured_at_bjt": candidate.captured_at_bjt,
+        "data_quality": candidate.data_quality,
+        "data_quality_multiplier": candidate.data_quality_multiplier,
+        "volatility_band": candidate.volatility_band,
+        "volatility_multiplier": candidate.volatility_multiplier,
+        "performance_multiplier": candidate.performance_multiplier,
+        "full_kelly": full_kelly,
+        "kelly_fraction": kelly_fraction,
+        "portfolio_rank": portfolio_rank,
+        "binding_limits": json.dumps(list(binding_limits), ensure_ascii=False),
+        "stake": stake,
+        "reason": "value-v4 verified candidate",
+        "legs_json": json.dumps(legs or [], ensure_ascii=False, sort_keys=True),
+    }
+    row["bet_id"] = stable_bet_id(row)
+    return row
+
+
+def _portfolio_rows(portfolio: Portfolio, locked_at: datetime) -> list[dict]:
+    rows = [
+        _candidate_plan_row(
+            item.candidate, item.stake, locked_at=locked_at, portfolio_rank=item.rank,
+            full_kelly=item.full_kelly, kelly_fraction=item.kelly_fraction,
+            binding_limits=item.applied_limits,
+        )
+        for item in portfolio.singles
+    ]
+    if portfolio.parlay is not None:
+        item = portfolio.parlay
+        legs = [
+            {
+                "match_id": leg.match_id, "market_type": leg.market_type,
+                "selection": leg.selection, "line": "" if leg.line is None else str(leg.line),
+                "odds": leg.official_odds,
+            }
+            for leg in item.parlay.legs
+        ]
+        rows.append(_candidate_plan_row(
+            item.parlay.legs[0], item.stake, locked_at=locked_at, portfolio_rank=item.rank,
+            full_kelly=item.full_kelly, kelly_fraction=item.kelly_fraction,
+            binding_limits=item.applied_limits, market_type="parlay", play="PARLAY",
+            selection=" + ".join(leg.selection for leg in item.parlay.legs),
+            odds=item.parlay.combined_odds, probability=item.parlay.combined_probability, legs=legs,
+        ))
+    return rows
+
+
+def _portfolio_audit(candidates: list[ValueCandidate], portfolio: Portfolio, account: dict) -> dict:
+    counts = {market: sum(candidate.market_type == market for candidate in candidates) for market in ("had", "hhad", "ttg")}
+    return {
+        "candidate_counts": counts,
+        "rejection_reasons": sorted({*portfolio.rejections, *(reason for candidate in candidates for reason in candidate.value_gate_reasons)}),
+        "selected_shadow": [],
+        "risk_checks": [
+            {"name": check.name, "value": check.value, "limit": check.limit, "passed": check.passed}
+            for check in portfolio.limit_checks
+        ],
+        "risk_caps": {
+            "max_match_exposure": 200,
+            "max_daily_stake": 500,
+            "max_daily_combo_stake": 30,
+            "monthly_budget_cap": account.get("monthly_budget_cap", 5000),
+            "monthly_stop_loss": account.get("monthly_stop_loss", 5000),
+        },
+    }
+
+
+def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list[dict], list[dict]]:
+    """Build a value-v4 portfolio from locked decision-market inputs only."""
+    global _LAST_VALUE_V4_AUDIT
+    locked_time = _aware_locked_at(locked_at)
+    config = read_json(ROOT / "betting_config.json")
+    predictions = load_predictions(target_date)
+    snapshot = load_value_snapshot(target_date)
+    markets = load_official_decision_markets(target_date)
+    history = load_csv(OUTPUT_DIR / "betting_ledger.csv")
+    observations_history = load_csv(OUTPUT_DIR / "observation_ledger.csv")
+    account = simulation_account_state(
+        history, observations_history, target_date, config.get("simulation_account", {})
+    )
+    calibrations_config = config.get("league_calibration", {})
+    calibrations = fit_league_draw_calibrations(
+        load_draw_training_samples(),
+        min_samples=int(calibrations_config.get("min_samples", 30)),
+        prior_samples=int(calibrations_config.get("prior_samples", 60)),
+        max_adjustment=float(calibrations_config.get("max_adjustment", 0.05)),
+        validation_fraction=float(calibrations_config.get("validation_fraction", 0.25)),
+    )
+    candidates = build_candidates(predictions, markets, snapshot, _v4_config(config), calibrations)
+    portfolio = allocate_portfolio(candidates, _v4_limits(config, account), account)
+    plan = _portfolio_rows(portfolio, locked_time)
+    observations = [
+        _candidate_plan_row(candidate, 0, locked_at=locked_time, portfolio_rank=0)
+        for candidate in sorted(candidates, key=lambda item: item.candidate_id)
+    ]
+    audit = _portfolio_audit(candidates, portfolio, account)
+    audit["selected_shadow"] = [
+        {"bet_id": row["bet_id"], "stake": row["stake"], "market_type": row["market_type"]}
+        for row in plan
+    ]
+    _LAST_VALUE_V4_AUDIT = audit
+    return plan, observations
+
+
+def build_strategy_outputs(target_date: date, *, locked_at: datetime) -> StrategyOutputs:
+    """Select the paid strategy strictly from the configured activation mode."""
+    config = read_json(ROOT / "betting_config.json")
+    mode = config.get("value_strategy", {}).get("activation_mode")
+    if mode not in {"shadow", "active"}:
+        raise ValueError("activation_mode must be shadow or active")
+    legacy_plan, _ = build_legacy_value_plan(target_date)
+    v4_plan, observations = build_value_v4_plan(target_date, locked_at=locked_at)
+    audit = dict(_LAST_VALUE_V4_AUDIT)
+    active_plan = legacy_plan if mode == "shadow" else v4_plan
+    shadow_plan = v4_plan if mode == "shadow" else []
+    audit.update({
+        "activation_mode": mode,
+        "shadow_paid_stake": 0,
+        "comparison": {
+            "active_paid_stake": sum(float(row.get("stake", 0) or 0) for row in active_plan),
+            "shadow_paid_stake": 0,
+            "shadow_candidate_stake": sum(float(row.get("stake", 0) or 0) for row in shadow_plan),
+        },
+    })
+    return StrategyOutputs(active_plan, observations, shadow_plan, audit)
+
+
+def write_shadow_audit(audit: dict, target_date: date) -> Path:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUTPUT_DIR / f"shadow_portfolio_audit_{target_date.isoformat()}.json"
+    path.write_text(json.dumps(audit, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def load_results() -> dict[tuple[str, str, str], dict]:
@@ -651,29 +946,56 @@ def settle_item(item: dict, result: dict | None) -> tuple[str, float]:
 def write_plan(plan: list[dict], target_date: date) -> Path:
     OUTPUT_DIR.mkdir(exist_ok=True)
     path = OUTPUT_DIR / f"betting_plan_{target_date.isoformat()}.csv"
-    fields = [
+    fields = _plan_fields(plan, [
         "date",
+        "bet_id",
+        "report_date",
         "strategy_version",
+        "model_version",
         "stage",
         "match",
         "team_a",
         "team_b",
+        "match_id",
+        "kickoff_local",
         "play",
+        "market_type",
+        "market_line",
         "selection",
         "probability",
+        "raw_probability",
         "raw_model_probability",
+        "calibrated_probability",
         "league_calibrated_probability",
         "league_calibration_samples",
+        "official_market_probability",
         "odds",
+        "locked_odds",
+        "locked_at_bjt",
+        "odds_source",
+        "odds_source_record_id",
+        "odds_captured_at_bjt",
         "market_probability",
+        "conservative_probability",
+        "edge",
         "value_edge",
+        "net_ev",
         "expected_value",
         "stake",
         "expected_return",
         "expected_profit",
+        "data_quality",
+        "volatility_band",
+        "full_kelly",
+        "kelly_fraction",
+        "data_quality_multiplier",
+        "volatility_multiplier",
+        "performance_multiplier",
+        "portfolio_rank",
+        "binding_limits",
         "reason",
         "legs_json",
-    ]
+    ])
     with path.open("w", encoding="utf-8-sig", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
@@ -681,20 +1003,36 @@ def write_plan(plan: list[dict], target_date: date) -> Path:
     return path
 
 
+def write_shadow_plan(plan: list[dict], target_date: date) -> Path:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    path = OUTPUT_DIR / f"shadow_betting_plan_{target_date.isoformat()}.csv"
+    fields = _plan_fields(plan, [])
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(plan)
+    return path
+
+
 def write_observation_plan(observations: list[dict], target_date: date) -> Path:
     path = OUTPUT_DIR / f"observation_plan_{target_date.isoformat()}.csv"
-    fields = [
+    fields = _plan_fields(observations, [
         "date", "strategy_version", "stage", "match", "team_a", "team_b",
         "play", "selection", "probability", "raw_model_probability", "odds",
         "league_calibrated_probability", "league_calibration_samples",
         "market_probability", "value_edge", "expected_value", "stake",
         "expected_return", "expected_profit", "reason", "legs_json",
-    ]
+    ])
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(observations)
     return path
+
+
+def _plan_fields(rows: list[dict], preferred: list[str]) -> list[str]:
+    present = {key for row in rows if isinstance(row, dict) for key in row}
+    return [*preferred, *sorted(present.difference(preferred))]
 
 
 def load_all_plans() -> list[dict]:
@@ -820,32 +1158,44 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Generate daily simulated sports lottery plan.")
     parser.add_argument("--date", default=date.today().isoformat())
-    parser.add_argument("--settle-only", action="store_true", help="Only update ledger from existing plans and results.")
+    parser.add_argument("--settle-only", action="store_true", help="Only settle the existing paid ledger.")
+    parser.add_argument("--generate-only", action="store_true", help="Write plan artifacts without ledger ingestion.")
+    parser.add_argument("--locked-at", help="Required aware ISO-8601 decision timestamp for generation.")
     args = parser.parse_args()
 
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     if args.settle_only:
-        ledger_path = write_ledger()
-        observation_ledger_path = write_observation_ledger()
-        write_metrics()
-        decision_path = write_daily_decision(target_date)
-        print(f"Updated ledger: {ledger_path}")
-        print(f"Updated observation ledger: {observation_ledger_path}")
-        print(f"Updated daily decision: {decision_path}")
+        if args.locked_at:
+            parser.error("--locked-at is only valid for generation")
+        ledger_path = OUTPUT_DIR / "betting_ledger.csv"
+        rows = load_csv(ledger_path)
+        results = {
+            str(row.get("match_id")): row
+            for row in load_csv(DATA_DIR / "bet_results.csv")
+            if row.get("match_id")
+        }
+        write_ledger_atomic(ledger_path, settle_pending(rows, results, datetime.now(BEIJING)))
+        print(f"Settled ledger: {ledger_path}")
         return 0
 
-    plan, observations = build_value_plan(target_date)
-    plan_path = write_plan(plan, target_date)
-    observation_path = write_observation_plan(observations, target_date)
-    ledger_path = write_ledger()
-    observation_ledger_path = write_observation_ledger()
-    write_metrics()
-    decision_path = write_daily_decision(target_date, plan, observations)
-    total = sum(item["stake"] for item in plan)
+    if not args.locked_at:
+        parser.error("--locked-at is required for generation")
+    try:
+        locked_at = _aware_locked_at(datetime.fromisoformat(args.locked_at.replace("Z", "+00:00")))
+    except ValueError as exc:
+        parser.error(str(exc))
+    outputs = build_strategy_outputs(target_date, locked_at=locked_at)
+    plan_path = write_plan(outputs.active_plan, target_date)
+    observation_path = write_observation_plan(outputs.observations, target_date)
+    shadow_path = write_shadow_plan(outputs.shadow_plan, target_date) if outputs.shadow_plan else None
+    audit_path = write_shadow_audit(outputs.audit, target_date)
+    decision_path = write_daily_decision(target_date, outputs.active_plan, outputs.observations)
+    total = sum(float(item.get("stake", 0) or 0) for item in outputs.active_plan)
     print(f"Generated betting plan: {plan_path}")
     print(f"Generated observation plan: {observation_path}")
-    print(f"Updated ledger: {ledger_path}")
-    print(f"Updated observation ledger: {observation_ledger_path}")
+    if shadow_path is not None:
+        print(f"Generated shadow plan: {shadow_path}")
+    print(f"Generated shadow audit: {audit_path}")
     print(f"Updated daily decision: {decision_path}")
     print(f"Daily simulated stake: {total}")
     return 0

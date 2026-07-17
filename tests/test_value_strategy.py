@@ -10,6 +10,54 @@ import generate_betting_plan as strategy
 from import_sporttery import ZgzcwMatchParser
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class ValueV4ConfigurationTest(unittest.TestCase):
+    def test_exact_phase_two_risk_configuration(self):
+        payload = json.loads((ROOT / "betting_config.json").read_text(encoding="utf-8"))
+        value = payload["value_strategy"]
+        account = payload["simulation_account"]
+
+        self.assertEqual("value-v4", payload["strategy_version"])
+        self.assertEqual(500, payload["max_daily_budget"])
+        self.assertEqual("shadow", value["activation_mode"])
+        self.assertEqual(0.06, value["strict_min_ev"])
+        self.assertEqual(0.03, value["min_ev"])
+        self.assertEqual(0.02, value["strict_min_combo_leg_ev"])
+        self.assertEqual(0.01, value["min_combo_leg_ev"])
+        self.assertEqual(0.10, value["strict_min_combo_ev"])
+        self.assertEqual(0.03, value["min_combo_ev"])
+        self.assertEqual(0.25, value["strict_kelly_fraction"])
+        self.assertEqual(0.25, value["kelly_fraction"])
+        self.assertEqual(5000, value["reference_bankroll"])
+        self.assertEqual(2, value["stake_unit"])
+        self.assertEqual(200, value["max_match_exposure"])
+        self.assertEqual(2, value["max_single_count"])
+        self.assertEqual(2, value["combo_min_legs"])
+        self.assertEqual(2, value["combo_max_legs"])
+        self.assertEqual(30, value["max_daily_combo_stake"])
+        self.assertEqual("simulation", account["mode"])
+        self.assertEqual(5000, account["monthly_budget_cap"])
+        self.assertEqual(5000, account["monthly_stop_loss"])
+        self.assertIs(account["real_money_automation"], False)
+
+    def test_removed_gross_return_and_three_leg_keys_stay_absent(self):
+        value = json.loads((ROOT / "betting_config.json").read_text(encoding="utf-8"))["value_strategy"]
+        removed = {
+            "strict_min_expected_return",
+            "min_expected_return",
+            "strict_min_combo_leg_expected_return",
+            "min_combo_leg_expected_return",
+            "strict_min_combo_expected_return",
+            "min_combo_expected_return",
+            "three_leg_min_settled_days",
+            "three_leg_value_premium",
+        }
+
+        self.assertTrue(removed.isdisjoint(value))
+
+
 def config() -> dict:
     return {
         "strategy_version": "value-v2",

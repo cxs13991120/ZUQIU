@@ -1,10 +1,13 @@
+import argparse
 import csv
 import hashlib
 import json
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+
+from plan_lock import read_valid_lock
 
 
 PENDING = "未结算"
@@ -136,6 +139,54 @@ def write_ledger_atomic(path: Path, rows: list[dict]) -> Path:
         temporary.unlink(missing_ok=True)
         raise
     return path
+
+
+def ingest_date(root: Path, target_date: date) -> Path:
+    """Ingest exactly one valid locked paid plan, never a shadow artifact."""
+    root = Path(root)
+    lock = read_valid_lock(root, target_date)
+    expected_plan = f"output/betting_plan_{target_date.isoformat()}.csv"
+    if lock is None or lock.get("plan_path") != expected_plan:
+        raise ValueError("a valid matching plan lock is required before ingestion")
+    plan_path = root / expected_plan
+    ledger_path = root / "output" / "betting_ledger.csv"
+    plan_rows = _read_csv(plan_path)
+    existing_rows = _read_csv(ledger_path)
+    return write_ledger_atomic(ledger_path, ingest_locked_plan(existing_rows, plan_rows, lock))
+
+
+def settle_ledger(root: Path, results: dict, settled_at: datetime) -> Path:
+    """Settle existing canonical ledger rows without regenerating any plan."""
+    ledger_path = Path(root) / "output" / "betting_ledger.csv"
+    return write_ledger_atomic(ledger_path, settle_pending(_read_csv(ledger_path), results, settled_at))
+
+
+def _read_csv(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _parse_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("date must be YYYY-MM-DD") from exc
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Ingest and settle locked paid betting plans.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    ingest = commands.add_parser("ingest")
+    ingest.add_argument("--date", required=True, type=_parse_date)
+    args = parser.parse_args()
+    try:
+        if args.command == "ingest":
+            ingest_date(Path.cwd(), args.date)
+    except (OSError, ValueError):
+        return 1
+    return 0
 
 
 def _validate_lock(lock: dict) -> str:
@@ -692,3 +743,7 @@ def _money_text(value: object) -> str:
 
 def _csv_value(value: object) -> object:
     return "" if value is None else value
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

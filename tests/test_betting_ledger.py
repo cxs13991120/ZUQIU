@@ -3,7 +3,7 @@ import csv
 import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from betting_ledger import (
@@ -12,11 +12,13 @@ from betting_ledger import (
     PENDING,
     REFUNDED,
     WON,
+    ingest_date,
     ingest_locked_plan,
     settle_pending,
     stable_bet_id,
     write_ledger_atomic,
 )
+from plan_lock import sha256_file
 
 
 BJT = timezone(timedelta(hours=8))
@@ -593,6 +595,47 @@ class SettlementTest(unittest.TestCase):
         self.assertEqual(settled, second)
         changed = {key for key in settled[0] if settled[0].get(key) != pending[0].get(key)}
         self.assertTrue(changed.issubset({"status", "result_status", "result_source", "source_record_id", "captured_at_bjt", "home_goals", "away_goals", "return", "profit", "result_legs_json", "settled_at_bjt"}))
+
+
+class LockedIngestCommandTest(unittest.TestCase):
+    def test_ingest_reads_only_the_matching_valid_locked_paid_plan(self):
+        target_date = date(2026, 7, 16)
+        row = plan_row()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "output"
+            data = root / "data"
+            output.mkdir()
+            data.mkdir()
+            plan_path = output / "betting_plan_2026-07-16.csv"
+            with plan_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(row))
+                writer.writeheader()
+                writer.writerow(row)
+            odds_path = data / "sporttery_odds_2026-07-16.json"
+            odds_path.write_text("{}", encoding="utf-8")
+            lock_payload = {
+                "schema_version": 1,
+                "report_date": target_date.isoformat(),
+                "locked_at_bjt": LOCKED_AT.isoformat(),
+                "plan_path": "output/betting_plan_2026-07-16.csv",
+                "plan_sha256": sha256_file(plan_path),
+                "odds_path": "data/sporttery_odds_2026-07-16.json",
+                "odds_sha256": sha256_file(odds_path),
+                "odds_source": "sporttery",
+            }
+            (output / "plan_lock_2026-07-16.json").write_text(
+                json.dumps(lock_payload), encoding="utf-8"
+            )
+            shadow = output / "shadow_betting_plan_2026-07-16.csv"
+            shadow.write_text("date,stake\n2026-07-16,999\n", encoding="utf-8")
+
+            ledger_path = ingest_date(root, target_date)
+
+            with ledger_path.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(1, len(rows))
+        self.assertEqual("20", rows[0]["stake"])
 
 
 class AtomicWriteTest(unittest.TestCase):

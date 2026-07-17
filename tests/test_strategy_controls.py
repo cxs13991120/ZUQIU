@@ -143,11 +143,21 @@ class SimulationAccountControlTest(unittest.TestCase):
         self.assertIn("概率优势", decision["reason"])
         self.assertEqual("regression_only", decision["case_study_policy"])
 
-    def test_parlay_is_two_legs_until_thirty_days_and_never_exceeds_three(self):
-        policy = {"combo_max_legs": 4, "three_leg_min_settled_days": 30}
+    def test_default_simulation_caps_are_exact_phase_two_limits(self):
+        state = simulation_account_state([], [], date(2026, 7, 14), {})
 
-        self.assertEqual(2, combo_leg_limit(policy, 29))
-        self.assertEqual(3, combo_leg_limit(policy, 30))
+        self.assertEqual(5000, state["monthly_budget_cap"])
+        self.assertEqual(5000, state["monthly_stop_loss"])
+        self.assertFalse(state["real_money_automation"])
+
+    def test_parlay_is_always_exactly_two_legs(self):
+        self.assertEqual(2, combo_leg_limit({"combo_max_legs": 2}, 0))
+        self.assertEqual(2, combo_leg_limit({"combo_max_legs": 2}, 999))
+
+    def test_parlay_rejects_any_configured_maximum_other_than_two(self):
+        for configured in (1, 3, 4):
+            with self.subTest(configured=configured), self.assertRaises(ValueError):
+                combo_leg_limit({"combo_max_legs": configured}, 30)
 
 
 if __name__ == "__main__":
