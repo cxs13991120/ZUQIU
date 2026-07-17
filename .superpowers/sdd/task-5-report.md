@@ -296,3 +296,95 @@ Exit code: 0
 Code/test fix commit: `d2c30cbcab50efbbe8d469ca454d1e073dd1fada` (`fix: deduplicate anonymous fallback results`).
 
 Immediately after the code/test fix commit, `git status --short` produced no output (clean worktree).
+
+## Review fixes 5
+
+### Scope
+
+- Made normalized `market_type` authoritative for new parlay identity and settlement dispatch.
+- Rejected new English `parlay` play labels paired with a non-parlay market while accepting localized parlay labels.
+- Added a private deterministic fallback identity for legacy rows that cannot satisfy canonical identity validation, including parlay-like rows without valid legs.
+- Added `performance_multiplier` beside the other multipliers in the deterministic ledger schema.
+- Parameterized HAD settlement coverage for `胜`, `平`, and `负` with matching 90-minute scores.
+
+### Files changed
+
+- `betting_ledger.py` - authoritative parlay classification, private legacy fallback identity, and required schema order.
+- `tests/test_betting_ledger.py` - identity, migration, settlement, multiplier-header, and HAD coverage.
+- `.superpowers/sdd/task-5-report.md` - this review chronology and verification record.
+
+### RED
+
+After adding all review tests and before production edits, ran:
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results -v
+
+test_atomic_writer_is_deterministic_utf8_sig_and_preserves_unknown_fields ... FAIL
+test_legacy_parlay_without_legs_uses_deterministic_fallback_identity ... ERROR
+test_market_type_is_authoritative_for_new_parlay_identity ... FAIL
+test_settlement_uses_market_type_not_legacy_english_play_label ... FAIL
+test_two_leg_parlay_requires_both_legs_and_handles_loss_and_refunds ... FAIL
+
+======================================================================
+ERROR: test_legacy_parlay_without_legs_uses_deterministic_fallback_identity
+----------------------------------------------------------------------
+ValueError: parlay must contain exactly two legs
+
+======================================================================
+FAIL: test_atomic_writer_is_deterministic_utf8_sig_and_preserves_unknown_fields
+----------------------------------------------------------------------
+AssertionError: 32 != 50
+
+======================================================================
+FAIL: test_market_type_is_authoritative_for_new_parlay_identity
+----------------------------------------------------------------------
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_settlement_uses_market_type_not_legacy_english_play_label
+----------------------------------------------------------------------
+AssertionError: '命中' != '未结算'
+
+======================================================================
+FAIL: test_two_leg_parlay_requires_both_legs_and_handles_loss_and_refunds
+----------------------------------------------------------------------
+AssertionError: ('命中', '60.00', '50.00') != ('未结算', '0.00', '0.00')
+
+----------------------------------------------------------------------
+Ran 35 tests in 0.228s
+
+FAILED (failures=4, errors=1)
+```
+
+The parameterized HAD `胜`/`平`/`负` coverage was already green in this RED run; it closed a test-coverage gap without requiring settlement changes.
+
+### GREEN
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results -v
+Ran 35 tests in 0.164s
+OK
+
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_value_portfolio tests.test_report_status -v
+Ran 69 tests in 1.129s
+OK
+
+.\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m py_compile betting_ledger.py update_sporttery_results.py tests\test_betting_ledger.py tests\test_update_sporttery_results.py
+Exit code: 0
+
+git diff --check
+Exit code: 0
+```
+
+### Review
+
+- Valid legacy rows retain the prior canonical migration path; the namespaced fallback is used only when strict legacy canonicalization raises `ValueError`.
+- Fallback identity includes preserved date, strategy, play, market, selection/line, match/team/display content, and a migration namespace to avoid canonical-ID collisions.
+- Synthetic `legacy_match:` material exists only in the copied identity input and is never written to the migrated ledger row as an official `match_id`.
+- Existing English-labeled legacy rows settle according to normalized `market_type`; only new canonical rows enforce the contradiction check.
+- `performance_multiplier` is preserved and serialized immediately after `volatility_multiplier` and before `portfolio_rank`.
+
+Code/test fix commit: `55ce55eb55b7231e01900fd1bd9563b7abb0a310` (`fix: harden parlay ledger migration`).
+
+Immediately after the code/test fix commit, `git status --short` produced no output (clean worktree).
