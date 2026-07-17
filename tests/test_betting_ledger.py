@@ -52,6 +52,7 @@ def plan_row(**overrides):
         "kelly_fraction": "0.25",
         "data_quality_multiplier": "1.0",
         "volatility_multiplier": "1.0",
+        "performance_multiplier": "1.0",
         "portfolio_rank": "1",
         "binding_limits": "daily",
         "stake": "20",
@@ -125,6 +126,38 @@ class IdentityAndIngestionTest(unittest.TestCase):
 
         self.assertEqual(stable_bet_id(first), stable_bet_id(second))
 
+    def test_market_type_is_authoritative_for_new_parlay_identity(self):
+        legs = [
+            {"match_id": "1001", "market_type": "had", "selection": "胜", "line": ""},
+            {"match_id": "1002", "market_type": "ttg", "selection": "2球", "line": ""},
+        ]
+        localized = plan_row(
+            play="胜负串",
+            market_type=" ParLay ",
+            selection="展示标签",
+            legs_json=json.dumps(legs, ensure_ascii=False),
+        )
+        normalized = plan_row(
+            play="胜负串",
+            market_type="parlay",
+            selection="另一个展示标签",
+            legs_json=json.dumps(list(reversed(legs)), ensure_ascii=False),
+        )
+        single_market = plan_row(
+            play="胜负串",
+            market_type="had",
+            legs_json=json.dumps(legs, ensure_ascii=False),
+        )
+
+        self.assertEqual(stable_bet_id(localized), stable_bet_id(normalized))
+        self.assertNotEqual(stable_bet_id(localized), stable_bet_id(single_market))
+        with self.assertRaises(ValueError):
+            stable_bet_id(plan_row(
+                play="2-leg parlay",
+                market_type="had",
+                legs_json=json.dumps(legs, ensure_ascii=False),
+            ))
+
     def test_malformed_identity_fails_closed(self):
         for row in (
             plan_row(match_id=""),
@@ -166,6 +199,40 @@ class IdentityAndIngestionTest(unittest.TestCase):
         self.assertEqual(1, len(deduplicated))
         self.assertEqual("2.00", deduplicated[0]["locked_odds"])
         self.assertEqual(plan, plan_row())
+
+    def test_legacy_parlay_without_legs_uses_deterministic_fallback_identity(self):
+        legacy = {
+            "date": "2026-07-16",
+            "strategy_version": "legacy-v1",
+            "match": "甲队 vs 乙队",
+            "play": "2-leg parlay",
+            "market_type": "parlay",
+            "selection": "甲胜串总进球2",
+            "market_line": "",
+            "odds": "4.20",
+            "stake": "10",
+            "legacy_note": "preserve",
+        }
+        original = copy.deepcopy(legacy)
+
+        migrated = ingest_locked_plan([legacy], [], lock())
+        identical = ingest_locked_plan([copy.deepcopy(legacy)], [], lock())
+        rerun = ingest_locked_plan(migrated, [], lock())
+
+        self.assertEqual(original, legacy)
+        self.assertEqual(1, len(migrated))
+        self.assertRegex(migrated[0]["bet_id"], r"^[0-9a-f]{64}$")
+        self.assertEqual(migrated[0]["bet_id"], identical[0]["bet_id"])
+        self.assertEqual(migrated, rerun)
+        self.assertNotIn("match_id", migrated[0])
+        for field, value in original.items():
+            self.assertEqual(value, migrated[0][field], field)
+
+        for field, value in (("match", "甲队 vs 丙队"), ("selection", "不同展示")):
+            with self.subTest(field=field):
+                variant = {**legacy, field: value}
+                variant_id = ingest_locked_plan([variant], [], lock())[0]["bet_id"]
+                self.assertNotEqual(migrated[0]["bet_id"], variant_id)
 
     def test_ingestion_requires_a_valid_matching_domestic_lock(self):
         invalid_locks = (
@@ -216,8 +283,16 @@ class SettlementTest(unittest.TestCase):
     def settle_one(self, row, results):
         return settle_pending(ingest_locked_plan([], [row], lock()), results, SETTLED_AT)[0]
 
-    def test_had_hhad_and_each_total_goal_bucket_settle_from_explicit_90_minute_scores(self):
-        self.assertEqual(WON, self.settle_one(plan_row(selection="胜"), {"1001": finished("1001", 2, 1)})["status"])
+    def test_had_each_three_way_selection_settles_from_matching_90_minute_score(self):
+        for selection, score in (("胜", (2, 1)), ("平", (1, 1)), ("负", (0, 1))):
+            with self.subTest(selection=selection, score=score):
+                settled = self.settle_one(
+                    plan_row(selection=selection),
+                    {"1001": finished("1001", *score)},
+                )
+                self.assertEqual(WON, settled["status"])
+
+    def test_hhad_and_each_total_goal_bucket_settle_from_explicit_90_minute_scores(self):
         self.assertEqual(WON, self.settle_one(plan_row(play="HHAD", market_type="hhad", market_line="+1", selection="胜"), {"1001": finished("1001", 1, 1)})["status"])
         self.assertEqual(LOST, self.settle_one(plan_row(play="HHAD", market_type="hhad", market_line="-1", selection="胜"), {"1001": finished("1001", 1, 1)})["status"])
         for total in range(7):
@@ -231,7 +306,7 @@ class SettlementTest(unittest.TestCase):
             {"match_id": "1001", "market_type": "had", "selection": "胜", "line": "", "odds": "2.00"},
             {"match_id": "1002", "market_type": "ttg", "selection": "2球", "line": "", "odds": "3.00"},
         ]
-        row = plan_row(play="2-leg parlay", market_type="parlay", legs_json=json.dumps(legs, ensure_ascii=False), locked_odds="6.00", stake="10")
+        row = plan_row(play="胜负串", market_type=" PARLAY ", legs_json=json.dumps(legs, ensure_ascii=False), locked_odds="6.00", stake="10")
         won = self.settle_one(row, {"1001": finished("1001", 1, 0), "1002": finished("1002", 2, 0)})
         self.assertEqual((WON, "60.00", "50.00"), (won["status"], won["return"], won["profit"]))
 
@@ -247,6 +322,22 @@ class SettlementTest(unittest.TestCase):
 
         fully_refunded = self.settle_one(plan_row(), {"1001": {**refunded, "match_id": "1001"}})
         self.assertEqual((REFUNDED, "20.00", "0.00"), (fully_refunded["status"], fully_refunded["return"], fully_refunded["profit"]))
+
+    def test_settlement_uses_market_type_not_legacy_english_play_label(self):
+        legacy_single = plan_row(
+            bet_id="legacy-existing-id",
+            play="2-leg parlay",
+            market_type="had",
+            status=PENDING,
+        )
+
+        settled = settle_pending(
+            [legacy_single],
+            {"1001": finished("1001", 2, 1)},
+            SETTLED_AT,
+        )[0]
+
+        self.assertEqual(WON, settled["status"])
 
     def test_unproven_results_do_not_mutate_pending_and_correction_is_explicit(self):
         pending = ingest_locked_plan([], [plan_row()], lock())
@@ -334,7 +425,11 @@ class SettlementTest(unittest.TestCase):
 
 class AtomicWriteTest(unittest.TestCase):
     def test_atomic_writer_is_deterministic_utf8_sig_and_preserves_unknown_fields(self):
-        rows = ingest_locked_plan([], [plan_row(legacy_field="legacy")], lock())
+        rows = ingest_locked_plan([], [plan_row(
+            legacy_field="legacy",
+            performance_multiplier="0.75",
+        )], lock())
+        self.assertEqual("0.75", rows[0]["performance_multiplier"])
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ledger.csv"
             self.assertEqual(path, write_ledger_atomic(path, rows))
@@ -346,6 +441,14 @@ class AtomicWriteTest(unittest.TestCase):
             with path.open(encoding="utf-8-sig", newline="") as handle:
                 reader = csv.DictReader(handle)
                 self.assertIn("plan_sha256", reader.fieldnames)
+                self.assertEqual(
+                    reader.fieldnames.index("volatility_multiplier") + 1,
+                    reader.fieldnames.index("performance_multiplier"),
+                )
+                self.assertLess(
+                    reader.fieldnames.index("performance_multiplier"),
+                    reader.fieldnames.index("portfolio_rank"),
+                )
                 self.assertEqual("legacy", next(reader)["legacy_field"])
 
 

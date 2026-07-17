@@ -27,7 +27,7 @@ REQUIRED_FIELD_ORDER = (
     "calibrated_probability", "official_market_probability",
     "conservative_probability", "edge", "net_ev", "full_kelly",
     "kelly_fraction", "data_quality_multiplier", "volatility_multiplier",
-    "portfolio_rank", "binding_limits", "stake", "data_quality",
+    "performance_multiplier", "portfolio_rank", "binding_limits", "stake", "data_quality",
     "volatility_band", "status", "result_status", "result_source",
     "source_record_id", "captured_at_bjt", "home_goals", "away_goals",
     "settled_at_bjt", "return", "profit", "result_legs_json", "clv",
@@ -161,7 +161,9 @@ def _identity_payload(row: dict, *, allow_legacy_match: bool = False) -> dict:
     strategy_version = _required_text(row.get("strategy_version"), "strategy_version")
     play = _required_text(row.get("play"), "play")
     market_type = _required_text(row.get("market_type"), "market_type").lower()
-    if market_type == "parlay" or "parlay" in play.lower():
+    if market_type != "parlay" and "parlay" in play.lower():
+        raise ValueError("play contradicts non-parlay market_type")
+    if market_type == "parlay":
         legs = _canonical_legs(row, allow_legacy_match=allow_legacy_match)
         return {
             "report_date": report_date,
@@ -447,7 +449,7 @@ def _sorted_raw_legs(legs: list[dict]) -> list[dict]:
 
 
 def _is_parlay(row: dict) -> bool:
-    return str(row.get("market_type", "")).lower() == "parlay" or "parlay" in str(row.get("play", "")).lower()
+    return str(row.get("market_type", "")).strip().lower() == "parlay"
 
 
 def _required_date(value: object) -> str:
@@ -481,13 +483,56 @@ def _hash_identity(payload: dict) -> str:
 
 
 def _stable_legacy_bet_id(identity_row: dict) -> str:
-    return _hash_identity(_identity_payload(identity_row, allow_legacy_match=True))
+    try:
+        payload = _identity_payload(identity_row, allow_legacy_match=True)
+    except ValueError:
+        payload = _legacy_fallback_identity_payload(identity_row)
+    return _hash_identity(payload)
+
+
+def _legacy_fallback_identity_payload(row: dict) -> dict:
+    return {
+        "identity_namespace": "legacy_fallback_v1",
+        "report_date": _legacy_text(row.get("report_date") or row.get("date")),
+        "strategy_version": _legacy_text(row.get("strategy_version")),
+        "play": _legacy_text(row.get("play")),
+        "market_type": _legacy_text(row.get("market_type")),
+        "selection": _legacy_text(row.get("selection")),
+        "line": _legacy_text(row.get("market_line", row.get("line"))),
+        "display": _legacy_display_payload(row),
+    }
+
+
+def _legacy_display_payload(row: dict) -> dict:
+    return {
+        field: _legacy_text(row.get(field))
+        for field in (
+            "match_id", "match", "team_a", "team_b", "home_team", "away_team",
+            "teams", "display", "display_label", "match_display",
+        )
+    }
+
+
+def _legacy_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(value).strip()
 
 
 def _legacy_match_id(row: dict) -> str:
     text = row.get("match") or "|".join(str(row.get(field, "")) for field in ("team_a", "team_b"))
     if not isinstance(text, str) or not text.strip():
-        raise ValueError("legacy row requires match text")
+        text = json.dumps(
+            _legacy_display_payload(row),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     return "legacy_match:" + hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:24]
 
 
