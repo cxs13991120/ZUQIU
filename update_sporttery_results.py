@@ -160,11 +160,34 @@ def update_results(target_date: date) -> Path:
         home_team = TEAM_ALIASES.get(item.get("homeTeam", ""), item.get("homeTeam", ""))
         away_team = TEAM_ALIASES.get(item.get("awayTeam", ""), item.get("awayTeam", ""))
         key = (target_date.isoformat(), home_team, away_team)
-        row_index = _select_row_index(rows, row_indexes.get(key, []), item.get("match_id"))
+        candidates = row_indexes.get(key, [])
+        if source == "sporttery":
+            row_index, match_id, result_status = _resolve_direct_target(
+                rows, candidates, item.get("match_id")
+            )
+        else:
+            row_index, match_id, result_status = _resolve_fallback_target(
+                rows, candidates, fixture_ids.get(key, set())
+            )
         existing = rows[row_index] if row_index is not None else {}
         full = item.get("full")
         if not full:
             continue
+
+        prior_score = parse_score(
+            f"{existing.get('home_goals', '')}:{existing.get('away_goals', '')}"
+        )
+        already_observed = bool(existing) and _observation_seen(existing, item)
+        if already_observed and prior_score:
+            if existing.get("result_status") == "conflict" or tuple(full) == prior_score:
+                updated += 1
+                continue
+            revised = dict(existing)
+            revised["result_status"] = "conflict" if match_id else "unavailable"
+            rows[row_index] = revised
+            updated += 1
+            continue
+
         half = item.get("half") or HISTORICAL_HALF_TIME.get(key)
         incoming = dict(existing)
         incoming.update({
@@ -173,31 +196,22 @@ def update_results(target_date: date) -> Path:
             "team_b": key[2],
             "half_home_goals": half[0] if half else existing.get("half_home_goals", ""),
             "half_away_goals": half[1] if half else existing.get("half_away_goals", ""),
+            "match_id": match_id,
         })
-        match_id = item.get("match_id") or existing.get("match_id") or fixture_ids.get(key)
-        if match_id:
-            incoming["match_id"] = str(match_id)
-            incoming.update(_result_provenance(item, "finished"))
-        else:
-            incoming["match_id"] = ""
-            incoming.update(_result_provenance(item, "unavailable"))
+        provenance = _result_provenance(item, result_status)
+        if existing and not already_observed:
+            provenance = _merged_provenance(existing, provenance)
+        incoming.update(provenance)
 
-        prior_protected = existing.get("result_status") in {"finished", "conflict"} and parse_score(
-            f"{existing.get('home_goals', '')}:{existing.get('away_goals', '')}"
-        )
-        conflict = existing.get("result_status") == "conflict" or (
-            prior_protected and tuple(full) != (existing.get("home_goals"), existing.get("away_goals"))
-        )
-        if conflict:
-            incoming["home_goals"] = existing["home_goals"]
-            incoming["away_goals"] = existing["away_goals"]
-            incoming["result_status"] = "conflict"
-            incoming["result_source"] = _joined_provenance(existing.get("result_source", ""), incoming["result_source"])
-            incoming["source_record_id"] = _joined_provenance(existing.get("source_record_id", ""), incoming["source_record_id"])
-            incoming["captured_at_bjt"] = _joined_provenance(existing.get("captured_at_bjt", ""), incoming["captured_at_bjt"])
+        score_changed = bool(prior_score) and tuple(full) != prior_score
+        if existing.get("result_status") == "conflict" or score_changed:
+            incoming["home_goals"] = existing.get("home_goals", "")
+            incoming["away_goals"] = existing.get("away_goals", "")
+            incoming["result_status"] = "conflict" if match_id else "unavailable"
         else:
             incoming["home_goals"] = full[0]
             incoming["away_goals"] = full[1]
+
         if row_index is None:
             rows.append(incoming)
             row_index = len(rows) - 1
@@ -211,29 +225,97 @@ def update_results(target_date: date) -> Path:
     return path
 
 
+def _resolve_direct_target(
+    rows: list[dict], candidates: list[int], match_id: object
+) -> tuple[int | None, str, str]:
+    canonical_id = str(match_id).strip() if match_id not in (None, "") else ""
+    if not canonical_id:
+        return None, "", "unavailable"
+    for index in candidates:
+        if rows[index].get("match_id", "").strip() == canonical_id:
+            return index, canonical_id, "finished"
+    if len(candidates) == 1 and not rows[candidates[0]].get("match_id", "").strip():
+        return candidates[0], canonical_id, "finished"
+    return None, canonical_id, "finished"
+
+
+def _resolve_fallback_target(
+    rows: list[dict], candidates: list[int], fixture_ids: set[str]
+) -> tuple[int | None, str, str]:
+    canonical_ids = {
+        rows[index].get("match_id", "").strip()
+        for index in candidates
+        if rows[index].get("match_id", "").strip()
+    } | set(fixture_ids)
+    blank_candidates = [
+        index for index in candidates if not rows[index].get("match_id", "").strip()
+    ]
+    if len(canonical_ids) == 1:
+        canonical_id = next(iter(canonical_ids))
+        for index in candidates:
+            if rows[index].get("match_id", "").strip() == canonical_id:
+                return index, canonical_id, "finished"
+        if len(blank_candidates) == 1:
+            return blank_candidates[0], canonical_id, "finished"
+        return None, canonical_id, "finished"
+    if len(blank_candidates) == 1:
+        return blank_candidates[0], "", "unavailable"
+    return None, "", "unavailable"
+
+
+def _observation_seen(existing: dict, item: dict) -> bool:
+    source = item.get("result_source")
+    record_id = item.get("source_record_id") or item.get("match_id")
+    if not isinstance(source, str) or not source.strip():
+        return False
+    if not isinstance(record_id, str) or not record_id.strip():
+        return False
+    return (
+        source.strip() in _provenance_tokens(existing.get("result_source", ""))
+        and record_id.strip() in _provenance_tokens(existing.get("source_record_id", ""))
+    )
+
+
+def _merged_provenance(existing: dict, incoming: dict) -> dict:
+    merged = dict(incoming)
+    for field in ("result_source", "source_record_id", "captured_at_bjt"):
+        merged[field] = _joined_provenance(existing.get(field, ""), incoming.get(field, ""))
+    return merged
+
+
+def _provenance_tokens(value: object) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+    return {token.strip() for token in value.split("|") if token.strip()}
+
+
 def _fallback_result_row(item: dict) -> dict:
     full = parse_score(item.get("score", ""))
     return {
         **item,
         "full": full,
         "half": None,
+        "match_id": "",
         "result_source": "zgzcw",
         "source_record_id": str(item.get("source_record_id", "")).strip(),
         "captured_at_bjt": datetime.now(BEIJING).isoformat(),
     }
 
 
-def _fixture_match_ids(target_date: date) -> dict[tuple[str, str, str], str]:
+def _fixture_match_ids(target_date: date) -> dict[tuple[str, str, str], set[str]]:
     path = DATA_DIR / "fixtures.csv"
     if not path.exists():
         return {}
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            return {
-                (row.get("date", ""), row.get("team_a", ""), row.get("team_b", "")): row["match_id"].strip()
-                for row in csv.DictReader(handle)
-                if row.get("date") == target_date.isoformat() and row.get("match_id", "").strip()
-            }
+            fixture_ids: dict[tuple[str, str, str], set[str]] = {}
+            for row in csv.DictReader(handle):
+                match_id = row.get("match_id", "").strip()
+                if row.get("date") != target_date.isoformat() or not match_id:
+                    continue
+                key = (row.get("date", ""), row.get("team_a", ""), row.get("team_b", ""))
+                fixture_ids.setdefault(key, set()).add(match_id)
+            return fixture_ids
     except (OSError, csv.Error):
         return {}
 
@@ -249,14 +331,7 @@ def _result_provenance(item: dict, status: str) -> dict:
 
 
 def _joined_provenance(first: str, second: str) -> str:
-    tokens = {
-        token.strip()
-        for value in (first, second)
-        if isinstance(value, str)
-        for token in value.split("|")
-        if token.strip()
-    }
-    return "|".join(sorted(tokens))
+    return "|".join(sorted(_provenance_tokens(first) | _provenance_tokens(second)))
 
 
 def _index_rows(rows: list[dict]) -> dict[tuple[str, str, str], list[int]]:
@@ -265,15 +340,6 @@ def _index_rows(rows: list[dict]) -> dict[tuple[str, str, str], list[int]]:
         key = (row.get("date", ""), row.get("team_a", ""), row.get("team_b", ""))
         indexes.setdefault(key, []).append(index)
     return indexes
-
-
-def _select_row_index(rows: list[dict], candidates: list[int], match_id: object) -> int | None:
-    canonical_match_id = str(match_id).strip() if match_id not in (None, "") else ""
-    if canonical_match_id:
-        for index in candidates:
-            if rows[index].get("match_id", "").strip() == canonical_match_id:
-                return index
-    return candidates[0] if candidates else None
 
 
 def _write_rows(path: Path, rows: list[dict]) -> None:

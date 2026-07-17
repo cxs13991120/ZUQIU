@@ -9,18 +9,30 @@ import update_sporttery_results as results
 
 
 class ResultProvenanceTest(unittest.TestCase):
-    def captured(self, source_record_id, score, captured_at):
+    def captured(
+        self,
+        source_record_id,
+        score,
+        captured_at,
+        *,
+        match_id="1001",
+        result_source="zgzcw",
+    ):
         return {
             "homeTeam": "甲队",
             "awayTeam": "乙队",
             "full": score,
             "half": None,
-            "match_id": "1001",
+            "match_id": match_id,
             "result_status": "finished",
-            "result_source": "zgzcw",
+            "result_source": result_source,
             "source_record_id": source_record_id,
             "captured_at_bjt": captured_at,
         }
+
+    def read_rows(self, path):
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            return list(csv.DictReader(handle))
 
     def test_direct_sporttery_rows_keep_match_id_and_finished_provenance(self):
         with patch.object(results, "fetch_matches", return_value=[{
@@ -134,10 +146,202 @@ class ResultProvenanceTest(unittest.TestCase):
 
             with path.open(encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(2, len(rows))
+            self.assertEqual(3, len(rows))
+            self.assertEqual(["first", "second", ""], [row["legacy"] for row in rows])
+            self.assertEqual(["", "", "2"], [row["home_goals"] for row in rows])
+            self.assertEqual("1001", rows[2]["match_id"])
+
+    def test_direct_mismatched_match_id_appends_without_touching_identified_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text("date,team_a,team_b,match_id\n", encoding="utf-8")
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,result_status,legacy\n"
+                "2026-07-16,甲队,乙队,1,0,2002,finished,keep\n",
+                encoding="utf-8",
+            )
+            direct = self.captured(
+                "1001", ("2", "1"), "2026-07-17T11:00:00+08:00",
+                result_source="sporttery",
+            )
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", return_value=[direct]):
+                path = results.update_results(date(2026, 7, 16))
+
+            rows = self.read_rows(path)
+            self.assertEqual(["2002", "1001"], [row["match_id"] for row in rows])
+            self.assertEqual(("1", "0", "keep"), (rows[0]["home_goals"], rows[0]["away_goals"], rows[0]["legacy"]))
+            self.assertEqual(("2", "1", "finished"), (rows[1]["home_goals"], rows[1]["away_goals"], rows[1]["result_status"]))
+
+    def test_direct_exact_id_updates_first_duplicate_and_preserves_the_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text("date,team_a,team_b,match_id\n", encoding="utf-8")
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,legacy\n"
+                "2026-07-16,甲队,乙队,,,1001,first\n"
+                "2026-07-16,甲队,乙队,9,9,1001,second\n",
+                encoding="utf-8",
+            )
+            direct = self.captured(
+                "1001", ("2", "1"), "2026-07-17T11:00:00+08:00",
+                result_source="sporttery",
+            )
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", return_value=[direct]):
+                path = results.update_results(date(2026, 7, 16))
+
+            rows = self.read_rows(path)
             self.assertEqual(["first", "second"], [row["legacy"] for row in rows])
             self.assertEqual(("2", "1"), (rows[0]["home_goals"], rows[0]["away_goals"]))
+            self.assertEqual(("9", "9"), (rows[1]["home_goals"], rows[1]["away_goals"]))
+
+    def test_fallback_duplicate_existing_and_fixture_ids_form_one_unique_union(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text(
+                "date,team_a,team_b,match_id\n"
+                "2026-07-16,甲队,乙队,1001\n"
+                "2026-07-16,甲队,乙队,1001\n",
+                encoding="utf-8",
+            )
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,legacy\n"
+                "2026-07-16,甲队,乙队,,,1001,first\n"
+                "2026-07-16,甲队,乙队,,,1001,second\n",
+                encoding="utf-8",
+            )
+            fallback = [{"homeTeam": "甲队", "awayTeam": "乙队", "score": "2:1", "source_record_id": "678"}]
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", side_effect=RuntimeError("offline")), patch.object(results, "fetch_zgzcw_results", return_value=fallback):
+                path = results.update_results(date(2026, 7, 16))
+
+            rows = self.read_rows(path)
+            self.assertEqual(2, len(rows))
+            self.assertEqual(["1001", "1001"], [row["match_id"] for row in rows])
+            self.assertEqual(("2", "1", "finished"), (rows[0]["home_goals"], rows[0]["away_goals"], rows[0]["result_status"]))
             self.assertEqual(("", ""), (rows[1]["home_goals"], rows[1]["away_goals"]))
+
+    def test_ambiguous_fallback_ids_append_unavailable_without_touching_identified_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text(
+                "date,team_a,team_b,match_id\n"
+                "2026-07-16,甲队,乙队,1001\n"
+                "2026-07-16,甲队,乙队,3003\n",
+                encoding="utf-8",
+            )
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,result_status,legacy\n"
+                "2026-07-16,甲队,乙队,1,0,2002,finished,keep\n",
+                encoding="utf-8",
+            )
+            fallback = [{"homeTeam": "甲队", "awayTeam": "乙队", "score": "2:1", "source_record_id": "678"}]
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", side_effect=RuntimeError("offline")), patch.object(results, "fetch_zgzcw_results", return_value=fallback):
+                path = results.update_results(date(2026, 7, 16))
+
+            rows = self.read_rows(path)
+            self.assertEqual(2, len(rows))
+            self.assertEqual(("2002", "1", "0", "keep"), (rows[0]["match_id"], rows[0]["home_goals"], rows[0]["away_goals"], rows[0]["legacy"]))
+            self.assertEqual(("", "2", "1", "unavailable"), (rows[1]["match_id"], rows[1]["home_goals"], rows[1]["away_goals"], rows[1]["result_status"]))
+
+    def test_multiple_blank_fallback_candidates_are_ambiguous_and_remain_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text("date,team_a,team_b,match_id\n", encoding="utf-8")
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,legacy\n"
+                "2026-07-16,甲队,乙队,,,,first\n"
+                "2026-07-16,甲队,乙队,,,,second\n",
+                encoding="utf-8",
+            )
+            fallback = [{"homeTeam": "甲队", "awayTeam": "乙队", "score": "2:1", "source_record_id": "678"}]
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", side_effect=RuntimeError("offline")), patch.object(results, "fetch_zgzcw_results", return_value=fallback):
+                path = results.update_results(date(2026, 7, 16))
+
+            rows = self.read_rows(path)
+            self.assertEqual(3, len(rows))
+            self.assertEqual(["first", "second", ""], [row["legacy"] for row in rows])
+            self.assertEqual(["", "", "2"], [row["home_goals"] for row in rows])
+            self.assertEqual("unavailable", rows[2]["result_status"])
+
+    def test_preexisting_score_without_status_is_protected_from_changed_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text("date,team_a,team_b,match_id\n", encoding="utf-8")
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,result_status,legacy\n"
+                "2026-07-16,甲队,乙队,1,0,1001,,keep\n",
+                encoding="utf-8",
+            )
+            direct = self.captured(
+                "1001", ("2", "0"), "2026-07-17T11:00:00+08:00",
+                result_source="sporttery",
+            )
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", return_value=[direct]):
+                path = results.update_results(date(2026, 7, 16))
+
+            row = self.read_rows(path)[0]
+            self.assertEqual(("1", "0", "keep"), (row["home_goals"], row["away_goals"], row["legacy"]))
+            self.assertEqual("conflict", row["result_status"])
+
+    def test_same_finished_observation_with_new_capture_time_is_byte_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text("date,team_a,team_b,match_id\n", encoding="utf-8")
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,result_status,result_source,source_record_id,captured_at_bjt\n"
+                "2026-07-16,甲队,乙队,1,0,1001,finished,sporttery,1001,2026-07-17T10:00:00+08:00\n",
+                encoding="utf-8",
+            )
+            first = self.captured(
+                "1001", ("1", "0"), "2026-07-17T11:00:00+08:00",
+                result_source="sporttery",
+            )
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", return_value=[first]):
+                path = results.update_results(date(2026, 7, 16))
+                before = path.read_bytes()
+                repeated = self.captured(
+                    "1001", ("1", "0"), "2026-07-17T12:00:00+08:00",
+                    result_source="sporttery",
+                )
+                with patch.object(results, "official_result_rows", return_value=[repeated]):
+                    results.update_results(date(2026, 7, 16))
+
+            self.assertEqual(before, path.read_bytes())
+
+    def test_changed_score_same_record_conflicts_once_and_repeat_is_byte_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text("date,team_a,team_b,match_id\n", encoding="utf-8")
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,result_status,result_source,source_record_id,captured_at_bjt\n"
+                "2026-07-16,甲队,乙队,1,0,1001,finished,sporttery,1001,2026-07-17T10:00:00+08:00\n",
+                encoding="utf-8",
+            )
+            changed = self.captured(
+                "1001", ("2", "0"), "2026-07-17T11:00:00+08:00",
+                result_source="sporttery",
+            )
+            with patch.object(results, "DATA_DIR", data), patch.object(results, "official_result_rows", return_value=[changed]):
+                path = results.update_results(date(2026, 7, 16))
+                conflicted = path.read_bytes()
+                later_repeat = self.captured(
+                    "1001", ("2", "0"), "2026-07-17T13:00:00+08:00",
+                    result_source="sporttery",
+                )
+                with patch.object(results, "official_result_rows", return_value=[later_repeat]):
+                    results.update_results(date(2026, 7, 16))
+
+            self.assertEqual(conflicted, path.read_bytes())
+            row = self.read_rows(path)[0]
+            self.assertEqual(("1", "0", "conflict"), (row["home_goals"], row["away_goals"], row["result_status"]))
+            self.assertEqual("2026-07-17T10:00:00+08:00", row["captured_at_bjt"])
 
 
 if __name__ == "__main__":
