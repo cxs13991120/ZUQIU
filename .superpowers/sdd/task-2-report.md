@@ -42,3 +42,49 @@ Implementation commit: `394e305` (`feat: capture eligible sporttery markets at d
 ## Concerns
 
 No code concerns found. The combined broader test invocation initially failed before discovery because OpenBLAS could not allocate its default worker threads; rerunning the affected modules with `OPENBLAS_NUM_THREADS=1` passed all 79 tests.
+
+## Rejected Review Fix
+
+### Files Changed
+
+- `capture_odds_snapshot.py`: parse decision snapshot JSON before treating it as successful, fetch direct Sporttery selling matches before exception-only ZGZCW fallback, and normalize HAD/HHAD/TTG snapshot values to dictionaries.
+- `tests/test_capture_odds_snapshot.py`: cover proven and unproven empty snapshot files, direct-market eligibility preservation, exception fallback eligibility, and a legitimate empty direct schedule that must not fall back.
+- `tests/test_value_strategy.py`: cover malformed HAD/HHAD/TTG values becoming empty dictionaries in the decision snapshot.
+
+### RED Evidence
+
+After adding the regression coverage, the focused snapshot run failed with four expected assertion failures:
+
+```text
+OPENBLAS_NUM_THREADS=1 .superpowers/sdd/runtime/verify-venv/Scripts/python.exe -m unittest tests.test_capture_odds_snapshot tests.test_value_strategy.DecisionSnapshotTest -v
+```
+
+- An unproven `{"matches": []}` decision snapshot returned zero.
+- The production path did not call `fetch_selling_matches`, so direct HHAD and TTG eligibility could not survive.
+- The fallback path likewise did not attempt the direct source first.
+- Malformed `hhad` and `ttg` values were written as `[]` and `null` instead of `{}`.
+
+The explicit-empty-direct-list regression was also mutation-checked: temporarily falling back when `fetch_selling_matches` returned `[]` caused the test to fail with `output unexpectedly None`; the exception-only fallback was then restored.
+
+### GREEN Result
+
+- `tests.test_capture_odds_snapshot` plus `tests.test_value_strategy.DecisionSnapshotTest`: 19 tests passed.
+- `tests.test_official_market_import tests.test_value_strategy`: 11 tests passed.
+- `tests.test_capture_odds_snapshot tests.test_report_status tests.test_import_sporttery tests.test_collect_market_heat`: 94 tests passed.
+
+All test invocations used `OPENBLAS_NUM_THREADS=1`.
+
+### Self-Review
+
+- An explicit zero-match snapshot is still written, but decision success now requires either a parsed non-empty `matches` list or `verified_zero_fixture_day`.
+- Direct Sporttery empty lists stay authoritative and do not invoke the fallback; only raised exceptions invoke ZGZCW.
+- HHAD and TTG eligibility comes from direct Sporttery rows and ZGZCW remains HAD-only.
+- All three required snapshot markets are dictionaries, including malformed source values.
+
+### Commit
+
+Implementation commit: `4043619` (`fix: harden decision snapshot reliability`).
+
+### Concerns
+
+No code concerns found.
