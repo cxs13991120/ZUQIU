@@ -173,6 +173,13 @@ def update_results(target_date: date) -> Path:
         full = item.get("full")
         if not full:
             continue
+        if (
+            source == "zgzcw"
+            and existing
+            and _anonymous_unavailable_observation_matches(existing, item, match_id)
+        ):
+            updated += 1
+            continue
 
         prior_score = parse_score(
             f"{existing.get('home_goals', '')}:{existing.get('away_goals', '')}"
@@ -250,13 +257,16 @@ def _resolve_fallback_target(
     blank_candidates = [
         index for index in candidates if not rows[index].get("match_id", "").strip()
     ]
+    canonical_id = next(iter(canonical_ids)) if len(canonical_ids) == 1 else ""
+    source_record_id = item.get("source_record_id")
+    if not isinstance(source_record_id, str) or not source_record_id.strip():
+        for index in candidates:
+            if _anonymous_unavailable_observation_matches(
+                rows[index], item, canonical_id
+            ):
+                return index, canonical_id, "unavailable"
+        return None, canonical_id, "unavailable"
     if len(canonical_ids) == 1:
-        canonical_id = next(iter(canonical_ids))
-        source_record_id = item.get("source_record_id")
-        if not isinstance(source_record_id, str) or not source_record_id.strip():
-            if len(blank_candidates) == 1:
-                return blank_candidates[0], canonical_id, "unavailable"
-            return None, canonical_id, "unavailable"
         for index in candidates:
             if rows[index].get("match_id", "").strip() == canonical_id:
                 return index, canonical_id, "finished"
@@ -269,6 +279,29 @@ def _resolve_fallback_target(
     if len(blank_candidates) == 1:
         return blank_candidates[0], "", "unavailable"
     return None, "", "unavailable"
+
+
+def _anonymous_unavailable_observation_matches(
+    existing: dict, item: dict, match_id: str
+) -> bool:
+    source = item.get("result_source")
+    source_record_id = item.get("source_record_id")
+    if not isinstance(source, str) or not source.strip():
+        return False
+    if isinstance(source_record_id, str) and source_record_id.strip():
+        return False
+    if _provenance_tokens(existing.get("source_record_id", "")):
+        return False
+    if existing.get("result_status") != "unavailable":
+        return False
+    if existing.get("match_id", "").strip() != match_id:
+        return False
+    if _provenance_tokens(existing.get("result_source", "")) != {source.strip()}:
+        return False
+    prior_score = parse_score(
+        f"{existing.get('home_goals', '')}:{existing.get('away_goals', '')}"
+    )
+    return bool(prior_score) and tuple(item.get("full") or ()) == prior_score
 
 
 def _observation_seen(existing: dict, item: dict) -> bool:
