@@ -89,6 +89,21 @@ class ImportSportteryResponseValidationTest(unittest.TestCase):
         with patch.object(import_sporttery, "fetch_json", return_value=payload):
             self.assertEqual([], import_sporttery.fetch_selling_matches(TARGET_DATE))
 
+    def test_fetch_selling_matches_rejects_nonempty_days_without_target_date(self):
+        payload = {
+            "errorCode": 0,
+            "value": {
+                "matchInfoList": [{
+                    "businessDate": "2026-07-17",
+                    "subMatchList": [],
+                }]
+            },
+        }
+
+        with patch.object(import_sporttery, "fetch_json", return_value=payload):
+            with self.assertRaisesRegex(RuntimeError, "target date"):
+                import_sporttery.fetch_selling_matches(TARGET_DATE)
+
     def test_fetch_selling_matches_requires_an_exact_business_date_for_every_day(self):
         invalid_dates = (None, "", "2026-7-16", "2026-02-30")
         for business_date in invalid_dates:
@@ -141,6 +156,39 @@ class ImportSportteryResponseValidationTest(unittest.TestCase):
                 }
                 with self.subTest(field=field, value=value):
                     self.assert_invalid_target_match(payload, field)
+
+    def test_fetch_selling_matches_rejects_noncanonical_target_day_statuses(self):
+        for status in ("Selling ", "selling", "SELLING", "Define ", "Unknown"):
+            match = self.valid_match(matchStatus=status)
+            payload = {
+                "errorCode": 0,
+                "value": {
+                    "matchInfoList": [{
+                        "businessDate": TARGET_DATE.isoformat(),
+                        "subMatchList": [match],
+                    }]
+                },
+            }
+            with self.subTest(status=status):
+                self.assert_invalid_target_match(payload, "matchStatus")
+
+    def test_fetch_selling_matches_selects_all_valid_target_day_statuses(self):
+        matches = [
+            self.valid_match(matchId="001", matchStatus="Selling"),
+            self.valid_match(matchId="002", matchStatus="Define"),
+        ]
+        payload = {
+            "errorCode": 0,
+            "value": {
+                "matchInfoList": [{
+                    "businessDate": TARGET_DATE.isoformat(),
+                    "subMatchList": matches,
+                }]
+            },
+        }
+
+        with patch.object(import_sporttery, "fetch_json", return_value=payload):
+            self.assertEqual(matches, import_sporttery.fetch_selling_matches(TARGET_DATE))
 
     def test_fetch_selling_matches_rejects_invalid_target_day_match_id_types(self):
         for value in (None, "", "  ", True, False, [], {}, 1.5):

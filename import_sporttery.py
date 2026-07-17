@@ -236,6 +236,7 @@ def fetch_selling_matches(target_date: date) -> list[dict]:
         )
 
     selected = []
+    target_day_seen = False
     for day in match_days:
         if not isinstance(day, dict):
             raise RuntimeError(
@@ -258,6 +259,8 @@ def fetch_selling_matches(target_date: date) -> list[dict]:
             raise RuntimeError(
                 "invalid Sporttery match-list response: subMatchList must be a list"
             )
+        if business_date == target_date.isoformat():
+            target_day_seen = True
         for item in sub_matches:
             if not isinstance(item, dict):
                 raise RuntimeError(
@@ -279,8 +282,15 @@ def fetch_selling_matches(target_date: date) -> list[dict]:
                     raise RuntimeError(
                         f"invalid Sporttery match-list response: target-day match {field} is required"
                     )
-            if item.get("matchStatus") in {"Selling", "Define"}:
-                selected.append(item)
+            if item["matchStatus"] not in {"Selling", "Define"}:
+                raise RuntimeError(
+                    "invalid Sporttery match-list response: target-day match matchStatus must be Selling or Define"
+                )
+            selected.append(item)
+    if match_days and not target_day_seen:
+        raise RuntimeError(
+            "invalid Sporttery match-list response: target date is missing"
+        )
     return selected
 
 

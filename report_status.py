@@ -137,6 +137,35 @@ def _official_source_for_date(source_status: object, report_date: date) -> bool:
     )
 
 
+def _verified_zero_fixture_state(
+    source_status: object,
+    report_date: date,
+    fixtures_ready: bool,
+    fixtures: list[dict],
+) -> bool:
+    metadata_valid, declared_count = _source_fixture_count(
+        source_status, report_date
+    )
+    return (
+        fixtures_ready
+        and not fixtures
+        and metadata_valid
+        and declared_count == 0
+        and _official_source_for_date(source_status, report_date)
+    )
+
+
+def verified_zero_fixture_day(root: Path, report_date: date) -> bool:
+    data = root / "data"
+    source_status = _read_json(data / "source_status.json")
+    fixtures_ready, fixtures = _fixture_rows(
+        data / "fixtures.csv", report_date, source_status
+    )
+    return _verified_zero_fixture_state(
+        source_status, report_date, fixtures_ready, fixtures
+    )
+
+
 def _official_fixture_rows(
     fixtures: list[dict], source_status: object, report_date: date
 ) -> list[dict]:
@@ -208,10 +237,8 @@ def artifact_state(root: Path, report_date: date) -> dict:
         data / "fixtures.csv", report_date, source_status
     )
     fixture_count = len(fixtures) if fixtures_ready else None
-    zero_fixture_verified = (
-        fixtures_ready
-        and fixture_count == 0
-        and _official_source_for_date(source_status, report_date)
+    zero_fixture_verified = _verified_zero_fixture_state(
+        source_status, report_date, fixtures_ready, fixtures
     )
     fixture_ids = [row.get("match_id", "") for row in fixtures]
     official_fixtures = _official_fixture_rows(fixtures, source_status, report_date)

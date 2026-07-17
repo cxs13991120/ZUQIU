@@ -3,14 +3,17 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 import capture_odds_snapshot
-from report_status import OFFICIAL_FIXTURE_SOURCES
+import report_status
+from report_status import FIXTURE_REQUIRED_FIELDS, OFFICIAL_FIXTURE_SOURCES
 
 
 TARGET_DATE = "2026-07-16"
+TARGET_DATE_VALUE = date.fromisoformat(TARGET_DATE)
 
 
 class CaptureOddsSnapshotCliTest(unittest.TestCase):
@@ -35,7 +38,7 @@ class CaptureOddsSnapshotCliTest(unittest.TestCase):
         self,
         root: Path,
         rows=(),
-        fieldnames=("date",),
+        fieldnames=tuple(sorted(FIXTURE_REQUIRED_FIELDS)),
     ) -> None:
         data = root / "data"
         data.mkdir(parents=True, exist_ok=True)
@@ -127,6 +130,55 @@ class CaptureOddsSnapshotCliTest(unittest.TestCase):
             })
             self.write_fixtures(root, rows=({"date": TARGET_DATE},))
             self.assertNotEqual(0, self.run_main(root, "decision", None))
+
+    def test_decision_zero_fixture_proof_rejects_conflicting_count_aliases(self):
+        conflicts = (
+            {"match_count": 1},
+            {"fixtures_count": 1},
+            {"fixtures_count": 0, "match_count": 1},
+        )
+        for aliases in conflicts:
+            with self.subTest(aliases=aliases), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.write_source_status(root, {
+                    "source": "竞彩网",
+                    "target_date": TARGET_DATE,
+                    "fixture_count": 0,
+                    "no_fixtures": True,
+                    **aliases,
+                })
+                self.write_fixtures(root)
+
+                self.assertNotEqual(0, self.run_main(root, "decision", None))
+
+    def test_decision_empty_capture_matches_report_zero_fixture_authority(self):
+        self.assertTrue(
+            hasattr(report_status, "verified_zero_fixture_day"),
+            "report_status must expose the shared zero-fixture authority",
+        )
+        cases = (
+            ({}, True),
+            ({"match_count": 1}, False),
+        )
+        for aliases, expected in cases:
+            with self.subTest(aliases=aliases), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.write_source_status(root, {
+                    "source": "中国足彩网",
+                    "target_date": TARGET_DATE,
+                    "fixture_count": 0,
+                    "no_fixtures": True,
+                    **aliases,
+                })
+                self.write_fixtures(root)
+
+                report_verified = report_status.verified_zero_fixture_day(
+                    root, TARGET_DATE_VALUE
+                )
+                capture_verified = self.run_main(root, "decision", None) == 0
+
+                self.assertEqual(expected, report_verified)
+                self.assertEqual(report_verified, capture_verified)
 
     def test_decision_zero_fixture_proof_allows_rows_for_other_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
