@@ -1,6 +1,6 @@
 import csv
 import urllib.parse
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -9,6 +9,7 @@ from import_sporttery import ZGZCW_HAD_URL, fetch_matches, fetch_text
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+BEIJING = timezone(timedelta(hours=8))
 TEAM_ALIASES = {
     # The official feed and ZGZCW use different Chinese abbreviations.
     "奥尔格里": "厄格里特",
@@ -17,6 +18,11 @@ HISTORICAL_HALF_TIME = {
     # One legacy half/full-time plan predates the draw-only strategy.
     ("2026-07-11", "阿根廷", "瑞士"): ("1", "0"),
 }
+BASE_FIELDS = (
+    "date", "team_a", "team_b", "home_goals", "away_goals",
+    "half_home_goals", "half_away_goals", "match_id", "result_status",
+    "result_source", "source_record_id", "captured_at_bjt",
+)
 
 
 def parse_score(value: str) -> tuple[str, str] | None:
@@ -32,12 +38,15 @@ def parse_score(value: str) -> tuple[str, str] | None:
 def read_existing(path: Path) -> dict[tuple[str, str, str], dict]:
     if not path.exists():
         return {}
-    with path.open("r", encoding="utf-8-sig", newline="") as fh:
-        return {(row["date"], row["team_a"], row["team_b"]): row for row in csv.DictReader(fh)}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return {
+            (row.get("date", ""), row.get("team_a", ""), row.get("team_b", "")): row
+            for row in csv.DictReader(handle)
+        }
 
 
 class ZgzcwResultParser(HTMLParser):
-    """Parse finished scores from the historical JCZQ issue page."""
+    """Parse finished scores and their source row identity from ZGZCW."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -50,7 +59,16 @@ class ZgzcwResultParser(HTMLParser):
         values = {key.lower(): value or "" for key, value in attrs}
         if tag == "tr" and values.get("id", "").startswith("tr_"):
             classes = values.get("class", "").split()
-            self.current = {"homeTeam": "", "awayTeam": "", "score": ""} if "endBet" in classes else None
+            self.current = (
+                {
+                    "homeTeam": "",
+                    "awayTeam": "",
+                    "score": "",
+                    "source_record_id": values["id"].removeprefix("tr_"),
+                }
+                if "endBet" in classes
+                else None
+            )
             self.current_cell = ""
         elif self.current is not None and tag == "td":
             classes = values.get("class", "").split()
@@ -97,71 +115,144 @@ def fetch_zgzcw_results(target_date: date) -> list[dict]:
 
 
 def official_result_rows(target_date: date) -> list[dict]:
-    results = []
+    captured_at = datetime.now(BEIJING).isoformat()
+    rows = []
     for item in fetch_matches(target_date):
         if str(item.get("matchResultStatus", "")) != "2":
             continue
         full = parse_score(item.get("sectionsNo999", ""))
-        half = parse_score(item.get("sectionsNo1", ""))
         if full is None:
             continue
-        results.append(
-            {
-                "homeTeam": item.get("homeTeam", ""),
-                "awayTeam": item.get("awayTeam", ""),
-                "full": full,
-                "half": half,
-            }
-        )
-    return results
+        match_id = str(item.get("matchId", "")).strip()
+        if not match_id:
+            continue
+        rows.append({
+            "homeTeam": item.get("homeTeam", ""),
+            "awayTeam": item.get("awayTeam", ""),
+            "full": full,
+            "half": parse_score(item.get("sectionsNo1", "")),
+            "match_id": match_id,
+            "result_status": "finished",
+            "result_source": "sporttery",
+            "source_record_id": match_id,
+            "captured_at_bjt": captured_at,
+        })
+    return rows
 
 
 def update_results(target_date: date) -> Path:
     path = DATA_DIR / "bet_results.csv"
     rows = read_existing(path)
-    source = "竞彩网"
+    source = "sporttery"
     try:
         result_rows = official_result_rows(target_date)
         if not result_rows:
-            raise RuntimeError("竞彩网暂未返回已完场赛果")
+            raise RuntimeError("Sporttery returned no explicit finished results")
     except Exception as exc:
-        source = "中国足彩网"
+        source = "zgzcw"
         print(f"WARNING: 竞彩网赛果接口不可用（{type(exc).__name__}），切换中国足彩网历史赛果。")
-        result_rows = []
-        for item in fetch_zgzcw_results(target_date):
-            full = parse_score(item["score"])
-            if full is not None:
-                result_rows.append({**item, "full": full, "half": None})
+        result_rows = [_fallback_result_row(item) for item in fetch_zgzcw_results(target_date) if parse_score(item.get("score", ""))]
 
     if not result_rows:
         raise RuntimeError(f"{target_date.isoformat()} 暂未抓到任何已完场赛果，稍后自动重试")
 
+    fixture_ids = _fixture_match_ids(target_date)
     updated = 0
     for item in result_rows:
-        home_team = TEAM_ALIASES.get(item["homeTeam"], item["homeTeam"])
-        away_team = TEAM_ALIASES.get(item["awayTeam"], item["awayTeam"])
+        home_team = TEAM_ALIASES.get(item.get("homeTeam", ""), item.get("homeTeam", ""))
+        away_team = TEAM_ALIASES.get(item.get("awayTeam", ""), item.get("awayTeam", ""))
         key = (target_date.isoformat(), home_team, away_team)
         existing = rows.get(key, {})
+        full = item.get("full")
+        if not full:
+            continue
         half = item.get("half") or HISTORICAL_HALF_TIME.get(key)
-        rows[key] = {
+        incoming = dict(existing)
+        incoming.update({
             "date": key[0],
             "team_a": key[1],
             "team_b": key[2],
-            "home_goals": item["full"][0],
-            "away_goals": item["full"][1],
             "half_home_goals": half[0] if half else existing.get("half_home_goals", ""),
             "half_away_goals": half[1] if half else existing.get("half_away_goals", ""),
-        }
+        })
+        match_id = item.get("match_id") or existing.get("match_id") or fixture_ids.get(key)
+        if match_id:
+            incoming["match_id"] = str(match_id)
+            incoming.update(_result_provenance(item, "finished"))
+        else:
+            incoming["match_id"] = ""
+            incoming.update(_result_provenance(item, "unavailable"))
+
+        prior_finished = existing.get("result_status") == "finished" and parse_score(
+            f"{existing.get('home_goals', '')}:{existing.get('away_goals', '')}"
+        )
+        if prior_finished and tuple(full) != (existing.get("home_goals"), existing.get("away_goals")):
+            incoming["home_goals"] = existing["home_goals"]
+            incoming["away_goals"] = existing["away_goals"]
+            incoming["result_status"] = "conflict"
+            incoming["result_source"] = _joined_provenance(existing.get("result_source", ""), incoming["result_source"])
+            incoming["source_record_id"] = _joined_provenance(existing.get("source_record_id", ""), incoming["source_record_id"])
+            incoming["captured_at_bjt"] = _joined_provenance(existing.get("captured_at_bjt", ""), incoming["captured_at_bjt"])
+        else:
+            incoming["home_goals"] = full[0]
+            incoming["away_goals"] = full[1]
+        rows[key] = incoming
         updated += 1
 
-    fields = ["date", "team_a", "team_b", "home_goals", "away_goals", "half_home_goals", "half_away_goals"]
-    with path.open("w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fields)
-        writer.writeheader()
-        for key in sorted(rows):
-            writer.writerow(rows[key])
+    _write_rows(path, rows)
     print(f"Data source: {source}; finished matches: {updated}")
     return path
+
+
+def _fallback_result_row(item: dict) -> dict:
+    full = parse_score(item.get("score", ""))
+    return {
+        **item,
+        "full": full,
+        "half": None,
+        "result_source": "zgzcw",
+        "source_record_id": str(item.get("source_record_id", "")).strip(),
+        "captured_at_bjt": datetime.now(BEIJING).isoformat(),
+    }
+
+
+def _fixture_match_ids(target_date: date) -> dict[tuple[str, str, str], str]:
+    path = DATA_DIR / "fixtures.csv"
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return {
+                (row.get("date", ""), row.get("team_a", ""), row.get("team_b", "")): row["match_id"].strip()
+                for row in csv.DictReader(handle)
+                if row.get("date") == target_date.isoformat() and row.get("match_id", "").strip()
+            }
+    except (OSError, csv.Error):
+        return {}
+
+
+def _result_provenance(item: dict, status: str) -> dict:
+    source = item.get("result_source", "sporttery")
+    return {
+        "result_status": status,
+        "result_source": source,
+        "source_record_id": item.get("source_record_id", "") or item.get("match_id", ""),
+        "captured_at_bjt": item.get("captured_at_bjt", datetime.now(BEIJING).isoformat()),
+    }
+
+
+def _joined_provenance(first: str, second: str) -> str:
+    return "|".join(sorted({value for value in (first, second) if value}))
+
+
+def _write_rows(path: Path, rows: dict[tuple[str, str, str], dict]) -> None:
+    unknown = sorted({field for row in rows.values() for field in row} - set(BASE_FIELDS))
+    fields = [*BASE_FIELDS, *unknown]
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        for key in sorted(rows):
+            writer.writerow({field: rows[key].get(field, "") for field in fields})
 
 
 def main() -> int:
