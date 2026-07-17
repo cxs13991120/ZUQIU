@@ -523,15 +523,7 @@ def _legacy_leg_payload(row: dict) -> dict:
         isinstance(parsed_legs, list)
         and all(isinstance(leg, dict) for leg in parsed_legs)
     ):
-        legs = [
-            {
-                "match_id": _legacy_text(leg.get("match_id")),
-                "market_type": _legacy_text(leg.get("market_type")).lower(),
-                "selection": _legacy_text(leg.get("selection")),
-                "line": _legacy_text(leg.get("line", leg.get("market_line"))),
-            }
-            for leg in parsed_legs
-        ]
+        legs = [_legacy_structured_leg_identity(leg) for leg in parsed_legs]
         return {
             "format": "structured",
             "items": sorted(
@@ -560,6 +552,30 @@ def _legacy_leg_payload(row: dict) -> dict:
             "value": _legacy_text(parsed_legs),
         }
     return {"format": "raw_json", "value": normalized_raw}
+
+
+def _legacy_structured_leg_identity(leg: dict) -> dict:
+    identity = {
+        "market_type": _legacy_text(leg.get("market_type")).lower(),
+        "selection": _legacy_text(leg.get("selection")),
+        "line": _legacy_text(leg.get("line", leg.get("market_line"))),
+    }
+    match_id = _legacy_text(leg.get("match_id"))
+    if match_id:
+        identity["match_id"] = match_id
+    else:
+        identity["legacy_match_identity"] = {
+            "identity_namespace": "legacy_leg_match_v1",
+            "display": {
+                field: _legacy_text(leg.get(field))
+                for field in (
+                    "match", "fixture", "team_a", "team_b", "home_team",
+                    "away_team", "homeTeam", "awayTeam", "home", "away",
+                    "teams", "display", "display_label", "match_display",
+                )
+            },
+        }
+    return identity
 
 
 def _legacy_display_payload(row: dict) -> dict:
