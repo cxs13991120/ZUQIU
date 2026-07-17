@@ -221,15 +221,40 @@ def fetch_selling_matches(target_date: date) -> list[dict]:
     params = {"clientCode": "3001"}
     url = MATCH_LIST_URL + "?" + urllib.parse.urlencode(params)
     payload = fetch_json(url)
+    if not isinstance(payload, dict):
+        raise RuntimeError("invalid Sporttery match-list response: root must be an object")
     if str(payload.get("errorCode")) != "0":
         raise RuntimeError(payload.get("errorMessage", "竞彩网在售接口返回异常"))
 
+    value = payload.get("value")
+    if not isinstance(value, dict):
+        raise RuntimeError("invalid Sporttery match-list response: value must be an object")
+    match_days = value.get("matchInfoList")
+    if not isinstance(match_days, list):
+        raise RuntimeError(
+            "invalid Sporttery match-list response: value.matchInfoList must be a list"
+        )
+
     selected = []
-    for day in payload.get("value", {}).get("matchInfoList", []):
-        if day.get("businessDate") != target_date.isoformat():
-            continue
-        for item in day.get("subMatchList", []):
-            if item.get("matchStatus") in {"Selling", "Define"}:
+    for day in match_days:
+        if not isinstance(day, dict):
+            raise RuntimeError(
+                "invalid Sporttery match-list response: match day must be an object"
+            )
+        sub_matches = day.get("subMatchList")
+        if not isinstance(sub_matches, list):
+            raise RuntimeError(
+                "invalid Sporttery match-list response: subMatchList must be a list"
+            )
+        for item in sub_matches:
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    "invalid Sporttery match-list response: match must be an object"
+                )
+            if (
+                day.get("businessDate") == target_date.isoformat()
+                and item.get("matchStatus") in {"Selling", "Define"}
+            ):
                 selected.append(item)
     return selected
 

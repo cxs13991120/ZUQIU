@@ -308,6 +308,63 @@ class ReportStatusTest(unittest.TestCase):
             self.assertIsNone(state["fixture_count"])
             self.assertFalse(status["decision_snapshot_ready"])
 
+    def test_zero_fixture_proof_rejects_a_zero_count_alias_without_an_explicit_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root, fixture_ids=())
+            (root / "data" / "source_status.json").write_text(
+                json.dumps({
+                    "target_date": REPORT_DATE.isoformat(),
+                    "source": "test",
+                    "match_count": 0,
+                }),
+                encoding="utf-8",
+            )
+
+            state = artifact_state(root, REPORT_DATE)
+
+            self.assertFalse(state["fixtures_ready"])
+            self.assertFalse(state["zero_fixture_verified"])
+            self.assertIsNone(state["fixture_count"])
+
+    def test_zero_fixture_proof_rejects_a_count_that_contradicts_the_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root, fixture_ids=())
+            (root / "data" / "source_status.json").write_text(
+                json.dumps({
+                    "target_date": REPORT_DATE.isoformat(),
+                    "source": "test",
+                    "fixture_count": 0,
+                    "no_fixtures": False,
+                }),
+                encoding="utf-8",
+            )
+
+            state = artifact_state(root, REPORT_DATE)
+
+            self.assertFalse(state["fixtures_ready"])
+            self.assertFalse(state["zero_fixture_verified"])
+
+    def test_fixture_proof_rejects_a_declared_count_that_differs_from_csv_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            (root / "data" / "source_status.json").write_text(
+                json.dumps({
+                    "target_date": REPORT_DATE.isoformat(),
+                    "source": "test",
+                    "fixture_count": 0,
+                    "no_fixtures": True,
+                }),
+                encoding="utf-8",
+            )
+
+            state = artifact_state(root, REPORT_DATE)
+
+            self.assertFalse(state["fixtures_ready"])
+            self.assertIsNone(state["fixture_count"])
+
     def test_nonzero_fixtures_expose_partial_odds_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -322,6 +379,28 @@ class ReportStatusTest(unittest.TestCase):
             self.assertEqual(2, state["fixture_count"])
             self.assertEqual(1, state["odds_covered_fixture_count"])
             self.assertEqual(0.5, state["odds_coverage"])
+
+    def test_status_publishes_documented_official_counts_and_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            (root / "data" / "sporttery_odds_2026-07-16.json").write_text(
+                json.dumps({"001": {"had": {"h": "2.0"}}, "002": {"had": {}}}),
+                encoding="utf-8",
+            )
+
+            status = self.publish(root, "forecast")
+
+            self.assertEqual(2, status.get("official_fixture_count"))
+            self.assertEqual(1, status.get("official_odds_count"))
+            self.assertEqual(0.5, status.get("official_odds_coverage_ratio"))
+            self.assertEqual(status["fixture_count"], status["official_fixture_count"])
+            self.assertEqual(
+                status["odds_covered_fixture_count"], status["official_odds_count"]
+            )
+            self.assertEqual(
+                status["odds_coverage"], status["official_odds_coverage_ratio"]
+            )
 
     def test_null_and_blank_odds_do_not_count_as_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -416,7 +495,7 @@ class ReportStatusTest(unittest.TestCase):
 
             self.assertFalse(status["plan_ready"])
 
-    def test_same_phase_rerun_preserves_prior_forecast_readiness(self):
+    def test_same_phase_rerun_invalidates_forecast_readiness_when_predictions_disappear(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_artifacts(root)
@@ -425,10 +504,37 @@ class ReportStatusTest(unittest.TestCase):
 
             status = self.publish(root, "forecast")
 
-            self.assertTrue(status["forecast_ready"])
+            self.assertFalse(status["forecast_ready"])
             self.assertFalse(status["data_quality"]["predictions_ready"])
 
-    def test_same_phase_decision_rerun_preserves_prior_readiness_and_timestamps(self):
+    def test_cross_phase_rerun_invalidates_forecast_readiness_when_predictions_disappear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            self.assertTrue(self.publish(root, "forecast")["forecast_ready"])
+            (root / "output" / "predictions_2026-07-16.csv").unlink()
+
+            status = self.publish(root, "decision")
+
+            self.assertFalse(status["forecast_ready"])
+            self.assertFalse(status["data_quality"]["predictions_ready"])
+
+    def test_formerly_ready_forecast_is_invalidated_by_malformed_predictions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            self.assertTrue(self.publish(root, "forecast")["forecast_ready"])
+            with (root / "output" / "predictions_2026-07-16.csv").open(
+                "w", encoding="utf-8", newline=""
+            ) as handle:
+                csv.DictWriter(handle, fieldnames=["date", "match_id"]).writeheader()
+
+            status = self.publish(root, "forecast")
+
+            self.assertFalse(status["forecast_ready"])
+            self.assertFalse(status["data_quality"]["predictions_ready"])
+
+    def test_same_phase_decision_rerun_invalidates_missing_proofs_but_preserves_timestamps(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_artifacts(root)
@@ -440,10 +546,38 @@ class ReportStatusTest(unittest.TestCase):
 
             status = self.publish(root, "decision")
 
-            self.assertTrue(status["decision_snapshot_ready"])
-            self.assertTrue(status["plan_ready"])
+            self.assertFalse(status["decision_snapshot_ready"])
+            self.assertFalse(status["plan_ready"])
             self.assertEqual(initial["decision_odds_at_bjt"], status["decision_odds_at_bjt"])
             self.assertEqual(initial["plan_locked_at_bjt"], status["plan_locked_at_bjt"])
+
+    def test_formerly_ready_decision_is_invalidated_by_malformed_proofs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            self.make_lock(root)
+            self.make_decision_snapshot(root)
+            initial = self.publish(root, "decision")
+            self.assertTrue(initial["decision_snapshot_ready"])
+            self.assertTrue(initial["plan_ready"])
+            (root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json").write_text(
+                "{", encoding="utf-8"
+            )
+            (root / "output" / "plan_lock_2026-07-16.json").write_text(
+                "{", encoding="utf-8"
+            )
+            with (root / "output" / "betting_plan_2026-07-16.csv").open(
+                "w", encoding="utf-8", newline=""
+            ) as handle:
+                csv.DictWriter(handle, fieldnames=["date", "stake"]).writeheader()
+
+            status = self.publish(root, "decision")
+
+            self.assertFalse(status["decision_snapshot_ready"])
+            self.assertFalse(status["plan_ready"])
+            self.assertFalse(status["data_quality"]["decision_snapshot_ready"])
+            self.assertFalse(status["data_quality"]["plan_lock_ready"])
+            self.assertFalse(status["data_quality"]["plan_csv_ready"])
 
     def test_decision_rerun_keeps_latest_timestamps_when_only_older_artifacts_survive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -468,7 +602,7 @@ class ReportStatusTest(unittest.TestCase):
             self.assertEqual("2026-07-16T14:00:00+08:00", status["decision_odds_at_bjt"])
             self.assertEqual("2026-07-16T14:01:00+08:00", status["plan_locked_at_bjt"])
 
-    def test_same_phase_settlement_rerun_preserves_prior_readiness(self):
+    def test_same_phase_settlement_rerun_invalidates_readiness_when_ledger_disappears(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_artifacts(root)
@@ -478,7 +612,37 @@ class ReportStatusTest(unittest.TestCase):
 
             status = self.publish(root, "settlement", settled_through=date(2026, 7, 15))
 
-            self.assertTrue(status["settlement_ready"])
+            self.assertFalse(status["settlement_ready"])
+            self.assertFalse(status["data_quality"]["ledger_ready"])
+
+    def test_cross_phase_rerun_invalidates_settlement_readiness_when_ledger_disappears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            initial = self.publish(root, "settlement", settled_through=date(2026, 7, 15))
+            self.assertTrue(initial["settlement_ready"])
+            (root / "output" / "betting_ledger.csv").unlink()
+
+            status = self.publish(root, "forecast")
+
+            self.assertFalse(status["settlement_ready"])
+            self.assertEqual("2026-07-15", status["settled_through"])
+            self.assertFalse(status["data_quality"]["ledger_ready"])
+
+    def test_formerly_ready_settlement_is_invalidated_by_a_malformed_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            initial = self.publish(root, "settlement", settled_through=date(2026, 7, 15))
+            self.assertTrue(initial["settlement_ready"])
+            with (root / "output" / "betting_ledger.csv").open(
+                "w", encoding="utf-8", newline=""
+            ) as handle:
+                csv.DictWriter(handle, fieldnames=["date", "stake"]).writeheader()
+
+            status = self.publish(root, "settlement", settled_through=date(2026, 7, 15))
+
+            self.assertFalse(status["settlement_ready"])
             self.assertFalse(status["data_quality"]["ledger_ready"])
 
     def test_settlement_rerun_does_not_regress_the_settlement_watermark(self):
@@ -491,7 +655,7 @@ class ReportStatusTest(unittest.TestCase):
 
             self.assertEqual("2026-07-15", status["settled_through"])
 
-    def test_cross_phase_rerun_preserves_prior_decision_readiness_and_timestamps(self):
+    def test_cross_phase_rerun_invalidates_missing_decision_proofs_but_preserves_timestamps(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_artifacts(root)
@@ -503,8 +667,8 @@ class ReportStatusTest(unittest.TestCase):
 
             status = self.publish(root, "forecast")
 
-            self.assertTrue(status["decision_snapshot_ready"])
-            self.assertTrue(status["plan_ready"])
+            self.assertFalse(status["decision_snapshot_ready"])
+            self.assertFalse(status["plan_ready"])
             self.assertEqual(initial["decision_odds_at_bjt"], status["decision_odds_at_bjt"])
             self.assertEqual(initial["plan_locked_at_bjt"], status["plan_locked_at_bjt"])
 

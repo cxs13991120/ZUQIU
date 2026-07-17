@@ -13,6 +13,61 @@ from report_status import artifact_state
 TARGET_DATE = date(2026, 7, 16)
 
 
+class ImportSportteryResponseValidationTest(unittest.TestCase):
+    def test_fetch_selling_matches_rejects_malformed_success_payloads(self):
+        malformed_payloads = {
+            "non-object payload": [],
+            "missing value": {"errorCode": 0},
+            "non-object value": {"errorCode": 0, "value": []},
+            "missing matchInfoList": {"errorCode": 0, "value": {}},
+            "non-list matchInfoList": {
+                "errorCode": 0,
+                "value": {"matchInfoList": {}},
+            },
+            "non-object day": {
+                "errorCode": 0,
+                "value": {"matchInfoList": [None]},
+            },
+            "non-list target-day matches": {
+                "errorCode": 0,
+                "value": {
+                    "matchInfoList": [
+                        {
+                            "businessDate": TARGET_DATE.isoformat(),
+                            "subMatchList": None,
+                        }
+                    ]
+                },
+            },
+            "non-object match": {
+                "errorCode": 0,
+                "value": {
+                    "matchInfoList": [
+                        {
+                            "businessDate": TARGET_DATE.isoformat(),
+                            "subMatchList": [None],
+                        }
+                    ]
+                },
+            },
+        }
+
+        for label, payload in malformed_payloads.items():
+            with self.subTest(label=label), patch.object(
+                import_sporttery, "fetch_json", return_value=payload
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "invalid Sporttery match-list response"
+                ):
+                    import_sporttery.fetch_selling_matches(TARGET_DATE)
+
+    def test_fetch_selling_matches_accepts_an_explicit_empty_schedule(self):
+        payload = {"errorCode": 0, "value": {"matchInfoList": []}}
+
+        with patch.object(import_sporttery, "fetch_json", return_value=payload):
+            self.assertEqual([], import_sporttery.fetch_selling_matches(TARGET_DATE))
+
+
 class ImportSportterySourceStatusTest(unittest.TestCase):
     def test_write_source_status_marks_an_explicit_zero_fixture_day(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -23,6 +78,11 @@ class ImportSportterySourceStatusTest(unittest.TestCase):
                 )
 
             payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual("test", payload["source"])
+            self.assertEqual("专业欧赔市场", payload["analysis_source"])
+            self.assertEqual(TARGET_DATE.isoformat(), payload["target_date"])
+            self.assertTrue(payload["fallback"])
+            self.assertEqual("", payload["message"])
             self.assertEqual(0, payload["fixture_count"])
             self.assertTrue(payload["no_fixtures"])
 

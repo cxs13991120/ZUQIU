@@ -3,6 +3,13 @@ var FORECAST_WORKFLOW_ = "daily-forecast.yml";
 var REFRESH_WORKFLOW_ = "draw-alert-refresh.yml";
 var SETTLEMENT_WORKFLOW_ = "noon-settlement.yml";
 var DISPATCH_COOLDOWN_MS_ = 30 * 60 * 1000;
+var REQUIRED_REPORT_QUALITY_FIELDS_ = [
+  "predictions_ready",
+  "plan_csv_ready",
+  "plan_lock_ready",
+  "decision_snapshot_ready",
+  "ledger_ready",
+];
 
 function pad2_(value) {
   return value < 10 ? "0" + value : String(value);
@@ -113,6 +120,12 @@ function missingReasons_(status, expectedDate) {
 
 function reportReadiness_(status, expectedDate, imageSha256) {
   var reasons = missingReasons_(status, expectedDate);
+  var quality = status && status.data_quality;
+  REQUIRED_REPORT_QUALITY_FIELDS_.forEach(function (field) {
+    if (!quality || typeof quality !== "object" || Array.isArray(quality) || quality[field] !== true) {
+      reasons.push("data quality invalid: " + field);
+    }
+  });
   if (typeof imageSha256 !== "string" || !/^[0-9a-f]{64}$/.test(imageSha256)) {
     reasons.push("image bytes empty or hash invalid");
   } else if (status && status.image_sha256 !== imageSha256) {
@@ -130,8 +143,15 @@ function phaseReady_(status, phase) {
 
 function cooldownAllows_(clock, state, phase) {
   var prefix = phase === "forecast" ? "FORECAST" : phase === "refresh" ? "REFRESH" : "SETTLEMENT";
-  var dateKey = "LAST_" + prefix + "_DISPATCH_DATE";
-  var atKey = "LAST_" + prefix + "_DISPATCH_AT";
+  var confirmedDateKey = "LAST_" + prefix + "_DISPATCH_DATE";
+  var confirmedAtKey = "LAST_" + prefix + "_DISPATCH_AT";
+  var attemptDateKey = "LAST_" + prefix + "_DISPATCH_ATTEMPT_DATE";
+  var attemptAtKey = "LAST_" + prefix + "_DISPATCH_ATTEMPT_AT";
+  return cooldownElapsed_(clock, state, confirmedDateKey, confirmedAtKey) &&
+    cooldownElapsed_(clock, state, attemptDateKey, attemptAtKey);
+}
+
+function cooldownElapsed_(clock, state, dateKey, atKey) {
   if (state[dateKey] !== clock.date) return true;
   var prior = Number(state[atKey]);
   return isFinite(prior) && clock.nowMs - prior >= DISPATCH_COOLDOWN_MS_;
@@ -190,22 +210,36 @@ function dispatchStateKeys_(workflow) {
   return ["LAST_SETTLEMENT_DISPATCH_DATE", "LAST_SETTLEMENT_DISPATCH_AT"];
 }
 
+function dispatchAttemptStateKeys_(workflow) {
+  if (workflow === FORECAST_WORKFLOW_) return ["LAST_FORECAST_DISPATCH_ATTEMPT_DATE", "LAST_FORECAST_DISPATCH_ATTEMPT_AT"];
+  if (workflow === REFRESH_WORKFLOW_) return ["LAST_REFRESH_DISPATCH_ATTEMPT_DATE", "LAST_REFRESH_DISPATCH_ATTEMPT_AT"];
+  return ["LAST_SETTLEMENT_DISPATCH_ATTEMPT_DATE", "LAST_SETTLEMENT_DISPATCH_ATTEMPT_AT"];
+}
+
 function dispatchWorkflow_(properties, workflow, clock) {
   var owner = encodeURIComponent(requiredProperty_(properties, "GITHUB_OWNER"));
   var repo = encodeURIComponent(requiredProperty_(properties, "GITHUB_REPO"));
   var token = requiredProperty_(properties, "GITHUB_TOKEN");
   var endpoint = "https://api.github.com/repos/" + owner + "/" + repo + "/actions/workflows/" + encodeURIComponent(workflow) + "/dispatches";
-  var response = UrlFetchApp.fetch(endpoint, {
-    method: "post",
-    contentType: "application/json",
-    headers: {
-      Authorization: "Bearer " + token,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    payload: JSON.stringify({ ref: "main", inputs: { target_date: clock.date } }),
-    muteHttpExceptions: true,
-  });
+  var response;
+  try {
+    response = UrlFetchApp.fetch(endpoint, {
+      method: "post",
+      contentType: "application/json",
+      headers: {
+        Authorization: "Bearer " + token,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      payload: JSON.stringify({ ref: "main", inputs: { target_date: clock.date } }),
+      muteHttpExceptions: true,
+    });
+  } catch (error) {
+    var attemptKeys = dispatchAttemptStateKeys_(workflow);
+    properties.setProperty(attemptKeys[0], clock.date);
+    properties.setProperty(attemptKeys[1], String(clock.nowMs));
+    throw error;
+  }
   if (response.getResponseCode() !== 204) {
     throw new Error("GitHub workflow dispatch failed with HTTP " + response.getResponseCode());
   }
@@ -247,12 +281,19 @@ function escapeHtml_(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
 }
 
-function sendFailureNotice_(properties, clock, reasons) {
+function sendFailureNotice_(properties, clock, reasons, status) {
   var recipient = requiredProperty_(properties, "RECIPIENT_EMAIL");
+  var siteUrl = requiredProperty_(properties, "REPORT_SITE_URL");
   var subject = "Daily report unavailable " + clock.date;
   var detail = reasons.length ? reasons.join("; ") : "report incomplete";
-  var body = "The daily report was not ready by 18:00 Beijing time. " + detail;
-  var options = { htmlBody: "<p>The daily report was not ready by 18:00 Beijing time.</p><p>" + escapeHtml_(detail) + "</p>" };
+  var generatedAt = status && isFinite(timestampMillis_(status.generated_at_bjt)) ? status.generated_at_bjt : "unavailable";
+  var body = "The daily report was not ready by 18:00 Beijing time. " + detail +
+    ". Last generated at (Beijing): " + generatedAt + ". Dashboard: " + siteUrl;
+  var options = {
+    htmlBody: "<p>The daily report was not ready by 18:00 Beijing time.</p><p>" + escapeHtml_(detail) +
+      "</p><p>Last generated at (Beijing): " + escapeHtml_(generatedAt) +
+      "</p><p><a href=\"" + escapeHtml_(siteUrl) + "\">Open dashboard</a></p>",
+  };
   if (properties.getProperty("TEST_MODE") === "true") {
     Logger.log("TEST_MODE failure notice send for " + clock.date);
   } else {
@@ -291,7 +332,7 @@ function runAutomation() {
     var status = fetched.status;
     if (clock.minutes >= 18 * 60) {
       var finalAttempt = status ? tryVerifiedSend_(properties, clock, status) : { sent: false, reasons: fetched.reasons };
-      if (!finalAttempt.sent) sendFailureNotice_(properties, clock, fetched.reasons.concat(finalAttempt.reasons));
+      if (!finalAttempt.sent) sendFailureNotice_(properties, clock, fetched.reasons.concat(finalAttempt.reasons), status);
       return;
     }
 

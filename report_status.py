@@ -84,23 +84,48 @@ def _fixture_rows(
             rows = [row for row in reader if row.get("date") == report_date.isoformat()]
     except OSError:
         return False, []
-    if not rows and not _source_verifies_zero_fixtures(source_status, report_date):
+    metadata_valid, declared_count = _source_fixture_count(source_status, report_date)
+    if not metadata_valid:
+        return False, []
+    if declared_count is not None and declared_count != len(rows):
+        return False, []
+    if not rows and declared_count != 0:
         return False, []
     return True, rows
 
 
-def _source_verifies_zero_fixtures(source_status: object, report_date: date) -> bool:
+def _source_fixture_count(
+    source_status: object, report_date: date
+) -> tuple[bool, int | None]:
     if not isinstance(source_status, dict):
-        return False
+        return True, None
     if source_status.get("target_date") != report_date.isoformat():
-        return False
-    return (
-        source_status.get("no_fixtures") is True
-        or any(
-            type(source_status.get(field)) is int and source_status[field] == 0
-            for field in ("fixture_count", "fixtures_count", "match_count")
-        )
-    )
+        return True, None
+    count_fields = ("fixture_count", "fixtures_count", "match_count")
+    declared = [source_status[field] for field in count_fields if field in source_status]
+    if not declared:
+        no_fixtures = source_status.get("no_fixtures")
+        return no_fixtures is not True and (
+            no_fixtures is None or type(no_fixtures) is bool
+        ), None
+    if any(type(value) is not int or value < 0 for value in declared):
+        return False, None
+    if len(set(declared)) != 1:
+        return False, None
+
+    declared_count = declared[0]
+    no_fixtures = source_status.get("no_fixtures")
+    if no_fixtures is not None and (
+        type(no_fixtures) is not bool or no_fixtures != (declared_count == 0)
+    ):
+        return False, None
+    if (
+        declared_count == 0
+        and no_fixtures is None
+        and "fixture_count" not in source_status
+    ):
+        return False, None
+    return True, declared_count
 
 
 def _csv_with_header(path: Path, required_fields: frozenset[str]) -> tuple[bool, int]:
@@ -299,23 +324,23 @@ def publish_status(
 
     state = artifact_state(root, report_date)
     status = _previous_status(root, report_date)
+    forecast_ready = all(
+        state[key]
+        for key in (
+            "source_ready", "fixtures_ready", "predictions_ready", "plan_csv_ready",
+            "decision_ready", "site_ready", "image_ready",
+        )
+    )
+    snapshot_ready = (
+        state["decision_snapshot_ready"]
+        or (state["fixtures_ready"] and state["fixture_count"] == 0)
+    )
+    plan_ready = state["plan_lock_ready"] and state["plan_csv_ready"]
     if phase == "forecast":
-        status["forecast_ready"] = bool(status["forecast_ready"]) or all(
-            state[key]
-            for key in (
-                "source_ready", "fixtures_ready", "predictions_ready", "plan_csv_ready",
-                "decision_ready", "site_ready", "image_ready",
-            )
-        )
+        status["forecast_ready"] = forecast_ready
     elif phase == "decision":
-        snapshot_ready = (
-            state["decision_snapshot_ready"]
-            or (state["fixtures_ready"] and state["fixture_count"] == 0)
-        )
-        status["decision_snapshot_ready"] = bool(status["decision_snapshot_ready"]) or snapshot_ready
-        status["plan_ready"] = bool(status["plan_ready"]) or (
-            state["plan_lock_ready"] and state["plan_csv_ready"]
-        )
+        status["decision_snapshot_ready"] = snapshot_ready
+        status["plan_ready"] = plan_ready
         status["decision_odds_at_bjt"] = _latest_bjt_timestamp(
             status.get("decision_odds_at_bjt"), state["decision_odds_at_bjt"]
         )
@@ -329,11 +354,31 @@ def publish_status(
             prior_settled_through or settled_through,
         )
         status["settled_through"] = effective_settled_through.isoformat()
-        status["settlement_ready"] = bool(status["settlement_ready"]) or (
+        status["settlement_ready"] = (
             effective_settled_through >= report_date - timedelta(days=1)
             and state["ledger_ready"]
             and state["site_ready"]
             and state["image_ready"]
+        )
+
+    if phase != "decision":
+        status["decision_snapshot_ready"] = (
+            bool(status["decision_snapshot_ready"]) and snapshot_ready
+        )
+        status["plan_ready"] = bool(status["plan_ready"]) and plan_ready
+    if phase != "forecast":
+        status["forecast_ready"] = bool(status["forecast_ready"]) and forecast_ready
+    if phase != "settlement":
+        prior_settled_through = _prior_settlement_date(status)
+        settlement_ready = (
+            prior_settled_through is not None
+            and prior_settled_through >= report_date - timedelta(days=1)
+            and state["ledger_ready"]
+            and state["site_ready"]
+            and state["image_ready"]
+        )
+        status["settlement_ready"] = (
+            bool(status["settlement_ready"]) and settlement_ready
         )
 
     status.update(
@@ -343,11 +388,14 @@ def publish_status(
             "image_sha256": state["image_sha256"],
             "source_commit_sha": source_commit_sha,
             "fixture_count": state["fixture_count"],
+            "official_fixture_count": state["fixture_count"],
             "prediction_count": state["prediction_count"],
             "plan_count": state["plan_count"],
             "ledger_count": state["ledger_count"],
             "odds_covered_fixture_count": state["odds_covered_fixture_count"],
+            "official_odds_count": state["odds_covered_fixture_count"],
             "odds_coverage": state["odds_coverage"],
+            "official_odds_coverage_ratio": state["odds_coverage"],
             "data_quality": _data_quality(state),
             "source_status": state["source_status"],
         }

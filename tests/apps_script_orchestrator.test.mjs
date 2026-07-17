@@ -29,6 +29,13 @@ function readyStatus(overrides = {}) {
     build_id: "run-42-settlement",
     image_sha256: IMAGE_HASH,
     source_commit_sha: "0123456789abcdef",
+    data_quality: {
+      predictions_ready: true,
+      plan_csv_ready: true,
+      plan_lock_ready: true,
+      decision_snapshot_ready: true,
+      ledger_ready: true,
+    },
     ...overrides,
   };
 }
@@ -301,6 +308,25 @@ test("reportReadiness_ fails closed for every required contract field", () => {
   assert.equal(context.reportReadiness_(readyStatus(), REPORT_DATE, "").ready, false, "empty image bytes/hash");
 });
 
+test("reportReadiness_ fails closed when current proving artifacts are invalid", () => {
+  const { context } = makeHarness();
+  const requiredQualityFields = [
+    "predictions_ready",
+    "plan_csv_ready",
+    "plan_lock_ready",
+    "decision_snapshot_ready",
+    "ledger_ready",
+  ];
+
+  assert.equal(context.reportReadiness_(readyStatus({ data_quality: undefined }), REPORT_DATE, IMAGE_HASH).ready, false);
+  for (const field of requiredQualityFields) {
+    const quality = { ...readyStatus().data_quality, [field]: false };
+    const readiness = context.reportReadiness_(readyStatus({ data_quality: quality }), REPORT_DATE, IMAGE_HASH);
+    assert.equal(readiness.ready, false, field);
+    assert.ok(readiness.reasons.includes(`data quality invalid: ${field}`), field);
+  }
+});
+
 test("reportReadiness_ rejects impossible and out-of-range ISO timestamps", () => {
   const { context } = makeHarness();
   const invalidTimestamps = [
@@ -405,14 +431,48 @@ test("TEST_MODE preserves GitHub dispatch and cooldown state", () => {
   assert.equal(properties.has("LAST_FAILURE_NOTICE_DATE"), false);
 });
 
-test("GitHub dispatch accepts only HTTP 204 and does not persist failed attempts", () => {
+test("GitHub dispatch accepts only HTTP 204 and retries known HTTP failures without cooldown state", () => {
+  let dispatchAttempts = 0;
   const { context, properties } = makeHarness({
     now: "2026-07-16T04:15:00.000Z",
     status: { schema_version: 1, report_date: REPORT_DATE, forecast_ready: false },
-    fetchHandler: (url) => url.includes("api.github.com") ? response({ code: 200 }) : response({ json: { schema_version: 1, report_date: REPORT_DATE, forecast_ready: false } }),
+    fetchHandler: (url) => {
+      if (url.includes("api.github.com")) {
+        dispatchAttempts += 1;
+        return response({ code: 200 });
+      }
+      return response({ json: { schema_version: 1, report_date: REPORT_DATE, forecast_ready: false } });
+    },
   });
   assert.throws(() => context.runAutomation(), /dispatch failed/i);
+  assert.throws(() => context.runAutomation(), /dispatch failed/i);
+  assert.equal(dispatchAttempts, 2);
   assert.equal(properties.has("LAST_FORECAST_DISPATCH_DATE"), false);
+  assert.equal(properties.has("LAST_FORECAST_DISPATCH_ATTEMPT_DATE"), false);
+});
+
+test("an ambiguous dispatch timeout starts cooldown without recording confirmed success", () => {
+  let dispatchAttempts = 0;
+  const { context, calls, properties } = makeHarness({
+    now: "2026-07-16T04:15:00.000Z",
+    status: dispatchStatus(),
+    fetchHandler: (url) => {
+      if (url.includes("api.github.com")) {
+        dispatchAttempts += 1;
+        throw new Error("timed out after GitHub accepted the dispatch");
+      }
+      return response({ json: dispatchStatus() });
+    },
+  });
+
+  assert.throws(() => context.runAutomation(), /timed out after GitHub accepted/);
+  context.runAutomation();
+
+  assert.equal(dispatchAttempts, 1);
+  assert.equal(calls.fetch.filter((call) => call.url.includes("api.github.com")).length, 1);
+  assert.equal(properties.has("LAST_FORECAST_DISPATCH_DATE"), false);
+  assert.equal(properties.get("LAST_FORECAST_DISPATCH_ATTEMPT_DATE"), REPORT_DATE);
+  assert.equal(properties.get("LAST_FORECAST_DISPATCH_ATTEMPT_AT"), String(clockAt(12, 15).nowMs));
 });
 
 test("14:00 rejects yesterday's status without downloading or emailing", () => {
@@ -461,6 +521,24 @@ test("18:00 incomplete state sends one attachment-free failure notice", () => {
   assert.equal(calls.mail[0][3]?.attachments, undefined);
   assert.equal(properties.get("LAST_FAILURE_NOTICE_DATE"), REPORT_DATE);
   assert.equal(calls.fetch.some((call) => call.url.includes("api.github.com")), false);
+});
+
+test("18:00 failure notice includes report timestamp and dashboard without attachments", () => {
+  const generatedAt = "2026-07-16T17:42:00+08:00";
+  const { context, calls } = makeHarness({
+    now: "2026-07-16T10:00:00.000Z",
+    status: dispatchStatus({ generated_at_bjt: generatedAt }),
+  });
+
+  context.runAutomation();
+  context.runAutomation();
+
+  assert.equal(calls.mail.length, 1);
+  assert.match(calls.mail[0][2], new RegExp(generatedAt.replace(/[+]/g, "\\+")));
+  assert.match(calls.mail[0][2], /https:\/\/example\.test\//);
+  assert.match(calls.mail[0][3].htmlBody, new RegExp(generatedAt.replace(/[+]/g, "\\+")));
+  assert.match(calls.mail[0][3].htmlBody, /href="https:\/\/example\.test\/"/);
+  assert.equal(calls.mail[0][3].attachments, undefined);
 });
 
 test("18:00 gives a currently ready normal report priority", () => {
