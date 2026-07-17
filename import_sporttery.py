@@ -241,6 +241,18 @@ def fetch_selling_matches(target_date: date) -> list[dict]:
             raise RuntimeError(
                 "invalid Sporttery match-list response: match day must be an object"
             )
+        business_date = day.get("businessDate")
+        try:
+            parsed_business_date = date.fromisoformat(business_date)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "invalid Sporttery match-list response: businessDate must be YYYY-MM-DD"
+            ) from exc
+        if business_date != parsed_business_date.isoformat():
+            raise RuntimeError(
+                "invalid Sporttery match-list response: businessDate must be YYYY-MM-DD"
+            )
+
         sub_matches = day.get("subMatchList")
         if not isinstance(sub_matches, list):
             raise RuntimeError(
@@ -251,10 +263,23 @@ def fetch_selling_matches(target_date: date) -> list[dict]:
                 raise RuntimeError(
                     "invalid Sporttery match-list response: match must be an object"
                 )
-            if (
-                day.get("businessDate") == target_date.isoformat()
-                and item.get("matchStatus") in {"Selling", "Define"}
+            if business_date != target_date.isoformat():
+                continue
+            match_id = item.get("matchId")
+            if not (
+                (isinstance(match_id, str) and bool(match_id.strip()))
+                or type(match_id) is int
             ):
+                raise RuntimeError(
+                    "invalid Sporttery match-list response: target-day match matchId is required"
+                )
+            for field in ("homeTeam", "awayTeam", "matchStatus"):
+                value = item.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise RuntimeError(
+                        f"invalid Sporttery match-list response: target-day match {field} is required"
+                    )
+            if item.get("matchStatus") in {"Selling", "Define"}:
                 selected.append(item)
     return selected
 

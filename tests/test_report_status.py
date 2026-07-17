@@ -12,7 +12,13 @@ from unittest.mock import patch
 
 import import_sporttery
 from plan_lock import lock_plan
-from report_status import artifact_state, base_status, main, publish_status
+from report_status import (
+    OFFICIAL_FIXTURE_SOURCES,
+    artifact_state,
+    base_status,
+    main,
+    publish_status,
+)
 
 
 BJT = timezone(timedelta(hours=8))
@@ -53,9 +59,10 @@ class ReportStatusTest(unittest.TestCase):
         data.mkdir(parents=True)
         output.mkdir()
         web.mkdir()
-        source_status = {"target_date": REPORT_DATE.isoformat(), "source": "test"}
+        source_status = {"target_date": REPORT_DATE.isoformat(), "source": "竞彩网"}
         if not fixture_ids:
             source_status["fixture_count"] = 0
+            source_status["no_fixtures"] = True
         (data / "source_status.json").write_text(
             json.dumps(source_status),
             encoding="utf-8",
@@ -275,22 +282,52 @@ class ReportStatusTest(unittest.TestCase):
             self.assertEqual(0, state["fixture_count"])
             self.assertEqual(1.0, state["odds_coverage"])
             self.assertTrue(status["decision_snapshot_ready"])
+            self.assertTrue(status["data_quality"]["decision_snapshot_ready"])
+            self.assertEqual("", status["decision_odds_at_bjt"])
             self.assertFalse(status["plan_ready"])
 
-    def test_import_producer_zero_metadata_verifies_a_zero_fixture_day(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.make_artifacts(root, fixture_ids=())
-            with patch.object(import_sporttery, "DATA_DIR", root / "data"):
-                import_sporttery.write_source_status(
-                    "test", REPORT_DATE, fixture_count=0
-                )
+    def test_every_official_source_can_verify_a_zero_fixture_day(self):
+        for source in sorted(OFFICIAL_FIXTURE_SOURCES):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_artifacts(root, fixture_ids=())
+                with patch.object(import_sporttery, "DATA_DIR", root / "data"):
+                    import_sporttery.write_source_status(
+                        source, REPORT_DATE, fixture_count=0
+                    )
 
-            state = artifact_state(root, REPORT_DATE)
+                state = artifact_state(root, REPORT_DATE)
 
-            self.assertTrue(state["fixtures_ready"])
-            self.assertTrue(state["zero_fixture_verified"])
-            self.assertEqual(0, state["fixture_count"])
+                self.assertTrue(state["fixtures_ready"])
+                self.assertTrue(state["zero_fixture_verified"])
+                self.assertEqual(0, state["fixture_count"])
+
+    def test_nonofficial_sources_cannot_verify_a_zero_fixture_day(self):
+        for source in ("ESPN", "test", [], {}):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_artifacts(root, fixture_ids=())
+                source_path = root / "data" / "source_status.json"
+                source_status = json.loads(source_path.read_text(encoding="utf-8"))
+                source_status["source"] = source
+                source_path.write_text(json.dumps(source_status), encoding="utf-8")
+
+                try:
+                    state = artifact_state(root, REPORT_DATE)
+                except TypeError as exc:
+                    self.fail(
+                        f"non-string source must fail closed, not crash: {exc}"
+                    )
+                status = self.publish(root, "decision")
+
+                self.assertTrue(state["fixtures_ready"])
+                self.assertEqual(0, state["fixture_count"])
+                self.assertFalse(state["zero_fixture_verified"])
+                self.assertFalse(status["decision_snapshot_ready"])
+                self.assertFalse(status["data_quality"]["decision_snapshot_ready"])
+                self.assertEqual(0, status["official_fixture_count"])
+                self.assertEqual(0, status["official_odds_count"])
+                self.assertEqual(0.0, status["official_odds_coverage_ratio"])
 
     def test_header_only_fixtures_require_explicit_zero_fixture_source_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -326,6 +363,64 @@ class ReportStatusTest(unittest.TestCase):
             self.assertFalse(state["fixtures_ready"])
             self.assertFalse(state["zero_fixture_verified"])
             self.assertIsNone(state["fixture_count"])
+
+    def test_zero_fixture_proof_rejects_alias_even_with_an_explicit_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root, fixture_ids=())
+            (root / "data" / "source_status.json").write_text(
+                json.dumps({
+                    "target_date": REPORT_DATE.isoformat(),
+                    "source": "竞彩网",
+                    "match_count": 0,
+                    "no_fixtures": True,
+                }),
+                encoding="utf-8",
+            )
+
+            state = artifact_state(root, REPORT_DATE)
+
+            self.assertFalse(state["fixtures_ready"])
+            self.assertFalse(state["zero_fixture_verified"])
+            self.assertIsNone(state["fixture_count"])
+
+    def test_non_object_source_status_does_not_crash_official_counting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            (root / "data" / "source_status.json").write_text(
+                json.dumps(["invalid"]), encoding="utf-8"
+            )
+
+            try:
+                state = artifact_state(root, REPORT_DATE)
+            except AttributeError as exc:
+                self.fail(f"malformed source metadata must fail closed, not crash: {exc}")
+
+            self.assertTrue(state["fixtures_ready"])
+            self.assertEqual(0, state["official_fixture_count"])
+
+    def test_zero_fixture_proof_rejects_canonical_zero_count_without_explicit_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root, fixture_ids=())
+            (root / "data" / "source_status.json").write_text(
+                json.dumps({
+                    "target_date": REPORT_DATE.isoformat(),
+                    "source": "竞彩网",
+                    "fixture_count": 0,
+                }),
+                encoding="utf-8",
+            )
+
+            state = artifact_state(root, REPORT_DATE)
+            status = self.publish(root, "decision")
+
+            self.assertFalse(state["fixtures_ready"])
+            self.assertFalse(state["zero_fixture_verified"])
+            self.assertIsNone(state["fixture_count"])
+            self.assertFalse(status["decision_snapshot_ready"])
+            self.assertFalse(status["data_quality"]["decision_snapshot_ready"])
 
     def test_zero_fixture_proof_rejects_a_count_that_contradicts_the_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -401,6 +496,39 @@ class ReportStatusTest(unittest.TestCase):
             self.assertEqual(
                 status["odds_coverage"], status["official_odds_coverage_ratio"]
             )
+
+    def test_espn_only_fixtures_are_not_reported_as_official(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            source_path = root / "data" / "source_status.json"
+            source_status = json.loads(source_path.read_text(encoding="utf-8"))
+            source_status["source"] = "ESPN"
+            source_path.write_text(json.dumps(source_status), encoding="utf-8")
+
+            status = self.publish(root, "forecast")
+
+            self.assertEqual(2, status["fixture_count"])
+            self.assertEqual(2, status["odds_covered_fixture_count"])
+            self.assertEqual(0, status["official_fixture_count"])
+            self.assertEqual(0, status["official_odds_count"])
+            self.assertEqual(0.0, status["official_odds_coverage_ratio"])
+
+    def test_wrong_date_official_source_metadata_cannot_mark_rows_official(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            source_path = root / "data" / "source_status.json"
+            source_status = json.loads(source_path.read_text(encoding="utf-8"))
+            source_status["target_date"] = "2026-07-15"
+            source_path.write_text(json.dumps(source_status), encoding="utf-8")
+
+            status = self.publish(root, "forecast")
+
+            self.assertEqual(2, status["fixture_count"])
+            self.assertEqual(0, status["official_fixture_count"])
+            self.assertEqual(0, status["official_odds_count"])
+            self.assertEqual(0.0, status["official_odds_coverage_ratio"])
 
     def test_null_and_blank_odds_do_not_count_as_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -37,6 +37,7 @@ LEDGER_REQUIRED_FIELDS = frozenset(
         "probability", "odds", "stake", "status", "profit",
     }
 )
+OFFICIAL_FIXTURE_SOURCES = frozenset({"竞彩网", "中国足彩网", "sporttery", "zgzcw"})
 
 
 def base_status(report_date: date) -> dict:
@@ -119,13 +120,34 @@ def _source_fixture_count(
         type(no_fixtures) is not bool or no_fixtures != (declared_count == 0)
     ):
         return False, None
-    if (
-        declared_count == 0
-        and no_fixtures is None
-        and "fixture_count" not in source_status
+    if declared_count == 0 and (
+        "fixture_count" not in source_status or no_fixtures is not True
     ):
         return False, None
     return True, declared_count
+
+
+def _official_source_for_date(source_status: object, report_date: date) -> bool:
+    source = source_status.get("source") if isinstance(source_status, dict) else None
+    return (
+        isinstance(source_status, dict)
+        and source_status.get("target_date") == report_date.isoformat()
+        and isinstance(source, str)
+        and source in OFFICIAL_FIXTURE_SOURCES
+    )
+
+
+def _official_fixture_rows(
+    fixtures: list[dict], source_status: object, report_date: date
+) -> list[dict]:
+    if not _official_source_for_date(source_status, report_date):
+        return []
+    return [
+        row
+        for row in fixtures
+        if row.get("pool_status") != "ESPN"
+        and not row.get("match_id", "").lower().startswith("espn-")
+    ]
 
 
 def _csv_with_header(path: Path, required_fields: frozenset[str]) -> tuple[bool, int]:
@@ -186,8 +208,15 @@ def artifact_state(root: Path, report_date: date) -> dict:
         data / "fixtures.csv", report_date, source_status
     )
     fixture_count = len(fixtures) if fixtures_ready else None
-    zero_fixture_verified = fixtures_ready and fixture_count == 0
+    zero_fixture_verified = (
+        fixtures_ready
+        and fixture_count == 0
+        and _official_source_for_date(source_status, report_date)
+    )
     fixture_ids = [row.get("match_id", "") for row in fixtures]
+    official_fixtures = _official_fixture_rows(fixtures, source_status, report_date)
+    official_fixture_ids = [row.get("match_id", "") for row in official_fixtures]
+    official_fixture_count = len(official_fixtures) if fixtures_ready else None
 
     odds_payload = _read_json(data / f"sporttery_odds_{date_text}.json")
     odds_ready = isinstance(odds_payload, dict)
@@ -196,12 +225,25 @@ def artifact_state(root: Path, report_date: date) -> dict:
         for match_id in fixture_ids
         if odds_ready and _nonempty_market(odds_payload.get(match_id))
     )
+    official_covered = sum(
+        1
+        for match_id in official_fixture_ids
+        if odds_ready and _nonempty_market(odds_payload.get(match_id))
+    )
     if fixture_count is None:
         odds_coverage = None
     elif fixture_count == 0:
         odds_coverage = 1.0
     else:
         odds_coverage = covered / fixture_count
+    if official_fixture_count is None:
+        official_odds_coverage = None
+    elif official_fixture_count:
+        official_odds_coverage = official_covered / official_fixture_count
+    elif zero_fixture_verified:
+        official_odds_coverage = 1.0
+    else:
+        official_odds_coverage = 0.0
 
     predictions_ready, prediction_count = _csv_with_header(
         output / f"predictions_{date_text}.csv", PREDICTION_REQUIRED_FIELDS
@@ -218,6 +260,7 @@ def artifact_state(root: Path, report_date: date) -> dict:
     )
     lock_payload = read_valid_lock(root, report_date)
     snapshot_ready, decision_odds_at_bjt = _matching_decision_snapshot(root, report_date)
+    snapshot_ready = snapshot_ready or zero_fixture_verified
     ledger_ready, ledger_count = _csv_with_header(
         output / "betting_ledger.csv", LEDGER_REQUIRED_FIELDS
     )
@@ -230,9 +273,12 @@ def artifact_state(root: Path, report_date: date) -> dict:
         "fixtures_ready": fixtures_ready,
         "zero_fixture_verified": zero_fixture_verified,
         "fixture_count": fixture_count,
+        "official_fixture_count": official_fixture_count,
         "odds_ready": odds_ready,
         "odds_covered_fixture_count": covered,
+        "official_odds_count": official_covered,
         "odds_coverage": odds_coverage,
+        "official_odds_coverage_ratio": official_odds_coverage,
         "predictions_ready": predictions_ready,
         "prediction_count": prediction_count,
         "plan_csv_ready": plan_csv_ready,
@@ -331,10 +377,7 @@ def publish_status(
             "decision_ready", "site_ready", "image_ready",
         )
     )
-    snapshot_ready = (
-        state["decision_snapshot_ready"]
-        or (state["fixtures_ready"] and state["fixture_count"] == 0)
-    )
+    snapshot_ready = state["decision_snapshot_ready"]
     plan_ready = state["plan_lock_ready"] and state["plan_csv_ready"]
     if phase == "forecast":
         status["forecast_ready"] = forecast_ready
@@ -388,14 +431,14 @@ def publish_status(
             "image_sha256": state["image_sha256"],
             "source_commit_sha": source_commit_sha,
             "fixture_count": state["fixture_count"],
-            "official_fixture_count": state["fixture_count"],
+            "official_fixture_count": state["official_fixture_count"],
             "prediction_count": state["prediction_count"],
             "plan_count": state["plan_count"],
             "ledger_count": state["ledger_count"],
             "odds_covered_fixture_count": state["odds_covered_fixture_count"],
-            "official_odds_count": state["odds_covered_fixture_count"],
+            "official_odds_count": state["official_odds_count"],
             "odds_coverage": state["odds_coverage"],
-            "official_odds_coverage_ratio": state["odds_coverage"],
+            "official_odds_coverage_ratio": state["official_odds_coverage_ratio"],
             "data_quality": _data_quality(state),
             "source_status": state["source_status"],
         }

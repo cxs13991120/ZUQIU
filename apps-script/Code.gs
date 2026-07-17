@@ -3,6 +3,7 @@ var FORECAST_WORKFLOW_ = "daily-forecast.yml";
 var REFRESH_WORKFLOW_ = "draw-alert-refresh.yml";
 var SETTLEMENT_WORKFLOW_ = "noon-settlement.yml";
 var DISPATCH_COOLDOWN_MS_ = 30 * 60 * 1000;
+var OFFICIAL_FIXTURE_SOURCES_ = ["竞彩网", "中国足彩网", "sporttery", "zgzcw"];
 var REQUIRED_REPORT_QUALITY_FIELDS_ = [
   "predictions_ready",
   "plan_csv_ready",
@@ -88,6 +89,18 @@ function timestampMillis_(value) {
   return instantMillis * 1000 + Number(fraction || "0");
 }
 
+function verifiedZeroFixtureDay_(status, expectedDate) {
+  var source = status && status.source_status;
+  var quality = status && status.data_quality;
+  return status && status.fixture_count === 0 &&
+    source && typeof source === "object" && !Array.isArray(source) &&
+    OFFICIAL_FIXTURE_SOURCES_.indexOf(source.source) !== -1 &&
+    source.target_date === expectedDate && source.fixture_count === 0 && source.no_fixtures === true &&
+    quality && typeof quality === "object" && !Array.isArray(quality) &&
+    quality.fixtures_ready === true && quality.zero_fixture_verified === true &&
+    status.decision_snapshot_ready === true && quality.decision_snapshot_ready === true;
+}
+
 function missingReasons_(status, expectedDate) {
   var reasons = [];
   if (!status || typeof status !== "object" || Array.isArray(status)) {
@@ -105,8 +118,12 @@ function missingReasons_(status, expectedDate) {
   var generatedAt = timestampMillis_(status.generated_at_bjt);
   var decisionAt = timestampMillis_(status.decision_odds_at_bjt);
   var lockedAt = timestampMillis_(status.plan_locked_at_bjt);
+  var zeroFixtureDay = verifiedZeroFixtureDay_(status, expectedDate);
   if (!isFinite(generatedAt)) reasons.push("generated timestamp invalid");
-  if (!isFinite(decisionAt)) reasons.push("decision timestamp invalid");
+  if (!zeroFixtureDay && !isFinite(decisionAt)) reasons.push("decision timestamp invalid");
+  if (zeroFixtureDay && status.decision_odds_at_bjt !== "" && (
+      typeof status.decision_odds_at_bjt !== "string" || !isFinite(decisionAt)
+  )) reasons.push("decision timestamp invalid");
   if (!isFinite(lockedAt)) reasons.push("plan lock timestamp invalid");
   if (isFinite(decisionAt) && isFinite(lockedAt) && decisionAt > lockedAt) reasons.push("decision timestamp is later than plan lock");
   if (isFinite(decisionAt) && isFinite(generatedAt) && decisionAt > generatedAt) reasons.push("decision timestamp is later than report generation");
@@ -302,6 +319,15 @@ function sendFailureNotice_(properties, clock, reasons, status) {
   }
 }
 
+function uniqueReasons_(reasons) {
+  var seen = {};
+  return reasons.filter(function (reason) {
+    if (seen[reason]) return false;
+    seen[reason] = true;
+    return true;
+  });
+}
+
 function tryVerifiedSend_(properties, clock, status) {
   var preliminary = reportReadiness_(status, clock.date, status && status.image_sha256);
   if (!preliminary.ready) return { sent: false, reasons: preliminary.reasons };
@@ -332,7 +358,7 @@ function runAutomation() {
     var status = fetched.status;
     if (clock.minutes >= 18 * 60) {
       var finalAttempt = status ? tryVerifiedSend_(properties, clock, status) : { sent: false, reasons: fetched.reasons };
-      if (!finalAttempt.sent) sendFailureNotice_(properties, clock, fetched.reasons.concat(finalAttempt.reasons), status);
+      if (!finalAttempt.sent) sendFailureNotice_(properties, clock, uniqueReasons_(fetched.reasons.concat(finalAttempt.reasons)), status);
       return;
     }
 

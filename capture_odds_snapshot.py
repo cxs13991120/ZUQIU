@@ -1,9 +1,12 @@
 import argparse
+import csv
 import json
+import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from import_sporttery import fetch_zgzcw_matches
+from report_status import OFFICIAL_FIXTURE_SOURCES
 
 
 ROOT = Path(__file__).resolve().parent
@@ -94,13 +97,58 @@ def _kickoff_time(value) -> datetime | None:
     return _beijing_time(parsed)
 
 
+def _verified_zero_fixture_day(target_date: date) -> bool:
+    try:
+        payload = json.loads(
+            (ROOT / "data" / "source_status.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+    source = payload.get("source") if isinstance(payload, dict) else None
+    metadata_verified = (
+        isinstance(payload, dict)
+        and isinstance(source, str)
+        and source in OFFICIAL_FIXTURE_SOURCES
+        and payload.get("target_date") == target_date.isoformat()
+        and type(payload.get("fixture_count")) is int
+        and payload["fixture_count"] == 0
+        and payload.get("no_fixtures") is True
+    )
+    if not metadata_verified:
+        return False
+    try:
+        with (ROOT / "data" / "fixtures.csv").open(
+            "r", encoding="utf-8-sig", newline=""
+        ) as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "date" not in reader.fieldnames:
+                return False
+            return not any(
+                row.get("date") == target_date.isoformat() for row in reader
+            )
+    except (OSError, csv.Error):
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture a pre-match odds snapshot.")
     parser.add_argument("--date", default=datetime.now(BEIJING).date().isoformat())
     parser.add_argument("--phase", choices=sorted(CAPTURE_PHASES), default="monitoring")
     args = parser.parse_args()
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
-    capture(target_date, phase=args.phase)
+    output = capture(target_date, phase=args.phase)
+    if args.phase == "decision":
+        snapshot_written = (
+            isinstance(output, Path)
+            and output.is_file()
+            and output.stat().st_size > 0
+        )
+        if not snapshot_written and not _verified_zero_fixture_day(target_date):
+            print(
+                "Decision snapshot capture failed: no non-empty snapshot and no verified zero-fixture proof.",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 

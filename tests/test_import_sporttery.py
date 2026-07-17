@@ -14,6 +14,28 @@ TARGET_DATE = date(2026, 7, 16)
 
 
 class ImportSportteryResponseValidationTest(unittest.TestCase):
+    def valid_match(self, **overrides):
+        return {
+            "matchId": "001",
+            "homeTeam": "Home",
+            "awayTeam": "Away",
+            "matchStatus": "Selling",
+            **overrides,
+        }
+
+    def assert_invalid_target_match(self, payload, field):
+        with patch.object(import_sporttery, "fetch_json", return_value=payload):
+            try:
+                import_sporttery.fetch_selling_matches(TARGET_DATE)
+            except RuntimeError as exc:
+                self.assertRegex(str(exc), field)
+            except Exception as exc:
+                self.fail(
+                    f"invalid {field} must raise RuntimeError, got {type(exc).__name__}"
+                )
+            else:
+                self.fail(f"invalid {field} did not raise RuntimeError")
+
     def test_fetch_selling_matches_rejects_malformed_success_payloads(self):
         malformed_payloads = {
             "non-object payload": [],
@@ -64,6 +86,121 @@ class ImportSportteryResponseValidationTest(unittest.TestCase):
     def test_fetch_selling_matches_accepts_an_explicit_empty_schedule(self):
         payload = {"errorCode": 0, "value": {"matchInfoList": []}}
 
+        with patch.object(import_sporttery, "fetch_json", return_value=payload):
+            self.assertEqual([], import_sporttery.fetch_selling_matches(TARGET_DATE))
+
+    def test_fetch_selling_matches_requires_an_exact_business_date_for_every_day(self):
+        invalid_dates = (None, "", "2026-7-16", "2026-02-30")
+        for business_date in invalid_dates:
+            payload = {
+                "errorCode": 0,
+                "value": {
+                    "matchInfoList": [{
+                        "businessDate": business_date,
+                        "subMatchList": [],
+                    }]
+                },
+            }
+            with self.subTest(business_date=business_date), patch.object(
+                import_sporttery, "fetch_json", return_value=payload
+            ):
+                with self.assertRaisesRegex(RuntimeError, "businessDate"):
+                    import_sporttery.fetch_selling_matches(TARGET_DATE)
+
+    def test_fetch_selling_matches_rejects_target_day_matches_missing_identity_fields(self):
+        for field in ("matchId", "homeTeam", "awayTeam", "matchStatus"):
+            match = self.valid_match()
+            match.pop(field)
+            payload = {
+                "errorCode": 0,
+                "value": {
+                    "matchInfoList": [{
+                        "businessDate": TARGET_DATE.isoformat(),
+                        "subMatchList": [match],
+                    }]
+                },
+            }
+            with self.subTest(field=field), patch.object(
+                import_sporttery, "fetch_json", return_value=payload
+            ):
+                with self.assertRaisesRegex(RuntimeError, field):
+                    import_sporttery.fetch_selling_matches(TARGET_DATE)
+
+    def test_fetch_selling_matches_rejects_invalid_target_day_string_field_types(self):
+        for field in ("homeTeam", "awayTeam", "matchStatus"):
+            for value in (None, "", "  ", [], {}, True, 7):
+                match = self.valid_match(**{field: value})
+                payload = {
+                    "errorCode": 0,
+                    "value": {
+                        "matchInfoList": [{
+                            "businessDate": TARGET_DATE.isoformat(),
+                            "subMatchList": [match],
+                        }]
+                    },
+                }
+                with self.subTest(field=field, value=value):
+                    self.assert_invalid_target_match(payload, field)
+
+    def test_fetch_selling_matches_rejects_invalid_target_day_match_id_types(self):
+        for value in (None, "", "  ", True, False, [], {}, 1.5):
+            match = self.valid_match(matchId=value)
+            payload = {
+                "errorCode": 0,
+                "value": {
+                    "matchInfoList": [{
+                        "businessDate": TARGET_DATE.isoformat(),
+                        "subMatchList": [match],
+                    }]
+                },
+            }
+            with self.subTest(value=value):
+                self.assert_invalid_target_match(payload, "matchId")
+
+    def test_fetch_selling_matches_accepts_an_integer_match_id(self):
+        match = self.valid_match(matchId=123456)
+        payload = {
+            "errorCode": 0,
+            "value": {
+                "matchInfoList": [{
+                    "businessDate": TARGET_DATE.isoformat(),
+                    "subMatchList": [match],
+                }]
+            },
+        }
+        with patch.object(import_sporttery, "fetch_json", return_value=payload):
+            self.assertEqual([match], import_sporttery.fetch_selling_matches(TARGET_DATE))
+
+    def test_fetch_selling_matches_accepts_valid_and_explicit_target_day_matches(self):
+        match = self.valid_match()
+        payload = {
+            "errorCode": 0,
+            "value": {
+                "matchInfoList": [
+                    {
+                        "businessDate": TARGET_DATE.isoformat(),
+                        "subMatchList": [match],
+                    },
+                    {
+                        "businessDate": "2026-07-17",
+                        "subMatchList": [],
+                    },
+                ]
+            },
+        }
+        with patch.object(import_sporttery, "fetch_json", return_value=payload):
+            self.assertEqual([match], import_sporttery.fetch_selling_matches(TARGET_DATE))
+
+    def test_fetch_selling_matches_accepts_explicit_empty_target_day_submatches(self):
+        payload = {
+            "errorCode": 0,
+            "value": {
+                "matchInfoList": [{
+                    "businessDate": TARGET_DATE.isoformat(),
+                    "subMatchList": [],
+                }]
+            },
+        }
         with patch.object(import_sporttery, "fetch_json", return_value=payload):
             self.assertEqual([], import_sporttery.fetch_selling_matches(TARGET_DATE))
 

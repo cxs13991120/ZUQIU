@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,6 +155,7 @@ class WorkflowScheduleTest(unittest.TestCase):
     def write_workflow_writer_stubs(self, root):
         shutil.copy2(ROOT / "plan_lock.py", root / "plan_lock.py")
         stub = '''import json
+import os
 import sys
 from pathlib import Path
 
@@ -163,6 +165,9 @@ target_date = args[args.index("--date") + 1]
 phase = args[args.index("--phase") + 1] if "--phase" in args else ""
 with Path("writer-calls.log").open("a", encoding="utf-8") as handle:
     handle.write(name + (":" + phase if phase else "") + "\\n")
+
+if name == "capture_odds_snapshot.py" and os.environ.get("FAIL_CAPTURE") == "true":
+    raise SystemExit(7)
 
 Path("data").mkdir(exist_ok=True)
 Path("output").mkdir(exist_ok=True)
@@ -495,6 +500,49 @@ elif name == "generate_betting_plan.py":
             self.assertEqual(expected_initial_calls, self.writer_calls(root))
             self.assertEqual(plan_before, plan_path.read_bytes())
             self.assertEqual(odds_before, odds_path.read_bytes())
+
+    def test_decision_capture_failure_stops_before_prediction_plan_and_lock(self):
+        body = self.multiline_step_body(
+            self.read_workflow("draw-alert-refresh.yml"),
+            "refresh",
+            "Refresh required decision plan",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_workflow_writer_stubs(root)
+            with patch.dict(os.environ, {"FAIL_CAPTURE": "true"}):
+                result = self.run_workflow_body(body, root)
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual(
+                ["import_sporttery.py", "capture_odds_snapshot.py:decision"],
+                self.writer_calls(root),
+            )
+            self.assertFalse((root / "output" / "plan_lock_2026-07-16.json").exists())
+
+    def test_decision_zero_fixture_capture_success_continues_through_plan_lock(self):
+        body = self.multiline_step_body(
+            self.read_workflow("draw-alert-refresh.yml"),
+            "refresh",
+            "Refresh required decision plan",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_workflow_writer_stubs(root)
+
+            result = self.run_workflow_body(body, root)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                [
+                    "import_sporttery.py",
+                    "capture_odds_snapshot.py:decision",
+                    "predict_today.py",
+                    "generate_betting_plan.py",
+                ],
+                self.writer_calls(root),
+            )
+            self.assertTrue((root / "output" / "plan_lock_2026-07-16.json").is_file())
 
     def test_invalid_existing_lock_fails_both_plan_workflows_before_writers(self):
         guarded_steps = (

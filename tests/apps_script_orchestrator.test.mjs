@@ -40,6 +40,26 @@ function readyStatus(overrides = {}) {
   };
 }
 
+function zeroFixtureReadyStatus(overrides = {}) {
+  return readyStatus({
+    fixture_count: 0,
+    decision_odds_at_bjt: "",
+    source_status: {
+      source: "竞彩网",
+      target_date: REPORT_DATE,
+      fixture_count: 0,
+      no_fixtures: true,
+    },
+    data_quality: {
+      ...readyStatus().data_quality,
+      fixtures_ready: true,
+      zero_fixture_verified: true,
+      decision_snapshot_ready: true,
+    },
+    ...overrides,
+  });
+}
+
 function dispatchStatus(overrides = {}) {
   return {
     schema_version: 1,
@@ -280,6 +300,42 @@ test("reportReadiness_ accepts only the complete current report with exact hash"
   const { context } = makeHarness();
   assert.equal(context.reportReadiness_(readyStatus(), REPORT_DATE, IMAGE_HASH).ready, true);
   assert.equal(context.reportReadiness_(readyStatus(), REPORT_DATE, "0".repeat(64)).ready, false);
+});
+
+test("reportReadiness_ accepts a strictly proven zero-fixture report without decision timestamp", () => {
+  const { context } = makeHarness();
+  assert.equal(context.reportReadiness_(zeroFixtureReadyStatus(), REPORT_DATE, IMAGE_HASH).ready, true);
+  assert.equal(context.reportReadiness_(zeroFixtureReadyStatus({
+    decision_odds_at_bjt: "2026-07-16T13:30:00+08:00",
+  }), REPORT_DATE, IMAGE_HASH).ready, true);
+});
+
+test("reportReadiness_ rejects forged or incomplete zero-fixture timestamp exemptions", () => {
+  const { context } = makeHarness();
+  const invalidStatuses = [
+    zeroFixtureReadyStatus({ fixture_count: 1 }),
+    zeroFixtureReadyStatus({ source_status: { source: "竞彩网", target_date: REPORT_DATE, fixture_count: 0 } }),
+    zeroFixtureReadyStatus({ source_status: { source: "竞彩网", target_date: "2026-07-15", fixture_count: 0, no_fixtures: true } }),
+    zeroFixtureReadyStatus({ source_status: { source: "ESPN", target_date: REPORT_DATE, fixture_count: 0, no_fixtures: true } }),
+    zeroFixtureReadyStatus({ source_status: { source: "test", target_date: REPORT_DATE, fixture_count: 0, no_fixtures: true } }),
+    zeroFixtureReadyStatus({ data_quality: { ...zeroFixtureReadyStatus().data_quality, zero_fixture_verified: false } }),
+    zeroFixtureReadyStatus({ decision_snapshot_ready: false }),
+    zeroFixtureReadyStatus({ data_quality: { ...zeroFixtureReadyStatus().data_quality, decision_snapshot_ready: false } }),
+  ];
+  for (const status of invalidStatuses) {
+    assert.equal(context.reportReadiness_(status, REPORT_DATE, IMAGE_HASH).ready, false);
+  }
+});
+
+test("zero-fixture decision timestamp accepts only empty text or valid ISO text", () => {
+  const { context } = makeHarness();
+  const invalidValues = [undefined, null, 0, false, {}, []];
+  for (const value of invalidValues) {
+    const status = zeroFixtureReadyStatus({ decision_odds_at_bjt: value });
+    const readiness = context.reportReadiness_(status, REPORT_DATE, IMAGE_HASH);
+    assert.equal(readiness.ready, false, String(value));
+    assert.ok(readiness.reasons.includes("decision timestamp invalid"), String(value));
+  }
 });
 
 test("reportReadiness_ fails closed for every required contract field", () => {
@@ -559,6 +615,7 @@ test("18:00 treats malformed status JSON as incomplete and records the reason", 
   context.runAutomation();
   assert.equal(calls.mail.length, 1);
   assert.match(calls.mail[0][2], /status fetch\/parse failed/);
+  assert.equal(calls.mail[0][2].match(/status fetch\/parse failed/g)?.length, 1);
   assert.equal(properties.get("LAST_FAILURE_NOTICE_DATE"), REPORT_DATE);
 });
 
