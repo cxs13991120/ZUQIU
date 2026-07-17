@@ -88,3 +88,64 @@ Implementation commit: `4043619` (`fix: harden decision snapshot reliability`).
 ### Concerns
 
 No code concerns found.
+
+## Remaining Review Finding Fix
+
+### Files Changed
+
+- `report_status.py`: require a matching decision snapshot to contain a nonempty `matches` list.
+- `tests/test_report_status.py`: add RED coverage for missing, non-list, and empty `matches`; preserve valid producer and verified zero-fixture behavior.
+- `.superpowers/sdd/task-2-report.md`: append this evidence.
+
+### RED Evidence
+
+Command:
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_report_status.ReportStatusTest.test_matching_decision_snapshot_requires_a_nonempty_matches_list -v
+```
+
+Result: exit code 1. One test ran with three expected failures: matching date/phase snapshots with `matches: null`, non-list `matches`, and `matches: []` each incorrectly returned `(True, "2026-07-16T13:30:00+08:00")`.
+
+### GREEN Evidence
+
+Commands and exact results:
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_report_status -v
+Ran 41 tests in 0.974s
+OK
+exit code 0
+
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_capture_odds_snapshot -v
+Ran 15 tests in 0.154s
+OK
+exit code 0
+
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_official_market_import tests.test_value_strategy -v
+Ran 11 tests in 0.034s
+OK
+exit code 0
+
+\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m py_compile report_status.py tests/test_report_status.py capture_odds_snapshot.py tests/test_capture_odds_snapshot.py import_sporttery.py tests/test_official_market_import.py tests/test_value_strategy.py
+exit code 0
+
+git diff --check
+exit code 0
+```
+
+The valid producer payload with at least one match remains ready. An officially verified zero-fixture day remains the only empty-day readiness path and keeps `decision_odds_at_bjt` blank.
+
+### Commit
+
+Implementation commit: `de347035d39c0eaa93aec628c5bd5cd321af825c` (`fix: require nonempty decision snapshot matches`).
+
+### Self-Review
+
+- The shared zero-fixture proof is unchanged; it remains the separate readiness fallback in `artifact_state`.
+- Malformed or empty snapshots no longer supply a decision timestamp.
+- No Phase 1 contracts or unrelated files were changed.
+
+### Concerns
+
+No code concerns found.
