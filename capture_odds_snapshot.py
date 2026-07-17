@@ -4,7 +4,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from import_sporttery import fetch_zgzcw_matches
+from import_sporttery import fetch_zgzcw_matches, single_eligibility
 from report_status import verified_zero_fixture_day
 
 
@@ -21,11 +21,16 @@ def capture(
     *,
     phase: str = "monitoring",
     captured_at: datetime | None = None,
+    matches: list[dict] | None = None,
+    odds_by_match: dict[str, dict] | None = None,
 ) -> Path | None:
     if phase not in CAPTURE_PHASES:
         raise ValueError(f"unsupported capture phase: {phase}")
     captured_at = _beijing_time(captured_at or datetime.now(BEIJING))
-    matches = fetch_zgzcw_matches(target_date)
+    if matches is None:
+        matches = fetch_zgzcw_matches(target_date)
+    if odds_by_match is None:
+        odds_by_match = _load_odds(target_date)
     normalized_matches = []
     for item in matches:
         if not item.get("homeTeam") or not item.get("awayTeam"):
@@ -41,17 +46,31 @@ def capture(
             )
             if phase == "monitoring" and minutes_to_kickoff <= 60:
                 match_phase = "pre_kickoff"
+        match_id = str(item.get("matchId", ""))
+        odds = odds_by_match.get(match_id, {})
+        if not isinstance(odds, dict):
+            odds = {}
+        had = odds.get("had", {})
+        if not isinstance(had, dict):
+            had = {}
         normalized_matches.append(
             {
+                "match_id": match_id,
                 "team_a": item.get("homeTeam", ""),
                 "team_b": item.get("awayTeam", ""),
                 "match_num": item.get("matchNumStr", ""),
                 "kickoff_at": item.get("kickoff_at", ""),
                 "capture_phase": match_phase,
                 "minutes_to_kickoff": minutes_to_kickoff,
-                "h": item.get("h", ""),
-                "d": item.get("d", ""),
-                "a": item.get("a", ""),
+                "markets": {
+                    "had": had,
+                    "hhad": odds.get("hhad", {}),
+                    "ttg": odds.get("ttg", {}),
+                },
+                "single_eligibility": single_eligibility(item),
+                "h": item.get("h", "") or had.get("h", ""),
+                "d": item.get("d", "") or had.get("d", ""),
+                "a": item.get("a", "") or had.get("a", ""),
                 "market_h": item.get("market_h", ""),
                 "market_d": item.get("market_d", ""),
                 "market_a": item.get("market_a", ""),
@@ -67,7 +86,7 @@ def capture(
         "source": "zgzcw",
         "matches": normalized_matches,
     }
-    if not payload["matches"]:
+    if not payload["matches"] and matches:
         print("No Sporttery matches available for this snapshot.")
         return None
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -83,6 +102,17 @@ def _beijing_time(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=BEIJING)
     return value.astimezone(BEIJING)
+
+
+def _load_odds(target_date: date) -> dict[str, dict]:
+    path = ROOT / "data" / f"sporttery_odds_{target_date.isoformat()}.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _kickoff_time(value) -> datetime | None:

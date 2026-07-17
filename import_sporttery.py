@@ -36,6 +36,11 @@ CRS_KEYS = [
 ]
 TTG_KEYS = [f"s{index}" for index in range(8)]
 HAFU_KEYS = ["hh", "hd", "ha", "dh", "dd", "da", "ah", "ad", "aa"]
+SINGLE_ELIGIBILITY_KEYS = {
+    "had": "isSingleHad",
+    "hhad": "isSingleHhad",
+    "ttg": "isSingleTtg",
+}
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     "Referer": "https://www.sporttery.cn/jc/zqsgkj/",
@@ -344,6 +349,19 @@ def latest_odds_record(records: list[dict]) -> dict:
     return records[0]
 
 
+def is_single_eligible(value) -> bool:
+    return value is True or (
+        isinstance(value, str) and value.strip().lower() in {"true", "1", "yes"}
+    )
+
+
+def single_eligibility(item: dict) -> dict[str, bool]:
+    return {
+        market: is_single_eligible(item.get(key))
+        for market, key in SINGLE_ELIGIBILITY_KEYS.items()
+    }
+
+
 def fetch_odds(match_id: str) -> dict:
     params = {"matchId": match_id, "clientCode": "3001"}
     url = ODDS_URL + "?" + urllib.parse.urlencode(params)
@@ -422,7 +440,9 @@ def attach_professional_market(matches: list[dict], market_matches: list[dict]) 
         row["market_d"] = market.get("market_d", row.get("market_d", ""))
         row["market_a"] = market.get("market_a", row.get("market_a", ""))
         row["analysis_source"] = "中国足彩网专业欧赔市场" if all(row.get(key) for key in ("market_h", "market_d", "market_a")) else "竞彩足球市场"
-        row["isSingleHad"] = bool(market.get("isSingleHad", row.get("isSingleHad", False)))
+        for _, key in SINGLE_ELIGIBILITY_KEYS.items():
+            value = row[key] if key in row else market.get(key)
+            row[key] = is_single_eligible(value)
         enriched.append(row)
     return enriched
 
@@ -445,6 +465,8 @@ def write_fixtures(matches: list[dict], target_date: date) -> Path:
         "market_odds_b",
         "analysis_source",
         "is_single_had",
+        "is_single_hhad",
+        "is_single_ttg",
         "match_num",
         "match_id",
         "pool_status",
@@ -453,6 +475,7 @@ def write_fixtures(matches: list[dict], target_date: date) -> Path:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
         for item in matches:
+            eligibility = single_eligibility(item)
             writer.writerow(
                 {
                     "date": target_date.isoformat(),
@@ -469,7 +492,9 @@ def write_fixtures(matches: list[dict], target_date: date) -> Path:
                     "market_odds_draw": item.get("market_d", ""),
                     "market_odds_b": item.get("market_a", ""),
                     "analysis_source": item.get("analysis_source", "竞彩足球市场"),
-                    "is_single_had": "true" if item.get("isSingleHad") else "false",
+                    "is_single_had": "true" if eligibility["had"] else "false",
+                    "is_single_hhad": "true" if eligibility["hhad"] else "false",
+                    "is_single_ttg": "true" if eligibility["ttg"] else "false",
                     "match_num": match_number(item),
                     "match_id": item.get("matchId", ""),
                     "pool_status": item.get("poolStatus", item.get("matchStatus", "")),

@@ -1,10 +1,11 @@
 import json
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import capture_odds_snapshot as snapshot
 import generate_betting_plan as strategy
 from import_sporttery import ZgzcwMatchParser
 
@@ -165,6 +166,84 @@ class ValueStrategyTest(unittest.TestCase):
         self.assertEqual([], plan)
         self.assertEqual(1, len(observations))
         self.assertEqual(0, observations[0]["stake"])
+
+
+class DecisionSnapshotTest(unittest.TestCase):
+    def test_decision_snapshot_persists_official_markets_and_eligibility(self):
+        captured_at = datetime(2026, 7, 12, 13, 30, tzinfo=timezone(timedelta(hours=8)))
+        matches = [{
+            "matchId": "001",
+            "matchNumStr": "001",
+            "homeTeam": "Home",
+            "awayTeam": "Away",
+            "kickoff_at": "2026-07-12 20:00",
+            "isSingleHad": True,
+            "isSingleHhad": "yes",
+            "isSingleTtg": "0",
+        }]
+        odds_by_match = {
+            "001": {
+                "had": {"h": "2.0", "d": "3.2", "a": "4.0"},
+                "hhad": {"h": "2.5", "d": "3.0", "a": "2.8"},
+                "ttg": {"s0": "7.0"},
+            }
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(snapshot, "SNAPSHOT_DIR", Path(folder)):
+                output = snapshot.capture(
+                    date(2026, 7, 12),
+                    phase="decision",
+                    captured_at=captured_at,
+                    matches=matches,
+                    odds_by_match=odds_by_match,
+                )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(captured_at.isoformat(), payload["captured_at"])
+        self.assertEqual("decision", payload["capture_phase"])
+        self.assertEqual("001", payload["matches"][0]["match_id"])
+        self.assertEqual(odds_by_match["001"], payload["matches"][0]["markets"])
+        self.assertEqual(
+            {"had": True, "hhad": True, "ttg": False},
+            payload["matches"][0]["single_eligibility"],
+        )
+
+    def test_snapshot_ignores_started_matches(self):
+        captured_at = datetime(2026, 7, 12, 13, 30, tzinfo=timezone(timedelta(hours=8)))
+        matches = [
+            {"matchId": "started", "homeTeam": "A", "awayTeam": "B", "kickoff_at": "2026-07-12 13:00"},
+            {"matchId": "future", "homeTeam": "C", "awayTeam": "D", "kickoff_at": "2026-07-12 20:00"},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(snapshot, "SNAPSHOT_DIR", Path(folder)):
+                output = snapshot.capture(
+                    date(2026, 7, 12),
+                    captured_at=captured_at,
+                    matches=matches,
+                    odds_by_match={},
+                )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(["future"], [match["match_id"] for match in payload["matches"]])
+
+    def test_zero_official_fixtures_write_an_explicit_snapshot(self):
+        captured_at = datetime(2026, 7, 12, 13, 30, tzinfo=timezone(timedelta(hours=8)))
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(snapshot, "SNAPSHOT_DIR", Path(folder)):
+                output = snapshot.capture(
+                    date(2026, 7, 12),
+                    phase="decision",
+                    captured_at=captured_at,
+                    matches=[],
+                    odds_by_match={},
+                )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual([], payload["matches"])
+        self.assertEqual(captured_at.isoformat(), payload["captured_at"])
 
 
 if __name__ == "__main__":
