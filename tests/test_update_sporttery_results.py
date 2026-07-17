@@ -267,6 +267,86 @@ class ResultProvenanceTest(unittest.TestCase):
             self.assertEqual(["", "", "2"], [row["home_goals"] for row in rows])
             self.assertEqual("unavailable", rows[2]["result_status"])
 
+    def test_repeated_ambiguous_fallback_reuses_the_same_unavailable_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text(
+                "date,team_a,team_b,match_id\n"
+                "2026-07-16,Team A,Team B,1001\n"
+                "2026-07-16,Team A,Team B,3003\n",
+                encoding="utf-8",
+            )
+            (data / "bet_results.csv").write_text(
+                "date,team_a,team_b,home_goals,away_goals,match_id,result_status,legacy\n"
+                "2026-07-16,Team A,Team B,1,0,2002,finished,identified\n"
+                "2026-07-16,Team A,Team B,,,,blank-a\n"
+                "2026-07-16,Team A,Team B,,,,blank-b\n",
+                encoding="utf-8",
+            )
+            fallback = [{
+                "homeTeam": "Team A",
+                "awayTeam": "Team B",
+                "score": "2:1",
+                "source_record_id": "678",
+            }]
+            observations = [
+                {
+                    "homeTeam": "Team A", "awayTeam": "Team B", "full": ("2", "1"),
+                    "half": None, "match_id": "", "result_source": "zgzcw",
+                    "source_record_id": "678", "captured_at_bjt": "2026-07-17T11:00:00+08:00",
+                },
+                {
+                    "homeTeam": "Team A", "awayTeam": "Team B", "full": ("2", "1"),
+                    "half": None, "match_id": "", "result_source": "zgzcw",
+                    "source_record_id": "678", "captured_at_bjt": "2026-07-17T12:00:00+08:00",
+                },
+            ]
+            with (
+                patch.object(results, "DATA_DIR", data),
+                patch.object(results, "official_result_rows", side_effect=RuntimeError("offline")),
+                patch.object(results, "fetch_zgzcw_results", return_value=fallback),
+                patch.object(results, "_fallback_result_row", side_effect=observations),
+            ):
+                path = results.update_results(date(2026, 7, 16))
+                first_bytes = path.read_bytes()
+                first_count = len(self.read_rows(path))
+                results.update_results(date(2026, 7, 16))
+
+            self.assertEqual(4, first_count)
+            self.assertEqual(first_count, len(self.read_rows(path)))
+            self.assertEqual(first_bytes, path.read_bytes())
+            rows = self.read_rows(path)
+            self.assertEqual(("2002", "1", "0"), (rows[0]["match_id"], rows[0]["home_goals"], rows[0]["away_goals"]))
+            self.assertEqual(("", "unavailable", "678"), (rows[-1]["match_id"], rows[-1]["result_status"], rows[-1]["source_record_id"]))
+
+    def test_fallback_without_source_record_id_is_unavailable_despite_unique_match_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "fixtures.csv").write_text(
+                "date,team_a,team_b,match_id\n"
+                "2026-07-16,Team A,Team B,1001\n",
+                encoding="utf-8",
+            )
+            fallback = [{
+                "homeTeam": "Team A",
+                "awayTeam": "Team B",
+                "score": "2:1",
+                "source_record_id": "   ",
+            }]
+            with (
+                patch.object(results, "DATA_DIR", data),
+                patch.object(results, "official_result_rows", side_effect=RuntimeError("offline")),
+                patch.object(results, "fetch_zgzcw_results", return_value=fallback),
+            ):
+                path = results.update_results(date(2026, 7, 16))
+
+            row = self.read_rows(path)[0]
+            self.assertEqual("1001", row["match_id"])
+            self.assertEqual("unavailable", row["result_status"])
+            self.assertEqual("", row["source_record_id"])
+
     def test_preexisting_score_without_status_is_protected_from_changed_capture(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / "data"

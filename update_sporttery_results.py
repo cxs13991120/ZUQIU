@@ -167,7 +167,7 @@ def update_results(target_date: date) -> Path:
             )
         else:
             row_index, match_id, result_status = _resolve_fallback_target(
-                rows, candidates, fixture_ids.get(key, set())
+                rows, candidates, fixture_ids.get(key, set()), item
             )
         existing = rows[row_index] if row_index is not None else {}
         full = item.get("full")
@@ -240,7 +240,7 @@ def _resolve_direct_target(
 
 
 def _resolve_fallback_target(
-    rows: list[dict], candidates: list[int], fixture_ids: set[str]
+    rows: list[dict], candidates: list[int], fixture_ids: set[str], item: dict
 ) -> tuple[int | None, str, str]:
     canonical_ids = {
         rows[index].get("match_id", "").strip()
@@ -252,12 +252,20 @@ def _resolve_fallback_target(
     ]
     if len(canonical_ids) == 1:
         canonical_id = next(iter(canonical_ids))
+        source_record_id = item.get("source_record_id")
+        if not isinstance(source_record_id, str) or not source_record_id.strip():
+            if len(blank_candidates) == 1:
+                return blank_candidates[0], canonical_id, "unavailable"
+            return None, canonical_id, "unavailable"
         for index in candidates:
             if rows[index].get("match_id", "").strip() == canonical_id:
                 return index, canonical_id, "finished"
         if len(blank_candidates) == 1:
             return blank_candidates[0], canonical_id, "finished"
         return None, canonical_id, "finished"
+    for index in blank_candidates:
+        if _observation_seen(rows[index], item):
+            return index, "", "unavailable"
     if len(blank_candidates) == 1:
         return blank_candidates[0], "", "unavailable"
     return None, "", "unavailable"
