@@ -485,3 +485,73 @@ Exit code: 0
 Code/test fix commit: `65e12b6c59ecfd907d7e5a06c89baaa5a652c9c0` (`fix: include legacy parlay legs in identity`).
 
 Immediately after the code/test fix commit, `git status --short` produced no output (clean worktree).
+
+## Review fixes 7
+
+### Scope
+
+- Added a private `legacy_leg_match_v1` identity namespace for structured legacy parlay legs without a canonical `match_id`.
+- Included normalized legacy leg match/team/display fields in hash input while retaining the existing canonical `match_id` path when an ID is present.
+- Kept mutable odds, stake, probability, result, and settlement fields outside identity and retained deterministic leg sorting.
+- Preserved every original ledger field and never wrote migration-only match identity into the ledger row.
+
+### Files changed
+
+- `betting_ledger.py` - namespaced no-ID structured legacy leg identity.
+- `tests/test_betting_ledger.py` - no-ID team collision, canonical-ID isolation, order/key invariance, preservation, and rerun coverage.
+- `.superpowers/sdd/task-5-report.md` - this review chronology and verification record.
+
+### RED
+
+After adding the requested tests and before production edits, ran:
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results -v
+
+test_legacy_fallback_no_id_legs_normalize_order_and_ignore_mutable_values ... FAIL
+test_legacy_fallback_no_id_legs_use_team_identity_and_preserve_rows ... FAIL
+
+======================================================================
+FAIL: test_legacy_fallback_no_id_legs_normalize_order_and_ignore_mutable_values
+----------------------------------------------------------------------
+AssertionError: '9da748651f51ec8e91d5adf373137c30a1b41de3a564a76bcb0360d60d324d1c' == '9da748651f51ec8e91d5adf373137c30a1b41de3a564a76bcb0360d60d324d1c'
+
+======================================================================
+FAIL: test_legacy_fallback_no_id_legs_use_team_identity_and_preserve_rows
+----------------------------------------------------------------------
+AssertionError: 2 != 1
+
+----------------------------------------------------------------------
+Ran 40 tests in 0.171s
+
+FAILED (failures=2)
+```
+
+### GREEN
+
+```text
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results -v
+Ran 40 tests in 0.152s
+OK
+
+$env:OPENBLAS_NUM_THREADS='1'; .\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_value_portfolio tests.test_report_status -v
+Ran 69 tests in 0.993s
+OK
+
+.\.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m py_compile betting_ledger.py update_sporttery_results.py tests\test_betting_ledger.py tests\test_update_sporttery_results.py
+Exit code: 0
+
+git diff --check
+Exit code: 0
+```
+
+### Review
+
+- Canonical leg IDs retain the previous `match_id`, market, selection, and line payload; changing display teams on those legs does not change identity.
+- No-ID legs include normalized `match`, `fixture`, team-name aliases, `teams`, and display-label aliases under a migration-only namespace.
+- Canonical JSON normalization makes nested key order and leg order invariant, while changed no-ID team/display identity produces a distinct migration ID.
+- Tests verify both colliding legacy rows survive in source order, all original values remain intact, and ingestion reruns are idempotent.
+
+Code/test fix commit: `73d5625ebf94313458b50c43aa2f50ae0e324a8e` (`fix: distinguish no-id legacy parlay legs`).
+
+Immediately after the code/test fix commit, `git status --short` produced no output (clean worktree).
