@@ -6,15 +6,18 @@ from dataclasses import dataclass, replace
 import math
 from typing import Iterable
 
-from official_markets import TRUSTED_SOURCES
+from official_markets import THREE_WAY_SELECTIONS, TOTAL_GOALS_SELECTIONS, TRUSTED_SOURCES
 from value_candidates import ValueCandidate
 
 
 SUPPORTED_MARKETS = frozenset({"had", "hhad", "ttg"})
 PLAY_BY_MARKET = {"had": "HAD", "hhad": "HHAD", "ttg": "TTG"}
+THREE_WAY_SELECTION_LABELS = frozenset(THREE_WAY_SELECTIONS.values())
+TOTAL_GOALS_SELECTION_LABELS = frozenset(TOTAL_GOALS_SELECTIONS.values())
 QUALITY_RANK = {"high": 0, "medium": 1}
 VOLATILITY_RANK = {"stable": 0, "volatile": 1}
 QUARTER_KELLY = 0.25
+MAX_PERFORMANCE_MULTIPLIER = 1.15
 HARD_MAX_MATCH_EXPOSURE = 200
 HARD_MAX_SINGLE_STAKE = 200
 HARD_SINGLE_BUDGET_CAP = 200
@@ -40,6 +43,12 @@ class PortfolioLimits:
     max_daily_stake: int = 500
     monthly_budget_cap: int = 5000
     monthly_stop_loss: int = 5000
+    settled_samples: int = 0
+    strict_until_samples: int = 100
+    min_combo_leg_probability: float = 0.45
+    min_combo_leg_edge: float = 0.03
+    min_combo_leg_ev: float = 0.02
+    min_combo_ev: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -60,12 +69,30 @@ class ParlayCandidate:
 class AllocatedSingle:
     candidate: ValueCandidate
     stake: int
+    rank: int
+    kelly_stake: int
+    full_kelly: float
+    kelly_fraction: float
+    applied_limits: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class AllocatedParlay:
     parlay: ParlayCandidate
     stake: int
+    rank: int
+    kelly_stake: int
+    full_kelly: float
+    kelly_fraction: float
+    applied_limits: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RiskCheck:
+    name: str
+    value: float
+    limit: float
+    passed: bool
 
 
 @dataclass(frozen=True)
@@ -73,6 +100,7 @@ class Portfolio:
     singles: tuple[AllocatedSingle, ...]
     parlay: AllocatedParlay | None
     rejections: tuple[str, ...] = ()
+    limit_checks: tuple[RiskCheck, ...] = ()
 
     @property
     def total_stake(self) -> int:
@@ -102,7 +130,13 @@ def stake_for(candidate: ValueCandidate, bankroll: float, kelly_fraction: float)
     bankroll = _finite_number(bankroll)
     kelly_fraction = _finite_number(kelly_fraction)
     multipliers = _candidate_multipliers(candidate)
-    if bankroll is None or kelly_fraction is None or bankroll <= 0 or kelly_fraction <= 0 or multipliers is None:
+    if (
+        bankroll is None
+        or kelly_fraction is None
+        or bankroll <= 0
+        or not 0 < kelly_fraction <= 1
+        or multipliers is None
+    ):
         return 0
     probability = _finite_number(candidate.conservative_probability)
     odds = _finite_number(candidate.official_odds)
@@ -131,7 +165,7 @@ def build_two_leg_candidates(candidates: list[ValueCandidate], config: dict) -> 
             expected_value = probability * odds - 1.0
             if not _finite_positive(probability) or not _finite_number(odds) or odds <= 1.0 or expected_value <= 0:
                 continue
-            if 1.0 + expected_value < gates["combined_expected_return"]:
+            if expected_value < gates["combined_ev"]:
                 continue
             multiplier = _parlay_multiplier((left, right))
             if multiplier is None:
@@ -154,7 +188,7 @@ def build_two_leg_candidates(candidates: list[ValueCandidate], config: dict) -> 
 
 
 def allocate_portfolio(
-    candidates: list[ValueCandidate], limits: PortfolioLimits, account: dict, config: dict | None = None
+    candidates: list[ValueCandidate], limits: PortfolioLimits, account: dict
 ) -> Portfolio:
     """Allocate a bounded paid portfolio without mutating candidates or doing I/O."""
     limit_values = _validated_limits(limits)
@@ -164,7 +198,12 @@ def allocate_portfolio(
     if monthly_stake is None or realized_profit is None:
         return Portfolio((), None, ("invalid_account",))
     if realized_profit <= -limit_values.monthly_stop_loss:
-        return Portfolio((), None, ("monthly_stop_loss",))
+        return Portfolio(
+            (),
+            None,
+            ("monthly_stop_loss",),
+            _risk_checks((), None, limit_values, monthly_stake, realized_profit),
+        )
 
     rejections: list[str] = []
     available_monthly = max(0.0, limit_values.monthly_budget_cap - monthly_stake)
@@ -187,7 +226,7 @@ def allocate_portfolio(
     match_exposure: dict[str, int] = {}
     single_stake = 0
     daily_stake = 0
-    for candidate, _ in ranked:
+    for rank, (candidate, _) in enumerate(ranked, start=1):
         if candidate.match_id in selected_matches:
             rejections.append(f"{candidate.candidate_id}:single_match_already_selected")
             continue
@@ -195,46 +234,87 @@ def allocate_portfolio(
             rejections.append(f"{candidate.candidate_id}:max_single_count")
             continue
         raw_stake = stake_for(candidate, limit_values.bankroll, limit_values.kelly_fraction)
-        cap = min(
+        stake, applied_limits = _capped_stake(
             raw_stake,
-            limit_values.max_single_stake,
-            limit_values.max_match_exposure - match_exposure.get(candidate.match_id, 0),
-            limit_values.single_budget_cap - single_stake,
-            limit_values.max_daily_stake - daily_stake,
-            available_monthly - daily_stake,
+            limit_values.stake_unit,
+            (
+                ("max_single_stake", limit_values.max_single_stake),
+                (
+                    "max_match_exposure",
+                    limit_values.max_match_exposure - match_exposure.get(candidate.match_id, 0),
+                ),
+                ("single_budget_cap", limit_values.single_budget_cap - single_stake),
+                ("max_daily_stake", limit_values.max_daily_stake - daily_stake),
+                ("monthly_budget_cap", available_monthly - daily_stake),
+            ),
         )
-        stake = _round_down(cap, limit_values.stake_unit)
         if stake < limit_values.min_single_stake:
             rejections.append(f"{candidate.candidate_id}:single_limit")
             continue
-        singles.append(AllocatedSingle(candidate, stake))
+        singles.append(
+            AllocatedSingle(
+                candidate=candidate,
+                stake=stake,
+                rank=rank,
+                kelly_stake=raw_stake,
+                full_kelly=full_kelly(
+                    candidate.conservative_probability, candidate.official_odds
+                ),
+                kelly_fraction=limit_values.kelly_fraction,
+                applied_limits=applied_limits,
+            )
+        )
         selected_matches.add(candidate.match_id)
         match_exposure[candidate.match_id] = match_exposure.get(candidate.match_id, 0) + stake
         single_stake += stake
         daily_stake += stake
 
     parlay = None
-    parlay_config = config if isinstance(config, dict) else _default_combo_config()
+    parlay_config = _combo_config_from_limits(limit_values)
     for candidate in build_two_leg_candidates(unique_candidates, parlay_config):
         if selected_matches.intersection(candidate.match_ids):
             rejections.append(f"{candidate.pair_id}:parlay_reuses_single_match")
             continue
         raw_stake = _parlay_stake(candidate, limit_values)
-        cap = min(
+        stake, applied_limits = _capped_stake(
             raw_stake,
-            limit_values.max_parlay_stake,
-            *(limit_values.max_match_exposure - match_exposure.get(match_id, 0) for match_id in candidate.match_ids),
-            limit_values.max_daily_stake - daily_stake,
-            available_monthly - daily_stake,
+            limit_values.stake_unit,
+            (
+                ("max_parlay_stake", limit_values.max_parlay_stake),
+                *(
+                    (
+                        "max_match_exposure",
+                        limit_values.max_match_exposure - match_exposure.get(match_id, 0),
+                    )
+                    for match_id in candidate.match_ids
+                ),
+                ("max_daily_stake", limit_values.max_daily_stake - daily_stake),
+                ("monthly_budget_cap", available_monthly - daily_stake),
+            ),
         )
-        stake = _round_down(cap, limit_values.stake_unit)
         if stake < limit_values.min_parlay_stake:
             rejections.append(f"{candidate.pair_id}:parlay_limit")
             continue
-        parlay = AllocatedParlay(candidate, stake)
+        parlay = AllocatedParlay(
+            parlay=candidate,
+            stake=stake,
+            rank=1,
+            kelly_stake=raw_stake,
+            full_kelly=full_kelly(candidate.combined_probability, candidate.combined_odds),
+            kelly_fraction=limit_values.kelly_fraction,
+            applied_limits=applied_limits,
+        )
+        for match_id in candidate.match_ids:
+            match_exposure[match_id] = match_exposure.get(match_id, 0) + stake
+        daily_stake += stake
         break
 
-    return Portfolio(tuple(singles), parlay, tuple(sorted(set(rejections))))
+    return Portfolio(
+        tuple(singles),
+        parlay,
+        tuple(sorted(set(rejections))),
+        _risk_checks(tuple(singles), parlay, limit_values, monthly_stake, realized_profit),
+    )
 
 
 def _single_reason_and_growth(candidate: ValueCandidate, limits: PortfolioLimits) -> tuple[str | None, float | None]:
@@ -261,34 +341,89 @@ def _parlay_leg_reason(candidate: ValueCandidate, gates: dict[str, float]) -> st
         return "leg_probability"
     if candidate.probability_edge < gates["leg_edge"]:
         return "leg_edge"
-    if candidate.expected_value <= 0 or 1.0 + candidate.expected_value < gates["leg_expected_return"]:
-        return "leg_expected_return"
+    if candidate.expected_value <= 0 or candidate.expected_value < gates["leg_ev"]:
+        return "leg_ev"
     return None
 
 
 def _common_candidate_reason(candidate: ValueCandidate) -> str | None:
+    if not _nonempty_text(candidate.match_id):
+        return "invalid_match_id"
     if candidate.market_type not in SUPPORTED_MARKETS:
         return "unsupported_market"
     if candidate.play != PLAY_BY_MARKET[candidate.market_type]:
         return "unsupported_play"
+    if not _valid_market_identity(candidate):
+        return "invalid_market_identity"
     if candidate.data_quality not in QUALITY_RANK:
         return "data_quality"
+    if candidate.volatility_band not in VOLATILITY_RANK:
+        return "volatility_band"
     if candidate.odds_source not in TRUSTED_SOURCES or not _nonempty_text(candidate.source_record_id) or not _nonempty_text(candidate.captured_at_bjt):
         return "unlocked_domestic_odds"
     probability = _finite_number(candidate.conservative_probability)
+    market_probability = _finite_number(candidate.official_market_probability)
+    probability_edge = _finite_number(candidate.probability_edge)
+    probability_layers = tuple(
+        _finite_number(value)
+        for value in (
+            candidate.raw_model_probability,
+            candidate.calibrated_model_probability,
+        )
+    )
     odds = _finite_number(candidate.official_odds)
     expected_value = _finite_number(candidate.expected_value)
     multipliers = _candidate_multipliers(candidate)
     if (
         probability is None
         or not 0 < probability < 1
+        or market_probability is None
+        or not 0 < market_probability < 1
+        or probability_edge is None
+        or any(value is None or not 0 < value < 1 for value in probability_layers)
         or odds is None
         or odds <= 1
         or expected_value is None
         or multipliers is None
+        or _nonnegative_integer(candidate.calibration_samples) is None
+        or not _valid_correlation_tags(candidate.correlation_tags)
+        or not isinstance(candidate.paid_eligible, bool)
+        or not isinstance(candidate.single_eligible, bool)
+        or not isinstance(candidate.value_gate_reasons, tuple)
+        or not all(_nonempty_text(reason) for reason in candidate.value_gate_reasons)
     ):
         return "invalid_candidate_values"
+    if not math.isclose(
+        probability_edge,
+        probability - market_probability,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ) or not math.isclose(
+        expected_value,
+        probability * odds - 1.0,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return "inconsistent_candidate_values"
     return None
+
+
+def _valid_market_identity(candidate: ValueCandidate) -> bool:
+    if candidate.market_type == "had":
+        return candidate.line is None and candidate.selection in THREE_WAY_SELECTION_LABELS
+    if candidate.market_type == "hhad":
+        return (
+            isinstance(candidate.line, int)
+            and not isinstance(candidate.line, bool)
+            and candidate.selection in THREE_WAY_SELECTION_LABELS
+        )
+    if candidate.market_type == "ttg":
+        return candidate.line is None and candidate.selection in TOTAL_GOALS_SELECTION_LABELS
+    return False
+
+
+def _valid_correlation_tags(value: object) -> bool:
+    return isinstance(value, tuple) and all(_nonempty_text(tag) for tag in value)
 
 
 def _candidate_growth(candidate: ValueCandidate, kelly_fraction: float) -> float | None:
@@ -348,17 +483,19 @@ def _combo_gates(strategy: dict) -> dict[str, float] | None:
     strict = settled < strict_until
     prefix = "strict_" if strict else ""
     values = {
-        "leg_probability": strategy.get("min_combo_leg_probability"),
-        "leg_edge": strategy.get(f"{prefix}min_combo_leg_edge"),
-        "leg_expected_return": strategy.get(f"{prefix}min_combo_leg_expected_return"),
-        "combined_expected_return": strategy.get(f"{prefix}min_combo_expected_return"),
+        "leg_probability": strategy.get("min_combo_leg_probability", 0.45),
+        "leg_edge": strategy.get(
+            f"{prefix}min_combo_leg_edge", 0.03 if strict else 0.02
+        ),
+        "leg_ev": strategy.get(f"{prefix}min_combo_leg_ev"),
+        "combined_ev": strategy.get(f"{prefix}min_combo_ev"),
     }
     parsed = {name: _finite_number(value) for name, value in values.items()}
     if any(value is None for value in parsed.values()):
         return None
     if parsed["leg_probability"] < 0 or parsed["leg_probability"] >= 1 or parsed["leg_edge"] < 0:
         return None
-    if parsed["leg_expected_return"] <= 0 or parsed["combined_expected_return"] <= 0:
+    if parsed["leg_ev"] < 0 or parsed["combined_ev"] < 0:
         return None
     return parsed
 
@@ -368,18 +505,20 @@ def _strategy(config: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _default_combo_config() -> dict:
-    return {"value_strategy": {
-        "settled_samples": 100,
-        "strict_until_samples": 100,
-        "min_combo_leg_probability": 0.45,
-        "strict_min_combo_leg_edge": 0.02,
-        "min_combo_leg_edge": 0.02,
-        "strict_min_combo_leg_expected_return": 1.01,
-        "min_combo_leg_expected_return": 1.01,
-        "strict_min_combo_expected_return": 1.03,
-        "min_combo_expected_return": 1.03,
-    }}
+def _combo_config_from_limits(limits: PortfolioLimits) -> dict:
+    return {
+        "value_strategy": {
+            "settled_samples": limits.settled_samples,
+            "strict_until_samples": limits.strict_until_samples,
+            "min_combo_leg_probability": limits.min_combo_leg_probability,
+            "strict_min_combo_leg_edge": limits.min_combo_leg_edge,
+            "min_combo_leg_edge": limits.min_combo_leg_edge,
+            "strict_min_combo_leg_ev": limits.min_combo_leg_ev,
+            "min_combo_leg_ev": limits.min_combo_leg_ev,
+            "strict_min_combo_ev": limits.min_combo_ev,
+            "min_combo_ev": limits.min_combo_ev,
+        }
+    }
 
 
 def _validated_limits(limits: PortfolioLimits) -> PortfolioLimits | None:
@@ -400,10 +539,24 @@ def _validated_limits(limits: PortfolioLimits) -> PortfolioLimits | None:
         limits.max_daily_stake,
         limits.monthly_budget_cap,
         limits.monthly_stop_loss,
+        limits.settled_samples,
+        limits.strict_until_samples,
     )
     if any(_nonnegative_integer(value) is None for value in values):
         return None
     if limits.min_single_stake < 2 or limits.min_parlay_stake < 2:
+        return None
+    combo_values = (
+        _finite_number(limits.min_combo_leg_probability),
+        _finite_number(limits.min_combo_leg_edge),
+        _finite_number(limits.min_combo_leg_ev),
+        _finite_number(limits.min_combo_ev),
+    )
+    if (
+        any(value is None for value in combo_values)
+        or not 0 < combo_values[0] < 1
+        or any(value < 0 for value in combo_values[1:])
+    ):
         return None
     return replace(
         limits,
@@ -442,30 +595,26 @@ def _unique_candidates_with_reasons(candidates: Iterable[ValueCandidate]) -> tup
     reasons = []
     for candidate_id in sorted(grouped):
         group = grouped[candidate_id]
-        representative = min(group, key=_candidate_identity_key)
+        representative = group[0]
+        if any(candidate != representative for candidate in group[1:]):
+            reasons.append(f"{candidate_id}:conflicting_duplicate_candidate_id")
+            continue
         selected.append(representative)
         if len(group) > 1:
             reasons.append(f"{candidate_id}:duplicate_candidate_id")
     return selected, reasons
 
 
-def _candidate_identity_key(candidate: ValueCandidate) -> tuple:
-    growth = _candidate_growth(candidate, QUARTER_KELLY)
-    return (
-        -(growth if growth is not None else -math.inf),
-        -(_finite_number(candidate.expected_value) or -math.inf),
-        str(candidate.match_id),
-        str(candidate.market_type),
-        str(candidate.selection),
-        str(candidate.source_record_id),
-    )
-
-
 def _candidate_multipliers(candidate: ValueCandidate) -> tuple[float, float, float] | None:
     values = tuple(_finite_number(getattr(candidate, name, None)) for name in (
         "data_quality_multiplier", "volatility_multiplier", "performance_multiplier",
     ))
-    if any(value is None or value < 0 for value in values):
+    if (
+        any(value is None or value <= 0 for value in values)
+        or values[0] > 1.0
+        or values[1] > 1.0
+        or values[2] > MAX_PERFORMANCE_MULTIPLIER
+    ):
         return None
     return values
 
@@ -481,6 +630,141 @@ def _parlay_multiplier(legs: tuple[ValueCandidate, ValueCandidate]) -> float | N
     )
 
 
+def _capped_stake(
+    raw_stake: int,
+    unit: int,
+    caps: tuple[tuple[str, float], ...],
+) -> tuple[int, tuple[str, ...]]:
+    parsed_caps = tuple(
+        (name, value)
+        for name, raw_value in caps
+        if (value := _finite_number(raw_value)) is not None
+    )
+    if len(parsed_caps) != len(caps):
+        return 0, ("invalid_cap",)
+    minimum = min(float(raw_stake), *(value for _, value in parsed_caps))
+    stake = _round_down(minimum, unit)
+    applied = []
+    if minimum < raw_stake:
+        applied.extend(
+            name
+            for name, value in parsed_caps
+            if math.isclose(value, minimum, rel_tol=0.0, abs_tol=1e-12)
+        )
+    if stake < minimum:
+        applied.append("stake_unit")
+    return stake, tuple(sorted(set(applied)))
+
+
+def _risk_checks(
+    singles: tuple[AllocatedSingle, ...],
+    parlay: AllocatedParlay | None,
+    limits: PortfolioLimits,
+    monthly_stake: float,
+    realized_profit: float,
+) -> tuple[RiskCheck, ...]:
+    stakes = [item.stake for item in singles]
+    if parlay is not None:
+        stakes.append(parlay.stake)
+    match_exposure: dict[str, int] = {}
+    single_counts: dict[str, int] = {}
+    for item in singles:
+        match_id = item.candidate.match_id
+        match_exposure[match_id] = match_exposure.get(match_id, 0) + item.stake
+        single_counts[match_id] = single_counts.get(match_id, 0) + 1
+    if parlay is not None:
+        for match_id in parlay.parlay.match_ids:
+            match_exposure[match_id] = match_exposure.get(match_id, 0) + parlay.stake
+    single_total = sum(item.stake for item in singles)
+    parlay_total = parlay.stake if parlay is not None else 0
+    daily_total = single_total + parlay_total
+    checks = (
+        RiskCheck(
+            "stake_unit",
+            float(sum(1 for stake in stakes if stake % limits.stake_unit)),
+            0.0,
+            all(stake >= limits.stake_unit and stake % limits.stake_unit == 0 for stake in stakes),
+        ),
+        RiskCheck(
+            "max_match_exposure",
+            float(max(match_exposure.values(), default=0)),
+            float(limits.max_match_exposure),
+            all(value <= limits.max_match_exposure for value in match_exposure.values()),
+        ),
+        RiskCheck(
+            "max_single_stake",
+            float(max((item.stake for item in singles), default=0)),
+            float(limits.max_single_stake),
+            all(item.stake <= limits.max_single_stake for item in singles),
+        ),
+        RiskCheck(
+            "max_one_single_per_match",
+            float(max(single_counts.values(), default=0)),
+            1.0,
+            all(value <= 1 for value in single_counts.values()),
+        ),
+        RiskCheck(
+            "max_single_count",
+            float(len(singles)),
+            float(limits.max_single_count),
+            len(singles) <= limits.max_single_count,
+        ),
+        RiskCheck(
+            "single_budget_cap",
+            float(single_total),
+            float(limits.single_budget_cap),
+            single_total <= limits.single_budget_cap,
+        ),
+        RiskCheck(
+            "max_parlay_stake",
+            float(parlay_total),
+            float(limits.max_parlay_stake),
+            parlay_total <= limits.max_parlay_stake,
+        ),
+        RiskCheck(
+            "max_daily_stake",
+            float(daily_total),
+            float(limits.max_daily_stake),
+            daily_total <= limits.max_daily_stake,
+        ),
+        RiskCheck(
+            "monthly_budget_cap",
+            float(monthly_stake + daily_total),
+            float(limits.monthly_budget_cap),
+            monthly_stake + daily_total <= limits.monthly_budget_cap,
+        ),
+        RiskCheck(
+            "monthly_stop_loss",
+            float(max(0.0, -realized_profit)),
+            float(limits.monthly_stop_loss),
+            realized_profit > -limits.monthly_stop_loss,
+        ),
+        RiskCheck(
+            "parlay_leg_count",
+            float(len(parlay.parlay.legs) if parlay is not None else 0),
+            2.0,
+            parlay is None or len(parlay.parlay.legs) == 2,
+        ),
+        RiskCheck(
+            "parlay_distinct_matches",
+            float(len(set(parlay.parlay.match_ids)) if parlay is not None else 0),
+            2.0,
+            parlay is None or len(set(parlay.parlay.match_ids)) == 2,
+        ),
+        RiskCheck(
+            "parlay_reuses_single_match",
+            float(
+                len(set(parlay.parlay.match_ids).intersection(single_counts))
+                if parlay is not None
+                else 0
+            ),
+            0.0,
+            parlay is None or not set(parlay.parlay.match_ids).intersection(single_counts),
+        ),
+    )
+    return checks
+
+
 def _round_down(value: float, unit: int) -> int:
     value = _finite_number(value)
     if value is None or value <= 0 or not isinstance(unit, int) or unit <= 0:
@@ -489,12 +773,9 @@ def _round_down(value: float, unit: int) -> int:
 
 
 def _finite_number(value: object) -> float | None:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
+    parsed = float(value)
     return parsed if math.isfinite(parsed) else None
 
 
