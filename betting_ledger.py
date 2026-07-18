@@ -853,6 +853,7 @@ def _normalize_existing_rows(
 
 
 def _existing_canonical_state(row: dict) -> str:
+    identity = _identity_payload(row)
     state = {
         field: _existing_state_value(field, row.get(field, ""))
         for field in REQUIRED_FIELD_ORDER
@@ -861,7 +862,10 @@ def _existing_canonical_state(row: dict) -> str:
             "market_type", "market_line", "match_id", "selection",
         }
     }
-    state["identity"] = _identity_payload(row)
+    state["identity"] = identity
+    state["effective_report_date"] = _effective_report_date(
+        row, identity["report_date"]
+    )
     if "legs" in row:
         state["legs"] = _existing_state_value("legs", row.get("legs"))
     return json.dumps(
@@ -870,6 +874,13 @@ def _existing_canonical_state(row: dict) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _effective_report_date(row: dict, identity_date: str) -> str:
+    value = row.get("report_date")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return identity_date
+    return _required_date(value)
 
 
 def _existing_state_value(field: str, value: object) -> object:

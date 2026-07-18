@@ -367,6 +367,49 @@ class IdentityAndIngestionTest(unittest.TestCase):
                 self.assertEqual("spoofed-first", rows[0]["bet_id"])
                 self.assertEqual("20.00", rows[0]["profit"])
 
+    def test_existing_effective_report_date_normalizes_aliases_and_date_fallback(self):
+        canonical = ingest_locked_plan([], [plan_row()], lock())[0]
+        first = {**canonical, "bet_id": "spoofed-first"}
+        missing = {**canonical, "bet_id": "spoofed-missing"}
+        missing.pop("report_date")
+        aliases = (
+            {**canonical, "report_date": " 2026-07-16 ", "bet_id": "spoofed-spaced"},
+            {**canonical, "report_date": "20260716", "bet_id": "spoofed-compact"},
+            {**canonical, "report_date": "   ", "bet_id": "spoofed-blank"},
+            missing,
+        )
+
+        for alias in aliases:
+            with self.subTest(report_date=alias.get("report_date", "missing")):
+                self.assertEqual(
+                    [first], ingest_locked_plan([first, alias], [], lock())
+                )
+
+    def test_conflicting_effective_report_date_fails_ingest_and_settle_without_write(self):
+        canonical = ingest_locked_plan([], [plan_row()], lock())[0]
+        first = {**canonical, "bet_id": "spoofed-first"}
+        conflict = {
+            **canonical,
+            "report_date": "2026-07-15",
+            "bet_id": "spoofed-conflict",
+        }
+
+        with self.assertRaisesRegex(ValueError, "conflicting existing canonical"):
+            ingest_locked_plan([first, conflict], [], lock())
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ledger_path = root / "output" / "betting_ledger.csv"
+            write_ledger_atomic(ledger_path, [first, conflict])
+            before = ledger_path.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "conflicting existing canonical"):
+                ledger_module.settle_ledger(
+                    root, {"1001": finished("1001", 2, 1)}, SETTLED_AT
+                )
+
+            self.assertEqual(before, ledger_path.read_bytes())
+
     def test_hhad_single_line_aliases_share_identity_dedupe_and_settle_once(self):
         plus = plan_row(
             play="HHAD",
