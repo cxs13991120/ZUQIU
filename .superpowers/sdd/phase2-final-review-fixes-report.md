@@ -455,3 +455,146 @@ and one violation. The readiness probe exited 1 with
 - Remaining concern: activation still requires a future prospective pre-kickoff
   bundle and passing immutable audit. Readiness correctly remains unavailable
   until that real evidence exists.
+
+## Final Re-review Wave: Plan Evidence, Canonical Identity, and Recovery
+
+This wave resolves the two Important findings and the ancillary-output Minor
+assigned on top of `c7444182b2c5d5edb9c89affcdfcf14a896e9785`.
+
+### Resolution
+
+1. Decision-bundle schema 3 now binds every decision-time input used by the
+   paid shadow plan, including account metrics, and contains deterministic paid
+   plan evidence: exact rows, row digest, exact CSV digest, byte count, and row
+   count. The generator consumes those bundle-owned inputs, and `plan_lock`
+   refuses any plan whose bytes differ from the immutable evidence. Editing a
+   single or parlay plan together with its lock therefore cannot create a valid
+   ledger anchor.
+2. Persisted canonical ledger rows are classified against locked-plan stable
+   identities before legacy migration. Canonical evidence is mandatory, its
+   digest must be explicit and nonempty, and settlement/ingestion fail closed
+   when the matching lock is absent. Stripped markers and parlay strategy
+   downgrades fail while genuine historical rows retain stable legacy IDs,
+   idempotent migration, and compatible terminal settlement mutations.
+3. An existing validated import manifest now atomically regenerates
+   `team_ratings.csv` and `source_status.json` from its immutable fixture
+   extract before restoring shared fixture/odds files. A crash immediately
+   after manifest publication is recoverable without source refetch, including
+   nonempty team ratings and the exact fixture count.
+
+### RED/GREEN Evidence
+
+All Python commands used
+`.superpowers\sdd\runtime\verify-venv\Scripts\python.exe`.
+
+Real single/parlay joint plan-and-lock tamper RED:
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_plan_lock.PlanLockTest.test_real_lock_rejects_joint_plan_and_lock_tamper_for_single_and_parlay -v
+```
+
+Result before implementation: 1 test ran with 2 failing subtests; both edited
+plan/lock pairs remained valid after their hashes and ledger row digests were
+recomputed. The identical command then passed 1 test in 0.294 seconds. The
+decision-bundle and plan-lock modules together passed 31 tests in 4.059
+seconds.
+
+Canonical stripped-marker/missing-lock RED:
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger.LockedIngestCommandTest.test_locked_identity_rejects_a_single_with_all_new_markers_stripped tests.test_betting_ledger.LockedIngestCommandTest.test_locked_identity_rejects_a_parlay_strategy_downgrade tests.test_betting_ledger.LockedIngestCommandTest.test_stripped_canonical_identity_fails_closed_when_lock_is_missing -v
+```
+
+Result before implementation: 3 tests ran with 3 failures because every row
+entered legacy migration. The identical command then passed all 3 tests in
+0.032 seconds; the complete ledger module passed 65 tests in 0.312 seconds.
+
+Ancillary crash-recovery RED:
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_import_sporttery.ImportSportterySourceStatusTest.test_manifest_crash_recovery_preserves_ratings_and_source_status -v
+```
+
+Result before implementation: 1 test failed because a valid manifest survived
+the simulated crash but the no-refetch rerun left `team_ratings.csv` absent.
+The strengthened nonempty-fixture version of the identical command passed 1
+test in 0.071 seconds, and the import module passed 23 tests in 0.320 seconds.
+
+The first full discovery after the focused fixes ran 559 tests with 5 failures
+and 9 errors. These were test-harness contract gaps only: seven report-status
+fixtures used an incomplete betting config, two integration bundles omitted
+paid-plan evidence, and five workflow stubs attempted the pre-evidence plan
+contract. Fixtures were updated to use real config, exact bundle-owned plan
+bytes, and deterministic bundle-first workflow generation. No production
+validator was relaxed.
+
+### Final Verification
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results tests.test_shadow_portfolio_audit tests.test_decision_bundle tests.test_plan_lock tests.test_import_sporttery tests.test_capture_odds_snapshot
+```
+
+Result: the prior review surface plus all new focused regressions passed 172
+tests in 6.294 seconds.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
+
+Result: 559 tests passed in 19.499 seconds.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_workflow_schedule -q
+```
+
+Result: 39 tests passed in 7.823 seconds, including shell/order validation,
+bundle-before-plan generation, exact plan-evidence consumption, ZGZCW
+lock/ingestion recovery, and idempotent settlement.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m py_compile betting_ledger.py decision_bundle.py generate_betting_plan.py import_sporttery.py plan_lock.py tests\test_betting_ledger.py tests\test_decision_bundle.py tests\test_import_sporttery.py tests\test_plan_lock.py tests\test_report_status.py tests\test_value_strategy_integration.py tests\test_workflow_schedule.py
+```
+
+Result: all 12 changed Python files compiled with exit 0 and no output.
+
+```powershell
+C:\Users\87562\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe --test tests\apps_script_orchestrator.test.mjs
+```
+
+Result: 42 tests passed, 0 failed.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe audit_shadow_portfolio.py --from 2026-07-11 --through 2026-07-18
+```
+
+Result: expected exit 1 with `checked_dates: []`, all eight dates in
+`excluded_missing`, `passed: false`, and one violation.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -c "from pathlib import Path; from activation_readiness import assert_activation_ready; assert_activation_ready(Path.cwd())"
+```
+
+Result: expected exit 1 with `ValueError: activation audit has not passed`.
+`git diff --check` exited 0 with only informational LF-to-CRLF warnings.
+
+### Activation, Files, Commits, and Concerns
+
+- Activation remains `shadow`; simulation-only/no-real-money controls are
+  unchanged. No July 18 import, snapshot, prediction, or lock evidence was
+  captured or fabricated.
+- Production files changed: `betting_ledger.py`, `decision_bundle.py`,
+  `generate_betting_plan.py`, `import_sporttery.py`, and `plan_lock.py`.
+- Test files changed: `tests/test_betting_ledger.py`,
+  `tests/test_decision_bundle.py`, `tests/test_import_sporttery.py`,
+  `tests/test_plan_lock.py`, `tests/test_report_status.py`,
+  `tests/test_value_strategy_integration.py`, and
+  `tests/test_workflow_schedule.py`.
+- Implementation commit:
+  `a56557203a033ffee4d3397528ad00003d91f892`.
+- Fresh diff package:
+  `.superpowers/sdd/review-phase2-final-fixes4-c744418..a565572.diff`, generated
+  from the literal implementation range before this report/package commit.
+- Remaining concern: schema-2 decision bundles intentionally cannot authorize
+  new paid ingestion because they lack deterministic plan evidence. Activation
+  still requires a future prospective pre-kickoff schema-3 bundle and passing
+  immutable audit; readiness correctly remains unavailable until then.

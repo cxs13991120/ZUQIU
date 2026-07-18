@@ -1,0 +1,1501 @@
+diff --git a/betting_ledger.py b/betting_ledger.py
+index 742d7ce..fbce400 100644
+--- a/betting_ledger.py
++++ b/betting_ledger.py
+@@ -85,7 +85,7 @@ def ingest_locked_plan(
+     plan_rows: list[dict],
+     lock: dict,
+     *,
+-    canonical_evidence: dict[tuple[str, str], str] | None = None,
++    canonical_evidence: dict[tuple[str, str], str],
+ ) -> list[dict]:
+     """Migrate legacy rows and append only previously unseen locked plan identities."""
+     lock_source = _validate_lock(lock)
+@@ -749,13 +749,21 @@ def settle_ledger(root: Path, results: dict, settled_at: datetime) -> Path:
+ def _load_locked_plan_evidence(
+     root: Path, existing_rows: list[dict]
+ ) -> dict[tuple[str, str], str]:
+-    locally_validated, _known_keys = _normalize_existing_rows(existing_rows)
+-    report_dates = {
+-        _strict_canonical_date(row.get("report_date"), "report_date")
+-        for row in locally_validated
+-        if isinstance(row, dict)
+-        and row.get("strategy_version") in NEW_PAID_STRATEGY_VERSIONS
+-    }
++    report_dates: set[str] = set()
++    for row in existing_rows:
++        if not isinstance(row, dict):
++            raise ValueError("existing row must be a mapping")
++        if _claims_canonical_identity(row):
++            if row.get("strategy_version") in NEW_PAID_STRATEGY_VERSIONS:
++                try:
++                    _validate_existing_canonical_paid_row(row)
++                except (TypeError, ValueError) as exc:
++                    raise ValueError(
++                        f"invalid existing canonical paid row: {exc}"
++                    ) from exc
++            report_dates.add(
++                _strict_canonical_date(row.get("report_date"), "report_date")
++            )
+     evidence: dict[tuple[str, str], str] = {}
+     for report_date in sorted(report_dates):
+         target_date = date.fromisoformat(report_date)
+@@ -913,25 +921,31 @@ def _existing_dedupe_key(row: dict) -> tuple[str, str]:
+ def _normalize_existing_rows(
+     existing_rows: list[dict],
+     *,
+-    canonical_evidence: dict[tuple[str, str], str] | None = None,
++    canonical_evidence: dict[tuple[str, str], str],
+ ) -> tuple[list[dict], set[tuple[str, str]]]:
++    if not isinstance(canonical_evidence, dict):
++        raise ValueError("canonical locked-plan evidence is required")
+     normalized: list[dict] = []
+     known_keys: set[tuple[str, str]] = set()
+     canonical_states: dict[str, str] = {}
+     for source_row in existing_rows:
+         if not isinstance(source_row, dict):
+             raise ValueError("existing row must be a mapping")
+-        if source_row.get("strategy_version") in NEW_PAID_STRATEGY_VERSIONS:
++        canonical_key = _canonical_evidence_key(source_row, canonical_evidence)
++        anchored_canonical = (
++            canonical_key is not None or _claims_canonical_identity(source_row)
++        )
++        if anchored_canonical:
+             try:
+                 _validate_existing_canonical_paid_row(source_row)
+             except (TypeError, ValueError) as exc:
+                 raise ValueError(f"invalid existing canonical paid row: {exc}") from exc
+-            row = dict(source_row)
+-        else:
+-            if _looks_like_canonical_paid_row(source_row):
++            if canonical_key is None:
+                 raise ValueError(
+-                    "canonical-shaped row cannot use legacy migration after strategy downgrade"
++                    "canonical ledger row lacks locked plan evidence anchor"
+                 )
++            row = dict(source_row)
++        else:
+             _validate_existing_legacy_economics(source_row)
+             row = _migrate_existing_row(source_row)
+         key_kind, identity_key = _existing_dedupe_key(row)
+@@ -945,14 +959,22 @@ def _normalize_existing_rows(
+             continue
+         known_keys.add(dedupe_key)
+         if key_kind == "canonical":
+-            if canonical_evidence is not None:
++            if anchored_canonical:
+                 evidence_key = (
+                     _strict_canonical_date(row.get("report_date"), "report_date"),
+                     identity_key,
+                 )
+-                if canonical_evidence.get(evidence_key) != row.get(
+-                    "row_payload_sha256"
+-                ):
++                if evidence_key not in canonical_evidence:
++                    raise ValueError(
++                        "canonical ledger row lacks locked plan evidence anchor"
++                    )
++                expected_digest = canonical_evidence[evidence_key]
++                actual_digest = row.get("row_payload_sha256")
++                if not _is_sha256(expected_digest) or not _is_sha256(actual_digest):
++                    raise ValueError(
++                        "canonical row payload digest is missing from locked plan evidence"
++                    )
++                if expected_digest != actual_digest:
+                     raise ValueError(
+                         "canonical row payload differs from locked plan evidence anchor"
+                     )
+@@ -961,19 +983,58 @@ def _normalize_existing_rows(
+     return normalized, known_keys
+ 
+ 
+-def _looks_like_canonical_paid_row(row: dict) -> bool:
+-    if row.get("row_payload_sha256") not in (None, ""):
+-        return True
+-    if row.get("plan_sha256") not in (None, ""):
++def _claims_canonical_identity(row: dict) -> bool:
++    provided_id = row.get("bet_id")
++    if isinstance(provided_id, str) and provided_id in _canonical_identity_candidates(
++        row
++    ):
+         return True
+-    evidence_fields = (
+-        "report_date",
+-        "locked_at_bjt",
+-        "odds_source_record_id",
+-        "odds_captured_at_bjt",
+-        "locked_odds",
++    if row.get("strategy_version") not in NEW_PAID_STRATEGY_VERSIONS:
++        return False
++    return any(
++        row.get(field) not in (None, "")
++        for field in ("row_payload_sha256", "plan_sha256", "locked_at_bjt")
++    )
++
++
++def _canonical_evidence_key(
++    row: dict, canonical_evidence: dict[tuple[str, str], str]
++) -> tuple[str, str] | None:
++    try:
++        report_date = _strict_canonical_date(
++            row.get("report_date"), "report_date"
++        )
++    except ValueError:
++        return None
++    provided_id = row.get("bet_id")
++    if not isinstance(provided_id, str) or not provided_id:
++        return None
++    key = (report_date, provided_id)
++    if key not in canonical_evidence:
++        return None
++    if provided_id not in _canonical_identity_candidates(row):
++        return None
++    return key
++
++
++def _canonical_identity_candidates(row: dict) -> set[str]:
++    candidates: set[str] = set()
++    for strategy_version in NEW_PAID_STRATEGY_VERSIONS:
++        candidate = dict(row)
++        candidate["strategy_version"] = strategy_version
++        try:
++            candidates.add(stable_bet_id(candidate))
++        except (TypeError, ValueError):
++            continue
++    return candidates
++
++
++def _is_sha256(value: object) -> bool:
++    return (
++        isinstance(value, str)
++        and len(value) == 64
++        and all(character in "0123456789abcdef" for character in value)
+     )
+-    return all(row.get(field) not in (None, "") for field in evidence_fields)
+ 
+ 
+ def _validate_existing_canonical_paid_row(row: dict) -> None:
+diff --git a/decision_bundle.py b/decision_bundle.py
+index 0dcfa12..448d290 100644
+--- a/decision_bundle.py
++++ b/decision_bundle.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ import argparse
+ import csv
+ import hashlib
++import io
+ import json
+ import os
+ import tempfile
+@@ -15,7 +16,7 @@ from import_sporttery import import_manifest_path, read_valid_import_manifest
+ 
+ 
+ BEIJING = timezone(timedelta(hours=8))
+-BUNDLE_SCHEMA_VERSION = 2
++BUNDLE_SCHEMA_VERSION = 3
+ PREDICTION_METADATA_SCHEMA_VERSION = 1
+ DOMESTIC_DECISION_SOURCES = frozenset({"sporttery", "zgzcw"})
+ MODEL_CODE_PATHS = (
+@@ -153,6 +154,9 @@ def create_decision_bundle(
+         "training_samples": _inline_rows(
+             _read_csv(root / "data" / "draw_training_samples.csv", required=False)
+         ),
++        "account_metrics": _inline_payload(
++            _read_optional_json(root / "output" / "model_metrics.json")
++        ),
+     }
+     model_code = {
+         path: _file_record(root, root / path) for path in MODEL_CODE_PATHS
+@@ -199,9 +203,13 @@ def create_decision_bundle(
+         "history_inputs": history_inputs,
+         "roles": {
+             "paid_odds": "decision_snapshot",
++            "paid_plan": "deterministic_bundle_evidence",
+             "model_reference_inputs": list(MODEL_REFERENCE_INPUTS),
+         },
+     }
++    payload["paid_plan_evidence"] = _build_paid_plan_evidence(
++        root, target_date, locked, payload
++    )
+     path = _bundle_path(root, target_date)
+     if path.exists() or not _atomic_publish_json(path, payload):
+         _require_matching_existing_bundle(path, payload)
+@@ -325,6 +333,15 @@ def read_valid_decision_bundle(
+             raise ValueError(f"decision bundle {key} is invalid")
+         if record.get("sha256") != canonical_json_sha256(record["rows"]):
+             raise ValueError(f"decision bundle {key} digest mismatch")
++    account_metrics = histories.get("account_metrics")
++    if (
++        not isinstance(account_metrics, dict)
++        or account_metrics.get("sha256")
++        != canonical_json_sha256(account_metrics.get("payload"))
++    ):
++        raise ValueError("decision bundle account metrics are invalid")
++
++    _validate_paid_plan_evidence(payload.get("paid_plan_evidence"), target_date)
+ 
+     ratings = payload.get("ratings")
+     model_code = payload.get("model_code")
+@@ -344,6 +361,7 @@ def read_valid_decision_bundle(
+     roles = payload.get("roles")
+     if roles != {
+         "paid_odds": "decision_snapshot",
++        "paid_plan": "deterministic_bundle_evidence",
+         "model_reference_inputs": list(MODEL_REFERENCE_INPUTS),
+     }:
+         raise ValueError("decision bundle odds role is invalid")
+@@ -522,6 +540,67 @@ def _inline_rows(rows: list[dict]) -> dict:
+     return {"rows": normalized, "sha256": canonical_json_sha256(normalized)}
+ 
+ 
++def _inline_payload(payload: object) -> dict:
++    return {"payload": payload, "sha256": canonical_json_sha256(payload)}
++
++
++def _read_optional_json(path: Path) -> object:
++    if not path.is_file():
++        return {}
++    try:
++        payload = _read_json(path)
++    except (OSError, UnicodeError, json.JSONDecodeError):
++        return {}
++    return payload if isinstance(payload, dict) else {}
++
++
++def _build_paid_plan_evidence(
++    root: Path,
++    target_date: date,
++    locked_at: datetime,
++    bundle: dict,
++) -> dict:
++    from generate_betting_plan import build_paid_plan_from_bundle, plan_csv_bytes
++
++    plan = build_paid_plan_from_bundle(
++        target_date,
++        locked_at=locked_at,
++        decision_bundle=bundle,
++        root=root,
++    )
++    serialized = plan_csv_bytes(plan)
++    with io.StringIO(serialized.decode("utf-8-sig"), newline="") as handle:
++        rows = list(csv.DictReader(handle))
++    return {
++        "schema_version": 1,
++        "plan_sha256": hashlib.sha256(serialized).hexdigest(),
++        "bytes": len(serialized),
++        "row_count": len(rows),
++        "rows": rows,
++        "rows_sha256": canonical_json_sha256(rows),
++    }
++
++
++def _validate_paid_plan_evidence(record: object, target_date: date) -> None:
++    from generate_betting_plan import plan_csv_bytes
++
++    if not isinstance(record, dict) or record.get("schema_version") != 1:
++        raise ValueError("decision bundle paid plan evidence is invalid")
++    rows = record.get("rows")
++    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
++        raise ValueError("decision bundle paid plan evidence rows are invalid")
++    if any(row.get("date") != target_date.isoformat() for row in rows):
++        raise ValueError("decision bundle paid plan evidence date differs")
++    serialized = plan_csv_bytes(rows)
++    if (
++        record.get("row_count") != len(rows)
++        or record.get("rows_sha256") != canonical_json_sha256(rows)
++        or record.get("bytes") != len(serialized)
++        or record.get("plan_sha256") != hashlib.sha256(serialized).hexdigest()
++    ):
++        raise ValueError("decision bundle paid plan evidence digest mismatch")
++
++
+ def _snapshot_match_identities(snapshot: dict) -> list[dict]:
+     return [
+         {
+diff --git a/generate_betting_plan.py b/generate_betting_plan.py
+index cceb981..a5500a6 100644
+--- a/generate_betting_plan.py
++++ b/generate_betting_plan.py
+@@ -1,4 +1,5 @@
+ import csv
++import io
+ import itertools
+ import json
+ import math
+@@ -385,8 +386,13 @@ def build_legacy_value_plan(
+     predictions: list[dict] | None = None,
+     odds_by_match: dict | None = None,
+     odds_source: str | None = None,
++    config: dict | None = None,
++    paid_history: list[dict] | None = None,
++    observation_history: list[dict] | None = None,
++    training_samples: list[dict] | None = None,
++    account_metrics: dict | None = None,
+ ) -> tuple[list[dict], list[dict]]:
+-    config = read_json(ROOT / "betting_config.json")
++    config = read_json(ROOT / "betting_config.json") if config is None else config
+     strategy_version = str(config.get("legacy_strategy_version") or "legacy-v3")
+     value = config.get("value_strategy", {})
+     predictions = load_predictions(target_date) if predictions is None else predictions
+@@ -396,39 +402,37 @@ def build_legacy_value_plan(
+     if odds_source == "竞彩网" and status_path.exists():
+         odds_source = str(read_json(status_path).get("source") or odds_source)
+ 
+-    history = []
+-    observation_history = []
+-    ledger_path = OUTPUT_DIR / "betting_ledger.csv"
+-    if ledger_path.exists():
+-        with ledger_path.open("r", encoding="utf-8-sig", newline="") as handle:
+-            history = list(csv.DictReader(handle))
+-    observation_ledger_path = OUTPUT_DIR / "observation_ledger.csv"
+-    if observation_ledger_path.exists():
+-        with observation_ledger_path.open("r", encoding="utf-8-sig", newline="") as handle:
+-            observation_history = list(csv.DictReader(handle))
+-    metrics_payload = {}
+-    metrics_path = OUTPUT_DIR / "model_metrics.json"
+-    if metrics_path.exists():
+-        try:
+-            metrics_payload = read_json(metrics_path)
+-        except (OSError, json.JSONDecodeError):
+-            metrics_payload = {}
++    if paid_history is None:
++        paid_history = load_csv(OUTPUT_DIR / "betting_ledger.csv")
++    if observation_history is None:
++        observation_history = load_csv(OUTPUT_DIR / "observation_ledger.csv")
++    if account_metrics is None:
++        metrics_path = OUTPUT_DIR / "model_metrics.json"
++        if metrics_path.exists():
++            try:
++                account_metrics = read_json(metrics_path)
++            except (OSError, json.JSONDecodeError):
++                account_metrics = {}
++        else:
++            account_metrics = {}
++    if training_samples is None:
++        training_samples = load_draw_training_samples()
+     account_state = simulation_account_state(
+-        history,
++        paid_history,
+         observation_history,
+         target_date,
+         config.get("simulation_account", {}),
+-        metrics_payload,
++        account_metrics,
+     )
+     calibration_config = config.get("league_calibration", {})
+     league_calibrations = fit_league_draw_calibrations(
+-        load_draw_training_samples(),
++        training_samples,
+         min_samples=int(calibration_config.get("min_samples", 30)),
+         prior_samples=int(calibration_config.get("prior_samples", 60)),
+         max_adjustment=float(calibration_config.get("max_adjustment", 0.05)),
+         validation_fraction=float(calibration_config.get("validation_fraction", 0.25)),
+     )
+-    bet_metrics = summarize(history, strategy_version)
++    bet_metrics = summarize(paid_history, strategy_version)
+     observation_metrics = summarize(observation_history, strategy_version)
+     by_play = bet_metrics.get("by_play", {})
+     paused_leagues = {league for league, item in bet_metrics.get("by_league", {}).items() if item.get("paused")}
+@@ -1378,15 +1382,17 @@ def build_value_v4_plan(
+     *,
+     locked_at: datetime,
+     decision_bundle: dict | None = None,
++    root: Path | None = None,
+ ) -> tuple[list[dict], list[dict]]:
+     """Build a value-v4 portfolio from locked decision-market inputs only."""
+     global _LAST_VALUE_V4_AUDIT
+     locked_time = _aware_locked_at(locked_at)
++    bundle_root = Path(root) if root is not None else ROOT
+     if decision_bundle is not None:
+         snapshot = dict(decision_bundle["decision_snapshot"]["payload"])
+         snapshot["_snapshot_record_id"] = decision_bundle["decision_snapshot"]["path"]
+         bundle_config = decision_bundle["configuration"]["betting"]["payload"]
+-        predictions = load_csv(ROOT / decision_bundle["predictions"]["path"])
++        predictions = load_csv(bundle_root / decision_bundle["predictions"]["path"])
+         histories = decision_bundle["history_inputs"]
+         paid_history = histories["paid_history"]["rows"]
+         observation_history = histories["observation_history"]["rows"]
+@@ -1412,6 +1418,49 @@ def build_value_v4_plan(
+     return result.plan, result.observations
+ 
+ 
++def build_paid_plan_from_bundle(
++    target_date: date,
++    *,
++    locked_at: datetime,
++    decision_bundle: dict,
++    root: Path | None = None,
++) -> list[dict]:
++    """Rebuild the paid plan using only immutable bundle-owned inputs."""
++    if not isinstance(decision_bundle, dict):
++        raise ValueError("decision_bundle must be a mapping")
++    bundle_root = Path(root) if root is not None else ROOT
++    config = decision_bundle["configuration"]["betting"]["payload"]
++    mode = config.get("value_strategy", {}).get("activation_mode")
++    if mode not in {"shadow", "active"}:
++        raise ValueError("activation_mode must be shadow or active")
++    if mode == "active":
++        plan, _observations = build_value_v4_plan(
++            target_date,
++            locked_at=locked_at,
++            decision_bundle=decision_bundle,
++            root=bundle_root,
++        )
++        return plan
++
++    snapshot = dict(decision_bundle["decision_snapshot"]["payload"])
++    snapshot["_snapshot_record_id"] = decision_bundle["decision_snapshot"]["path"]
++    predictions = load_csv(bundle_root / decision_bundle["predictions"]["path"])
++    histories = decision_bundle["history_inputs"]
++    legacy_plan, _observations = build_legacy_value_plan(
++        target_date,
++        predictions=predictions,
++        odds_by_match=_snapshot_odds(snapshot),
++        odds_source=str(snapshot.get("source") or ""),
++        config=config,
++        paid_history=histories["paid_history"]["rows"],
++        observation_history=histories["observation_history"]["rows"],
++        training_samples=histories["training_samples"]["rows"],
++        account_metrics=histories["account_metrics"]["payload"],
++    )
++    markets = load_official_decision_markets(target_date, snapshot=snapshot)
++    return _finalize_legacy_plan(legacy_plan, markets, _aware_locked_at(locked_at))
++
++
+ def build_strategy_outputs(
+     target_date: date,
+     *,
+@@ -1433,20 +1482,22 @@ def build_strategy_outputs(
+     legacy_plan = []
+     if mode == "shadow":
+         if decision_bundle is not None:
+-            snapshot = dict(decision_bundle["decision_snapshot"]["payload"])
+-            snapshot["_snapshot_record_id"] = decision_bundle["decision_snapshot"]["path"]
+-            predictions = load_csv(ROOT / decision_bundle["predictions"]["path"])
++            legacy_plan = build_paid_plan_from_bundle(
++                target_date,
++                locked_at=locked_time,
++                decision_bundle=decision_bundle,
++            )
+         else:
+             snapshot = load_value_snapshot(target_date, locked_at=locked_time)
+             predictions = load_predictions(target_date)
+-        markets = load_official_decision_markets(target_date, snapshot=snapshot)
+-        legacy_plan, _ = build_legacy_value_plan(
+-            target_date,
+-            predictions=predictions,
+-            odds_by_match=_snapshot_odds(snapshot),
+-            odds_source=str(snapshot.get("source") or ""),
+-        )
+-        legacy_plan = _finalize_legacy_plan(legacy_plan, markets, locked_time)
++            markets = load_official_decision_markets(target_date, snapshot=snapshot)
++            legacy_plan, _ = build_legacy_value_plan(
++                target_date,
++                predictions=predictions,
++                odds_by_match=_snapshot_odds(snapshot),
++                odds_source=str(snapshot.get("source") or ""),
++            )
++            legacy_plan = _finalize_legacy_plan(legacy_plan, markets, locked_time)
+     v4_plan, observations = build_value_v4_plan(
+         target_date,
+         locked_at=locked_time,
+@@ -1494,12 +1545,17 @@ def load_results() -> dict[str, dict]:
+ def write_plan(plan: list[dict], target_date: date) -> Path:
+     OUTPUT_DIR.mkdir(exist_ok=True)
+     path = OUTPUT_DIR / f"betting_plan_{target_date.isoformat()}.csv"
++    path.write_bytes(plan_csv_bytes(plan))
++    return path
++
++
++def plan_csv_bytes(plan: list[dict]) -> bytes:
+     fields = _plan_fields(plan, list(PLAN_FIELD_ORDER))
+-    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+-        writer = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
++    with io.StringIO(newline="") as handle:
++        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+         writer.writeheader()
+         writer.writerows(plan)
+-    return path
++        return b"\xef\xbb\xbf" + handle.getvalue().encode("utf-8")
+ 
+ 
+ def write_shadow_plan(plan: list[dict], target_date: date) -> Path:
+diff --git a/import_sporttery.py b/import_sporttery.py
+index 46ece80..b7e07f1 100644
+--- a/import_sporttery.py
++++ b/import_sporttery.py
+@@ -753,17 +753,22 @@ def count_written_fixtures(path: Path, target_date: date) -> int:
+         raise ValueError("could not verify written fixture count") from exc
+ 
+ 
+-def load_ratings() -> dict[str, dict]:
+-    path = DATA_DIR / "team_ratings.csv"
++def load_ratings(path: Path | None = None) -> dict[str, dict]:
++    path = path or DATA_DIR / "team_ratings.csv"
+     if not path.exists():
+         return {}
+     with path.open("r", encoding="utf-8-sig", newline="") as fh:
+         return {row["team"]: row for row in csv.DictReader(fh)}
+ 
+ 
+-def write_ratings(matches: list[dict]) -> Path:
+-    path = DATA_DIR / "team_ratings.csv"
+-    ratings = load_ratings()
++def write_ratings(
++    matches: list[dict],
++    *,
++    path: Path | None = None,
++    existing_path: Path | None = None,
++) -> Path:
++    path = path or DATA_DIR / "team_ratings.csv"
++    ratings = load_ratings(existing_path or path)
+     for item in matches:
+         edge = implied_home_edge(item.get("market_h") or item.get("h", ""), item.get("market_a") or item.get("a", ""))
+         home = team_home(item)
+@@ -859,15 +864,18 @@ def write_source_status(
+     analysis_source: str = "专业欧赔市场",
+     *,
+     fixture_count: int,
++    path: Path | None = None,
++    updated_at: datetime | None = None,
+ ) -> Path:
+     if type(fixture_count) is not int or fixture_count < 0:
+         raise ValueError("fixture_count must be a non-negative integer")
+-    path = DATA_DIR / "source_status.json"
++    path = path or DATA_DIR / "source_status.json"
++    updated = _aware_import_datetime(updated_at or datetime.now(timezone.utc))
+     payload = {
+         "source": source,
+         "analysis_source": analysis_source,
+         "target_date": target_date.isoformat(),
+-        "updated_at": datetime.now(timezone.utc).isoformat(),
++        "updated_at": updated.astimezone(timezone.utc).isoformat(),
+         "fallback": source != "竞彩网",
+         "message": message,
+         "fixture_count": fixture_count,
+@@ -877,6 +885,69 @@ def write_source_status(
+     return path
+ 
+ 
++def restore_manifest_compatibility_outputs(
++    root: Path,
++    target_date: date,
++    manifest: dict,
++    *,
++    source: str | None = None,
++    message: str = "",
++    analysis_source: str | None = None,
++) -> tuple[Path, Path, int]:
++    """Atomically rebuild mutable compatibility outputs from immutable import data."""
++    root = Path(root)
++    fixtures_path = root / manifest["fixtures"]["path"]
++    with fixtures_path.open("r", encoding="utf-8-sig", newline="") as handle:
++        fixture_rows = list(csv.DictReader(handle))
++    fixture_count = sum(
++        row.get("date") == target_date.isoformat() for row in fixture_rows
++    )
++    rating_inputs = [
++        {
++            "homeTeam": row.get("team_a", ""),
++            "awayTeam": row.get("team_b", ""),
++            "market_h": row.get("market_odds_a") or row.get("odds_a", ""),
++            "market_a": row.get("market_odds_b") or row.get("odds_b", ""),
++        }
++        for row in fixture_rows
++        if row.get("date") == target_date.isoformat()
++    ]
++    source_name = source or (
++        "竞彩网" if manifest["source"] == "sporttery" else "中国足彩网"
++    )
++    inferred_analysis = next(
++        (
++            row.get("analysis_source", "")
++            for row in fixture_rows
++            if row.get("date") == target_date.isoformat()
++            and row.get("analysis_source")
++        ),
++        "竞彩足球市场",
++    )
++    shared_ratings = DATA_DIR / "team_ratings.csv"
++    shared_status = DATA_DIR / "source_status.json"
++    imported_at = _aware_import_datetime(manifest["imported_at_bjt"])
++    with tempfile.TemporaryDirectory(prefix="compatibility-stage-", dir=DATA_DIR) as tmp:
++        staging = Path(tmp)
++        staged_ratings = write_ratings(
++            rating_inputs,
++            path=staging / "team_ratings.csv",
++            existing_path=shared_ratings,
++        )
++        staged_status = write_source_status(
++            source_name,
++            target_date,
++            message,
++            analysis_source or inferred_analysis,
++            fixture_count=fixture_count,
++            path=staging / "source_status.json",
++            updated_at=imported_at,
++        )
++        _atomic_replace_bytes(shared_ratings, staged_ratings.read_bytes())
++        _atomic_replace_bytes(shared_status, staged_status.read_bytes())
++    return shared_ratings, shared_status, fixture_count
++
++
+ def main() -> int:
+     import argparse
+ 
+@@ -890,6 +961,7 @@ def main() -> int:
+     existing_manifest = import_manifest_path(root, target_date)
+     if existing_manifest.exists():
+         manifest = read_valid_import_manifest(root, target_date)
++        restore_manifest_compatibility_outputs(root, target_date, manifest)
+         _atomic_replace_bytes(
+             DATA_DIR / "fixtures.csv",
+             (root / manifest["fixtures"]["path"]).read_bytes(),
+@@ -956,18 +1028,23 @@ def main() -> int:
+             staged_odds,
+             datetime.now(BEIJING),
+         )
++        manifest = read_valid_import_manifest(root, target_date)
++        ratings_path, status_path, recovered_count = (
++            restore_manifest_compatibility_outputs(
++                root,
++                target_date,
++                manifest,
++                source=source,
++                message=source_message,
++                analysis_source=analysis_source,
++            )
++        )
++        if recovered_count != fixture_count:
++            raise ValueError("manifest compatibility fixture count differs")
+         fixtures_path = DATA_DIR / "fixtures.csv"
+         odds_path = DATA_DIR / f"sporttery_odds_{target_date.isoformat()}.json"
+         _atomic_replace_bytes(fixtures_path, staged_fixtures.read_bytes())
+         _atomic_replace_bytes(odds_path, staged_odds.read_bytes())
+-    ratings_path = write_ratings(selected)
+-    status_path = write_source_status(
+-        source,
+-        target_date,
+-        source_message,
+-        analysis_source,
+-        fixture_count=fixture_count,
+-    )
+     print(f"竞彩网返回比赛: {len(matches)}")
+     print(f"导入未开奖比赛: {len(selected)}")
+     for item in selected:
+diff --git a/plan_lock.py b/plan_lock.py
+index eb951e5..cc4bec0 100644
+--- a/plan_lock.py
++++ b/plan_lock.py
+@@ -146,6 +146,15 @@ def read_valid_lock(root: Path, target_date: date) -> dict | None:
+             target_date,
+             expected_locked_at=_parse_aware_datetime(payload["locked_at_bjt"]),
+         )
++        plan_evidence = bundle.get("paid_plan_evidence")
++        if (
++            not isinstance(plan_evidence, dict)
++            or payload.get("paid_plan_evidence_sha256")
++            != plan_evidence.get("rows_sha256")
++            or plan_hash != plan_evidence.get("plan_sha256")
++            or plan_path.stat().st_size != plan_evidence.get("bytes")
++        ):
++            return None
+         snapshot = bundle["decision_snapshot"]
+         if (
+             payload.get("odds_path") != snapshot.get("path")
+@@ -176,6 +185,13 @@ def lock_plan(root: Path, target_date: date, locked_at: datetime) -> dict:
+     snapshot = bundle["decision_snapshot"]
+     source = snapshot["source"]
+     plan_path, bundle_path = _artifact_paths(root, target_date)
++    plan_evidence = bundle.get("paid_plan_evidence")
++    if (
++        not isinstance(plan_evidence, dict)
++        or sha256_file(plan_path) != plan_evidence.get("plan_sha256")
++        or plan_path.stat().st_size != plan_evidence.get("bytes")
++    ):
++        raise ValueError("paid plan differs from immutable decision evidence")
+     payload = {
+         "schema_version": SCHEMA_VERSION,
+         "report_date": target_date.isoformat(),
+@@ -184,6 +200,7 @@ def lock_plan(root: Path, target_date: date, locked_at: datetime) -> dict:
+         "plan_sha256": sha256_file(plan_path),
+         "decision_bundle_path": f"output/decision_bundle_{target_date.isoformat()}.json",
+         "decision_bundle_sha256": sha256_file(bundle_path),
++        "paid_plan_evidence_sha256": plan_evidence["rows_sha256"],
+         "odds_path": snapshot["path"],
+         "odds_sha256": snapshot["sha256"],
+         "odds_source": source,
+diff --git a/tests/test_betting_ledger.py b/tests/test_betting_ledger.py
+index 8ef53d2..f5f6399 100644
+--- a/tests/test_betting_ledger.py
++++ b/tests/test_betting_ledger.py
+@@ -16,7 +16,7 @@ from betting_ledger import (
+     REFUNDED,
+     WON,
+     ingest_date,
+-    ingest_locked_plan,
++    ingest_locked_plan as _ingest_locked_plan,
+     settle_pending,
+     stable_bet_id,
+     write_ledger_atomic,
+@@ -97,6 +97,27 @@ def lock(**overrides):
+     return payload
+ 
+ 
++def ingest_locked_plan(existing_rows, plan_rows, lock_payload):
++    """Give unit-level canonical rows the explicit evidence production requires."""
++    evidence = {}
++    for row in existing_rows:
++        if not isinstance(row, dict):
++            continue
++        if row.get("strategy_version") not in ledger_module.NEW_PAID_STRATEGY_VERSIONS:
++            continue
++        report_date = row.get("report_date")
++        bet_id = row.get("bet_id")
++        digest = row.get("row_payload_sha256")
++        if all(isinstance(value, str) and value for value in (report_date, bet_id, digest)):
++            evidence[(report_date, bet_id)] = digest
++    return _ingest_locked_plan(
++        existing_rows,
++        plan_rows,
++        lock_payload,
++        canonical_evidence=evidence,
++    )
++
++
+ def locked_plan_rows(root: Path, plan_rows: list[dict]) -> tuple[dict, list[dict]]:
+     output = root / "output"
+     output.mkdir(parents=True, exist_ok=True)
+@@ -1838,9 +1859,78 @@ class LockedIngestCommandTest(unittest.TestCase):
+                 root / "output" / "betting_ledger.csv", [downgraded]
+             )
+ 
+-            with self.assertRaisesRegex(ValueError, "canonical.*legacy|downgrade"):
++            with (
++                patch.object(
++                    ledger_module,
++                    "read_valid_lock",
++                    return_value=self.lock_payload,
++                ),
++                self.assertRaisesRegex(
++                    ValueError,
++                    "canonical.*(legacy|bet_id)|downgrade|strategy_version",
++                ),
++            ):
++                ledger_module.settle_ledger(root, {}, SETTLED_AT)
++
++    def test_locked_identity_rejects_a_single_with_all_new_markers_stripped(self):
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            row = plan_row()
++            self._prepare_locked_plan(root, row)
++            canonical = ingest_locked_plan([], [row], self.lock_payload)[0]
++            stripped = self._strip_canonical_markers(canonical)
++            write_ledger_atomic(root / "output" / "betting_ledger.csv", [stripped])
++
++            with (
++                patch.object(
++                    ledger_module, "read_valid_lock", return_value=self.lock_payload
++                ),
++                self.assertRaisesRegex(ValueError, "canonical|digest|downgrade"),
++            ):
++                ledger_module.settle_ledger(root, {}, SETTLED_AT)
++
++    def test_locked_identity_rejects_a_parlay_strategy_downgrade(self):
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            row = v4_parlay_row("stripped-parlay")
++            self._prepare_locked_plan(root, row)
++            canonical = ingest_locked_plan([], [row], self.lock_payload)[0]
++            stripped = self._strip_canonical_markers(canonical)
++            write_ledger_atomic(root / "output" / "betting_ledger.csv", [stripped])
++
++            with (
++                patch.object(
++                    ledger_module, "read_valid_lock", return_value=self.lock_payload
++                ),
++                self.assertRaisesRegex(ValueError, "canonical|digest|downgrade"),
++            ):
++                ledger_module.settle_ledger(root, {}, SETTLED_AT)
++
++    def test_stripped_canonical_identity_fails_closed_when_lock_is_missing(self):
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            row = plan_row()
++            self._prepare_locked_plan(root, row)
++            canonical = ingest_locked_plan([], [row], self.lock_payload)[0]
++            stripped = self._strip_canonical_markers(canonical)
++            write_ledger_atomic(root / "output" / "betting_ledger.csv", [stripped])
++            (root / "output" / "plan_lock_2026-07-16.json").unlink()
++
++            with self.assertRaisesRegex(ValueError, "lock|canonical|evidence"):
+                 ledger_module.settle_ledger(root, {}, SETTLED_AT)
+ 
++    @staticmethod
++    def _strip_canonical_markers(row):
++        stripped = dict(row)
++        for field in (
++            "strategy_version",
++            "row_payload_sha256",
++            "plan_sha256",
++            "locked_at_bjt",
++        ):
++            stripped[field] = ""
++        return stripped
++
+ 
+ class AtomicWriteTest(unittest.TestCase):
+     def test_atomic_writer_is_deterministic_utf8_sig_and_preserves_unknown_fields(self):
+diff --git a/tests/test_decision_bundle.py b/tests/test_decision_bundle.py
+index 4778737..0deb3b8 100644
+--- a/tests/test_decision_bundle.py
++++ b/tests/test_decision_bundle.py
+@@ -24,6 +24,7 @@ BJT = timezone(timedelta(hours=8))
+ TARGET_DATE = date(2026, 7, 16)
+ GENERATED_AT = datetime(2026, 7, 16, 13, 31, tzinfo=BJT)
+ LOCKED_AT = datetime(2026, 7, 16, 13, 32, tzinfo=BJT)
++REPO_ROOT = Path(__file__).resolve().parents[1]
+ 
+ 
+ class DecisionBundleTest(unittest.TestCase):
+@@ -36,17 +37,11 @@ class DecisionBundleTest(unittest.TestCase):
+             "config.json",
+             {"market_blend_weight": 0.2, "confidence_thresholds": {}},
+         )
+-        self._write_json(
+-            "betting_config.json",
+-            {
+-                "strategy_version": "value-v4",
+-                "value_strategy": {"activation_mode": "shadow"},
+-                "simulation_account": {
+-                    "mode": "simulation",
+-                    "real_money_automation": False,
+-                },
+-            },
++        self.betting_config = json.loads(
++            (REPO_ROOT / "betting_config.json").read_text(encoding="utf-8")
+         )
++        self.betting_config["value_strategy"]["activation_mode"] = "shadow"
++        self._write_json("betting_config.json", self.betting_config)
+         (self.root / "predict_today.py").write_text("MODEL = 'test'\n", encoding="utf-8")
+         for name in (
+             "generate_betting_plan.py",
+@@ -129,10 +124,7 @@ class DecisionBundleTest(unittest.TestCase):
+         )
+         self._write_csv("output/betting_ledger.csv", [])
+         self._write_csv("output/observation_ledger.csv", [])
+-        self._write_csv(
+-            "data/draw_training_samples.csv",
+-            [{"date": "2026-07-15", "match_id": "old", "settled_at_bjt": "2026-07-16T10:00:00+08:00"}],
+-        )
++        self._write_csv("data/draw_training_samples.csv", [])
+         self.snapshot_path = self.root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json"
+         self.snapshot_path.write_text(
+             json.dumps(
+@@ -211,6 +203,11 @@ class DecisionBundleTest(unittest.TestCase):
+         self.assertEqual("decision_snapshot", verified["roles"]["paid_odds"])
+         self.assertIn("fixture_extract", verified["roles"]["model_reference_inputs"])
+         self.assertEqual([], verified["history_inputs"]["paid_history"]["rows"])
++        self.assertEqual({}, verified["history_inputs"]["account_metrics"]["payload"])
++        self.assertEqual(
++            verified["paid_plan_evidence"]["row_count"],
++            len(verified["paid_plan_evidence"]["rows"]),
++        )
+ 
+     def test_bundle_rejects_snapshot_source_divergent_from_import_manifest(self):
+         manifest = json.loads(self.import_manifest_path.read_text(encoding="utf-8"))
+@@ -247,17 +244,9 @@ class DecisionBundleTest(unittest.TestCase):
+     def test_existing_conflicting_bundle_fails_closed(self):
+         write_prediction_metadata(self.root, TARGET_DATE, GENERATED_AT)
+         create_decision_bundle(self.root, TARGET_DATE, LOCKED_AT)
+-        self._write_json(
+-            "betting_config.json",
+-            {
+-                "strategy_version": "value-v4",
+-                "value_strategy": {"activation_mode": "active"},
+-                "simulation_account": {
+-                    "mode": "simulation",
+-                    "real_money_automation": False,
+-                },
+-            },
+-        )
++        changed = json.loads(json.dumps(self.betting_config))
++        changed["value_strategy"]["activation_mode"] = "active"
++        self._write_json("betting_config.json", changed)
+ 
+         with self.assertRaisesRegex(ValueError, "conflicting decision bundle"):
+             create_decision_bundle(self.root, TARGET_DATE, LOCKED_AT)
+diff --git a/tests/test_import_sporttery.py b/tests/test_import_sporttery.py
+index 86d12fa..88e224f 100644
+--- a/tests/test_import_sporttery.py
++++ b/tests/test_import_sporttery.py
+@@ -2,6 +2,7 @@ import json
+ import sys
+ import tempfile
+ import unittest
++from contextlib import ExitStack
+ from datetime import date, datetime, timedelta, timezone
+ from pathlib import Path
+ from unittest.mock import patch
+@@ -470,6 +471,90 @@ class ImportSportterySourceStatusTest(unittest.TestCase):
+             self.assertEqual(0, payload["fixture_count"])
+             self.assertTrue(payload["no_fixtures"])
+ 
++    def test_manifest_crash_recovery_preserves_ratings_and_source_status(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            data_dir = Path(tmp) / "data"
++            data_dir.mkdir()
++            fixture = {
++                "matchId": "recovery-1",
++                "homeTeam": "甲队",
++                "awayTeam": "乙队",
++                "h": "2.00",
++                "d": "3.20",
++                "a": "3.80",
++                "market_h": "2.00",
++                "market_d": "3.20",
++                "market_a": "3.80",
++            }
++            common = (
++                patch.object(import_sporttery, "DATA_DIR", data_dir),
++                patch.object(
++                    import_sporttery,
++                    "fetch_selling_matches",
++                    return_value=[fixture],
++                ),
++                patch.object(
++                    import_sporttery,
++                    "collect_odds",
++                    return_value={"recovery-1": {"had": {}}},
++                ),
++                patch.object(import_sporttery, "fetch_zgzcw_matches", return_value=[]),
++                patch.object(
++                    import_sporttery,
++                    "attach_had_odds",
++                    side_effect=lambda matches, _: matches,
++                ),
++                patch.object(
++                    import_sporttery,
++                    "attach_professional_market",
++                    side_effect=lambda matches, _: matches,
++                ),
++            )
++            with ExitStack() as stack:
++                for context in common:
++                    stack.enter_context(context)
++                stack.enter_context(
++                    patch.object(
++                        sys,
++                        "argv",
++                        ["import_sporttery.py", "--date", "2026-07-16"],
++                    )
++                )
++                stack.enter_context(
++                    patch.object(
++                        import_sporttery,
++                        "_atomic_replace_bytes",
++                        side_effect=RuntimeError("crash after manifest"),
++                    )
++                )
++                with self.assertRaisesRegex(RuntimeError, "crash after manifest"):
++                    import_sporttery.main()
++
++            manifest = data_dir / "import_manifests" / "2026-07-16.json"
++            self.assertTrue(manifest.is_file())
++            with (
++                patch.object(import_sporttery, "DATA_DIR", data_dir),
++                patch.object(
++                    sys, "argv", ["import_sporttery.py", "--date", "2026-07-16"]
++                ),
++                patch.object(
++                    import_sporttery,
++                    "fetch_selling_matches",
++                    side_effect=AssertionError("recovery refetched import"),
++                ),
++            ):
++                self.assertEqual(0, import_sporttery.main())
++
++            ratings = data_dir / "team_ratings.csv"
++            status = data_dir / "source_status.json"
++            self.assertTrue(ratings.is_file())
++            self.assertIn("team,elo", ratings.read_text(encoding="utf-8-sig"))
++            self.assertIn("甲队", ratings.read_text(encoding="utf-8-sig"))
++            self.assertIn("乙队", ratings.read_text(encoding="utf-8-sig"))
++            payload = json.loads(status.read_text(encoding="utf-8"))
++            self.assertEqual(TARGET_DATE.isoformat(), payload["target_date"])
++            self.assertEqual(1, payload["fixture_count"])
++
+     def test_main_publishes_the_count_from_the_written_nonzero_fixture_set(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             data_dir = Path(tmp) / "data"
+diff --git a/tests/test_plan_lock.py b/tests/test_plan_lock.py
+index c7fa6dd..c3590cc 100644
+--- a/tests/test_plan_lock.py
++++ b/tests/test_plan_lock.py
+@@ -10,12 +10,91 @@ from datetime import date, datetime, timezone, timedelta
+ from pathlib import Path
+ from unittest.mock import patch
+ 
++import betting_ledger as ledger_module
++from betting_ledger import ingest_locked_plan, write_ledger_atomic
+ from decision_bundle import create_decision_bundle, write_prediction_metadata
++from generate_betting_plan import plan_csv_bytes
++from official_markets import THREE_WAY_SELECTIONS, TOTAL_GOALS_SELECTIONS
+ from plan_lock import lock_plan, main, read_valid_lock, sha256_file as plan_lock_sha
+ 
+ 
+ BJT = timezone(timedelta(hours=8))
+ TARGET_DATE = date(2026, 7, 16)
++SETTLED_AT = datetime(2026, 7, 17, 12, 0, tzinfo=BJT)
++REPO_ROOT = Path(__file__).resolve().parents[1]
++
++
++def canonical_paid_row(*, parlay: bool) -> dict:
++    row = {
++        "date": TARGET_DATE.isoformat(),
++        "strategy_version": "value-v4",
++        "model_version": "model-3",
++        "match_id": "1001",
++        "team_a": "A",
++        "team_b": "B",
++        "kickoff_local": "2026-07-16T20:00:00+08:00",
++        "play": "HAD",
++        "market_type": "had",
++        "market_line": "",
++        "selection": THREE_WAY_SELECTIONS["h"],
++        "odds": "2.00",
++        "locked_odds": "2.00",
++        "odds_source": "sporttery",
++        "odds_source_record_id": "odds-1001",
++        "odds_captured_at_bjt": "2026-07-16T13:30:00+08:00",
++        "raw_probability": "0.54",
++        "calibrated_probability": "0.53",
++        "official_market_probability": "0.50",
++        "conservative_probability": "0.51",
++        "edge": "0.01",
++        "net_ev": "0.02",
++        "full_kelly": "0.02",
++        "kelly_fraction": "0.25",
++        "data_quality_multiplier": "1.0",
++        "volatility_multiplier": "1.0",
++        "performance_multiplier": "1.0",
++        "portfolio_rank": "1",
++        "binding_limits": "daily",
++        "stake": "20",
++        "data_quality": "high",
++        "volatility_band": "low",
++        "legs_json": "[]",
++    }
++    if not parlay:
++        return row
++    legs = [
++        {
++            "match_id": "parlay-1",
++            "market_type": "had",
++            "selection": THREE_WAY_SELECTIONS["h"],
++            "line": "",
++            "odds": "2.00",
++            "odds_source": "sporttery",
++            "odds_source_record_id": "odds-parlay-1",
++            "odds_captured_at_bjt": "2026-07-16T13:30:00+08:00",
++        },
++        {
++            "match_id": "parlay-2",
++            "market_type": "ttg",
++            "selection": TOTAL_GOALS_SELECTIONS["s2"],
++            "line": "",
++            "odds": "3.00",
++            "odds_source": "sporttery",
++            "odds_source_record_id": "odds-parlay-2",
++            "odds_captured_at_bjt": "2026-07-16T13:30:00+08:00",
++        },
++    ]
++    return {
++        **row,
++        "match_id": "",
++        "play": "PARLAY",
++        "market_type": "parlay",
++        "selection": "combo",
++        "odds": "6.00",
++        "locked_odds": "6.00",
++        "stake": "10",
++        "legs_json": json.dumps(legs, ensure_ascii=False),
++    }
+ 
+ 
+ def _concurrent_lock_worker(
+@@ -69,16 +148,8 @@ class PlanLockTest(unittest.TestCase):
+         (root / "output").mkdir()
+         (root / "data" / "odds_snapshots").mkdir(parents=True)
+         (root / "config.json").write_text("{}\n", encoding="utf-8")
+-        (root / "betting_config.json").write_text(
+-            json.dumps({
+-                "strategy_version": "value-v4",
+-                "value_strategy": {"activation_mode": "shadow"},
+-                "simulation_account": {
+-                    "mode": "simulation",
+-                    "real_money_automation": False,
+-                },
+-            }),
+-            encoding="utf-8",
++        (root / "betting_config.json").write_bytes(
++            (REPO_ROOT / "betting_config.json").read_bytes()
+         )
+         for name in (
+             "predict_today.py",
+@@ -172,22 +243,19 @@ class PlanLockTest(unittest.TestCase):
+             }),
+             encoding="utf-8",
+         )
+-        with (root / "output" / "betting_plan_2026-07-16.csv").open(
+-            "w", encoding="utf-8-sig", newline=""
+-        ) as handle:
+-            writer = csv.DictWriter(handle, fieldnames=["date", "match", "stake"])
+-            writer.writeheader()
+-            writer.writerow({"date": "2026-07-16", "match": "A vs B", "stake": 20})
+         write_prediction_metadata(
+             root,
+             TARGET_DATE,
+             datetime(2026, 7, 16, 13, 30, 30, tzinfo=BJT),
+         )
+-        create_decision_bundle(
++        bundle = create_decision_bundle(
+             root,
+             TARGET_DATE,
+             datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
+         )
++        (root / "output" / "betting_plan_2026-07-16.csv").write_bytes(
++            plan_csv_bytes(bundle["paid_plan_evidence"]["rows"])
++        )
+ 
+     @staticmethod
+     def write_csv(path: Path, rows: list[dict]) -> None:
+@@ -225,6 +293,32 @@ class PlanLockTest(unittest.TestCase):
+             )
+             self.assertIsNone(read_valid_lock(root, date(2026, 7, 16)))
+ 
++    def test_real_lock_rejects_joint_plan_and_lock_tamper_for_single_and_parlay(self):
++        for parlay in (False, True):
++            with self.subTest(parlay=parlay), tempfile.TemporaryDirectory() as tmp:
++                root = Path(tmp)
++                self.make_artifacts(root)
++                lock = self.make_lock(root)
++                plan_row = canonical_paid_row(parlay=parlay)
++                plan_path = root / lock["plan_path"]
++                self.write_csv(plan_path, [plan_row])
++                lock["plan_sha256"] = plan_lock_sha(plan_path)
++                self.write_lock_payload(root, lock)
++
++                canonical = ingest_locked_plan(
++                    [], [plan_row], lock, canonical_evidence={}
++                )[0]
++                canonical["row_payload_sha256"] = ledger_module._row_payload_digest(
++                    canonical
++                )
++                write_ledger_atomic(
++                    root / "output" / "betting_ledger.csv", [canonical]
++                )
++
++                self.assertIsNone(read_valid_lock(root, TARGET_DATE))
++                with self.assertRaisesRegex(ValueError, "lock|evidence|anchor"):
++                    ledger_module.settle_ledger(root, {}, SETTLED_AT)
++
+     def test_next_day_shared_fixture_update_preserves_prior_lock(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             root = Path(tmp)
+@@ -250,8 +344,14 @@ class PlanLockTest(unittest.TestCase):
+             self.make_artifacts(root)
+             bundle_path = root / "output" / "decision_bundle_2026-07-16.json"
+             bundle_path.write_text("{}\n", encoding="utf-8")
++            plan_path = root / "output" / "betting_plan_2026-07-16.csv"
+             bundle = {
+                 "locked_at_bjt": "2026-07-16T13:31:00+08:00",
++                "paid_plan_evidence": {
++                    "plan_sha256": plan_lock_sha(plan_path),
++                    "bytes": plan_path.stat().st_size,
++                    "rows_sha256": "c" * 64,
++                },
+                 "decision_snapshot": {
+                     "source": "zgzcw",
+                     "path": "data/odds_snapshots/2026-07-16-133000-decision.json",
+@@ -283,8 +383,14 @@ class PlanLockTest(unittest.TestCase):
+             self.make_artifacts(root)
+             bundle_path = root / "output" / "decision_bundle_2026-07-16.json"
+             bundle_path.write_text("{}\n", encoding="utf-8")
++            plan_path = root / "output" / "betting_plan_2026-07-16.csv"
+             bundle = {
+                 "locked_at_bjt": "2026-07-16T13:31:00+08:00",
++                "paid_plan_evidence": {
++                    "plan_sha256": plan_lock_sha(plan_path),
++                    "bytes": plan_path.stat().st_size,
++                    "rows_sha256": "c" * 64,
++                },
+                 "decision_snapshot": {
+                     "source": "zgzcw",
+                     "path": "data/odds_snapshots/2026-07-16-133000-decision.json",
+diff --git a/tests/test_report_status.py b/tests/test_report_status.py
+index 59044df..6c73375 100644
+--- a/tests/test_report_status.py
++++ b/tests/test_report_status.py
+@@ -12,6 +12,7 @@ from unittest.mock import patch
+ 
+ import import_sporttery
+ from decision_bundle import create_decision_bundle, write_prediction_metadata
++from generate_betting_plan import plan_csv_bytes
+ from plan_lock import lock_plan
+ from report_status import (
+     OFFICIAL_FIXTURE_SOURCES,
+@@ -24,6 +25,7 @@ from report_status import (
+ 
+ 
+ BJT = timezone(timedelta(hours=8))
++REPO_ROOT = Path(__file__).resolve().parents[1]
+ REPORT_DATE = date(2026, 7, 16)
+ GENERATED_AT = datetime(2026, 7, 16, 13, 35, tzinfo=BJT)
+ FIXTURE_FIELDS = [
+@@ -121,16 +123,12 @@ class ReportStatusTest(unittest.TestCase):
+         ) as handle:
+             csv.DictWriter(handle, fieldnames=PLAN_FIELDS).writeheader()
+         (root / "config.json").write_text("{}\n", encoding="utf-8")
++        betting_config = json.loads(
++            (REPO_ROOT / "betting_config.json").read_text(encoding="utf-8")
++        )
++        betting_config["value_strategy"]["activation_mode"] = "shadow"
+         (root / "betting_config.json").write_text(
+-            json.dumps({
+-                "strategy_version": "value-v4",
+-                "value_strategy": {"activation_mode": "shadow"},
+-                "simulation_account": {
+-                    "mode": "simulation",
+-                    "real_money_automation": False,
+-                },
+-            }),
+-            encoding="utf-8",
++            json.dumps(betting_config), encoding="utf-8"
+         )
+         for name in (
+             "predict_today.py",
+@@ -242,7 +240,10 @@ class ReportStatusTest(unittest.TestCase):
+             REPORT_DATE,
+             datetime(2026, 7, 16, 13, 30, 30, tzinfo=BJT),
+         )
+-        create_decision_bundle(root, REPORT_DATE, locked_at)
++        bundle = create_decision_bundle(root, REPORT_DATE, locked_at)
++        (root / "output" / f"betting_plan_{REPORT_DATE.isoformat()}.csv").write_bytes(
++            plan_csv_bytes(bundle["paid_plan_evidence"]["rows"])
++        )
+         lock_plan(
+             root,
+             REPORT_DATE,
+@@ -788,11 +789,11 @@ class ReportStatusTest(unittest.TestCase):
+         with tempfile.TemporaryDirectory() as tmp:
+             root = Path(tmp)
+             self.make_artifacts(root)
++            self.make_lock(root)
+             with (root / "output" / "betting_plan_2026-07-16.csv").open(
+                 "w", encoding="utf-8", newline=""
+             ) as handle:
+                 csv.DictWriter(handle, fieldnames=["date", "stake"]).writeheader()
+-            self.make_lock(root)
+ 
+             status = self.publish(root, "decision")
+ 
+diff --git a/tests/test_value_strategy_integration.py b/tests/test_value_strategy_integration.py
+index 7d02301..cece7d2 100644
+--- a/tests/test_value_strategy_integration.py
++++ b/tests/test_value_strategy_integration.py
+@@ -33,6 +33,8 @@ def synthetic_decision_bundle(root: Path, source: str = "sporttery") -> dict:
+     bundle_path = root / "output" / f"decision_bundle_{TARGET_DATE}.json"
+     bundle_path.write_text("{}\n", encoding="utf-8")
+     odds_path = root / "data" / f"sporttery_odds_{TARGET_DATE}.json"
++    plan_path = root / "output" / f"betting_plan_{TARGET_DATE}.csv"
++    plan_bytes = plan_path.read_bytes()
+     return {
+         "locked_at_bjt": LOCKED_AT.isoformat(),
+         "decision_snapshot": {
+@@ -40,6 +42,11 @@ def synthetic_decision_bundle(root: Path, source: str = "sporttery") -> dict:
+             "path": odds_path.relative_to(root).as_posix(),
+             "sha256": plan_lock_sha(odds_path),
+         },
++        "paid_plan_evidence": {
++            "plan_sha256": plan_lock_sha(plan_path),
++            "bytes": len(plan_bytes),
++            "rows_sha256": "e" * 64,
++        },
+     }
+ 
+ 
+@@ -215,7 +222,7 @@ def settled_value_single(
+             "locked_at_bjt": row["locked_at_bjt"],
+             "plan_sha256": "a" * 64,
+             "odds_source": "sporttery",
+-        })[0]
++        }, canonical_evidence={})[0]
+     else:
+         row["bet_id"] = ledger_module.stable_bet_id(row)
+     result = {
+@@ -285,7 +292,7 @@ def settled_value_parlay(report_date: str = "2026-07-17") -> dict:
+         "locked_at_bjt": row["locked_at_bjt"],
+         "plan_sha256": "b" * 64,
+         "odds_source": "sporttery",
+-    })[0]
++    }, canonical_evidence={})[0]
+     results = {
+         "maturity-parlay-a": {
+             "match_id": "maturity-parlay-a",
+diff --git a/tests/test_workflow_schedule.py b/tests/test_workflow_schedule.py
+index 6b7c7fe..cc29462 100644
+--- a/tests/test_workflow_schedule.py
++++ b/tests/test_workflow_schedule.py
+@@ -161,12 +161,64 @@ class WorkflowScheduleTest(unittest.TestCase):
+         shutil.copy2(ROOT / "plan_lock.py", root / "plan_lock.py")
+         shutil.copy2(ROOT / "betting_ledger.py", root / "betting_ledger.py")
+         shutil.copy2(ROOT / "official_markets.py", root / "official_markets.py")
++        (root / "workflow_plan_fixture.py").write_text(
++            '''import csv
++import io
++
++def plan_row(target_date):
++    return {
++        "date": target_date,
++        "strategy_version": "value-v4",
++        "model_version": "workflow-test-model",
++        "match_id": "workflow-match",
++        "team_a": "Home",
++        "team_b": "Away",
++        "kickoff_local": target_date + "T14:00:00+08:00",
++        "play": "HAD",
++        "market_type": "had",
++        "market_line": "",
++        "selection": chr(0x80DC),
++        "odds": "2.00",
++        "locked_odds": "2.00",
++        "odds_source": "zgzcw",
++        "odds_source_record_id": "workflow-odds-1",
++        "odds_captured_at_bjt": target_date + "T13:30:00+08:00",
++        "raw_probability": "0.54",
++        "calibrated_probability": "0.53",
++        "official_market_probability": "0.50",
++        "conservative_probability": "0.51",
++        "edge": "0.01",
++        "net_ev": "0.02",
++        "full_kelly": "0.02",
++        "kelly_fraction": "0.25",
++        "data_quality_multiplier": "1.0",
++        "volatility_multiplier": "1.0",
++        "performance_multiplier": "1.0",
++        "portfolio_rank": "1",
++        "binding_limits": "daily",
++        "stake": "20",
++        "data_quality": "high",
++        "volatility_band": "low",
++    }
++
++def plan_bytes(rows):
++    stream = io.StringIO(newline="")
++    writer = csv.DictWriter(
++        stream, fieldnames=sorted(rows[0]), lineterminator="\\r\\n"
++    )
++    writer.writeheader()
++    writer.writerows(rows)
++    return stream.getvalue().encode("utf-8")
++''',
++            encoding="utf-8",
++        )
+         (root / "decision_bundle.py").write_text(
+             '''import argparse
+ import hashlib
+ import json
+ from datetime import date, datetime, timedelta, timezone
+ from pathlib import Path
++from workflow_plan_fixture import plan_bytes, plan_row
+ 
+ def _sha256(path):
+     return hashlib.sha256(path.read_bytes()).hexdigest()
+@@ -202,6 +254,8 @@ def main():
+         handle.write("decision_bundle.py\\n")
+     snapshot_path = Path("data/odds_snapshots") / f"{args.date}-133000-decision.json"
+     manifest_path = Path("data/import_manifests") / f"{args.date}.json"
++    paid_rows = [plan_row(args.date)]
++    paid_bytes = plan_bytes(paid_rows)
+     manifest_record = {
+         "path": manifest_path.as_posix(),
+         "sha256": _sha256(manifest_path),
+@@ -217,6 +271,14 @@ def main():
+             "sha256": _sha256(snapshot_path),
+         },
+         "import_manifest": manifest_record,
++        "paid_plan_evidence": {
++            "plan_sha256": hashlib.sha256(paid_bytes).hexdigest(),
++            "bytes": len(paid_bytes),
++            "rows_sha256": hashlib.sha256(
++                json.dumps(paid_rows, sort_keys=True).encode("utf-8")
++            ).hexdigest(),
++            "rows": paid_rows,
++        },
+     }
+     output = Path("output") / f"decision_bundle_{args.date}.json"
+     output.write_text(json.dumps(payload, sort_keys=True) + "\\n", encoding="utf-8")
+@@ -233,6 +295,7 @@ import json
+ import os
+ import sys
+ from pathlib import Path
++from workflow_plan_fixture import plan_bytes
+ 
+ name = Path(sys.argv[0]).name
+ args = sys.argv[1:]
+@@ -309,46 +372,14 @@ elif name == "capture_odds_snapshot.py":
+         encoding="utf-8",
+     )
+ elif name == "generate_betting_plan.py":
+-    row = {
+-        "date": target_date,
+-        "strategy_version": "value-v4",
+-        "model_version": "workflow-test-model",
+-        "match_id": "workflow-match",
+-        "team_a": "Home",
+-        "team_b": "Away",
+-        "kickoff_local": target_date + "T14:00:00+08:00",
+-        "play": "HAD",
+-        "market_type": "had",
+-        "market_line": "",
+-        "selection": chr(0x80DC),
+-        "odds": "2.00",
+-        "locked_odds": "2.00",
+-        "odds_source": "zgzcw",
+-        "odds_source_record_id": "workflow-odds-1",
+-        "odds_captured_at_bjt": target_date + "T13:30:00+08:00",
+-        "raw_probability": "0.54",
+-        "calibrated_probability": "0.53",
+-        "official_market_probability": "0.50",
+-        "conservative_probability": "0.51",
+-        "edge": "0.01",
+-        "net_ev": "0.02",
+-        "full_kelly": "0.02",
+-        "kelly_fraction": "0.25",
+-        "data_quality_multiplier": "1.0",
+-        "volatility_multiplier": "1.0",
+-        "performance_multiplier": "1.0",
+-        "portfolio_rank": "1",
+-        "binding_limits": "daily",
+-        "stake": "20",
+-        "data_quality": "high",
+-        "volatility_band": "low",
+-    }
+-    with Path(f"output/betting_plan_{target_date}.csv").open(
+-        "w", encoding="utf-8", newline=""
+-    ) as handle:
+-        writer = csv.DictWriter(handle, fieldnames=list(row))
+-        writer.writeheader()
+-        writer.writerow(row)
++    bundle = json.loads(
++        Path(f"output/decision_bundle_{target_date}.json").read_text(
++            encoding="utf-8"
++        )
++    )
++    Path(f"output/betting_plan_{target_date}.csv").write_bytes(
++        plan_bytes(bundle["paid_plan_evidence"]["rows"])
++    )
+ '''
+         for name in (
+             "import_sporttery.py",
