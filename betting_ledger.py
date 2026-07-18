@@ -50,7 +50,8 @@ REQUIRED_FIELD_ORDER = (
     "kelly_fraction", "data_quality_multiplier", "volatility_multiplier",
     "performance_multiplier", "portfolio_rank", "binding_limits", "stake", "data_quality",
     "volatility_band", "status", "result_status", "result_source",
-    "source_record_id", "captured_at_bjt", "home_goals", "away_goals",
+    "source_record_id", "captured_at_bjt", "score_scope", "settlement_minutes",
+    "home_goals", "away_goals",
     "settled_at_bjt", "return", "profit", "result_legs_json", "clv",
 )
 
@@ -461,7 +462,8 @@ def _new_observation_row(source_row: dict, bet_id: str) -> dict:
     row["status"] = PENDING
     for field in (
         "result_status", "result_source", "source_record_id", "captured_at_bjt",
-        "home_goals", "away_goals", "settled_at_bjt", "result_legs_json", "clv",
+        "score_scope", "settlement_minutes", "home_goals", "away_goals",
+        "settled_at_bjt", "result_legs_json", "clv",
     ):
         row[field] = ""
     row["return"] = "0.00"
@@ -607,7 +609,8 @@ def _settled_parlay_identities(row: dict) -> list[dict]:
     if any(
         row.get(field) != aggregate[field]
         for field in (
-            "result_status", "result_source", "source_record_id", "captured_at_bjt"
+            "result_status", "result_source", "source_record_id", "captured_at_bjt",
+            "score_scope", "settlement_minutes",
         )
     ):
         return []
@@ -835,7 +838,17 @@ def _normalize_existing_rows(
     known_keys: set[tuple[str, str]] = set()
     canonical_states: dict[str, str] = {}
     for source_row in existing_rows:
-        row = _migrate_existing_row(source_row)
+        if not isinstance(source_row, dict):
+            raise ValueError("existing row must be a mapping")
+        if source_row.get("strategy_version") in NEW_PAID_STRATEGY_VERSIONS:
+            try:
+                _validate_existing_canonical_paid_row(source_row)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid existing canonical paid row: {exc}") from exc
+            row = dict(source_row)
+        else:
+            _validate_existing_legacy_economics(source_row)
+            row = _migrate_existing_row(source_row)
         key_kind, identity_key = _existing_dedupe_key(row)
         dedupe_key = (key_kind, identity_key)
         if dedupe_key in known_keys:
@@ -850,6 +863,156 @@ def _normalize_existing_rows(
             canonical_states[identity_key] = _existing_canonical_state(row)
         normalized.append(row)
     return normalized, known_keys
+
+
+def _validate_existing_canonical_paid_row(row: dict) -> None:
+    row_date = _strict_canonical_date(row.get("date"), "date")
+    report_date = _strict_canonical_date(row.get("report_date"), "report_date")
+    if row_date != report_date:
+        raise ValueError("date and report_date must match")
+    provided_id = _required_text(row.get("bet_id"), "bet_id")
+    if provided_id != stable_bet_id(row):
+        raise ValueError("bet_id must equal the stable canonical identity")
+    locked_at = _aware_datetime(row.get("locked_at_bjt"), "locked_at_bjt")
+    plan_hash = row.get("plan_sha256")
+    if (
+        not isinstance(plan_hash, str)
+        or len(plan_hash) != 64
+        or any(character not in "0123456789abcdef" for character in plan_hash.lower())
+    ):
+        raise ValueError("plan_sha256 must be a SHA-256 hex string")
+    source = _required_text(row.get("odds_source"), "odds_source").lower()
+    _validate_new_paid_rows([], [row], source, report_date, locked_at)
+
+    status = row.get("status")
+    if status == PENDING:
+        settlement_fields = (
+            "result_status",
+            "result_source",
+            "source_record_id",
+            "captured_at_bjt",
+            "score_scope",
+            "settlement_minutes",
+            "home_goals",
+            "away_goals",
+            "settled_at_bjt",
+            "result_legs_json",
+        )
+        if any(row.get(field) not in (None, "") for field in settlement_fields):
+            raise ValueError("pending row contains settlement evidence")
+        if _required_decimal(row.get("return"), "return") != MONEY_ZERO:
+            raise ValueError("pending return must be zero")
+        if _required_decimal(row.get("profit"), "profit") != MONEY_ZERO:
+            raise ValueError("pending profit must be zero")
+        return
+    if status in TERMINAL_STATUSES:
+        _validate_existing_terminal_economics(row)
+        return
+    if status == ABNORMAL:
+        if not _is_invalid_with_provenance(row):
+            raise ValueError("abnormal row requires invalid result provenance")
+        _aware_iso(row.get("settled_at_bjt"), "settled_at_bjt")
+        if _required_money(row.get("return"), "return") != MONEY_ZERO:
+            raise ValueError("abnormal return must be zero")
+        if _required_money(row.get("profit"), "profit") != MONEY_ZERO:
+            raise ValueError("abnormal profit must be zero")
+        return
+    raise ValueError("status is not canonical")
+
+
+def _strict_canonical_date(value: object, name: str) -> str:
+    if not isinstance(value, str) or value != value.strip():
+        raise ValueError(f"{name} must be canonical YYYY-MM-DD")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be canonical YYYY-MM-DD") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{name} must be canonical YYYY-MM-DD")
+    return value
+
+
+def _validate_existing_terminal_economics(row: dict) -> None:
+    _aware_iso(row.get("settled_at_bjt"), "settled_at_bjt")
+    stake = _paid_stake(row.get("stake"))
+    returned = _required_money(row.get("return"), "return")
+    profit = _required_money(row.get("profit"), "profit", allow_negative=True)
+    if profit != returned - stake:
+        raise ValueError("terminal profit must equal return minus stake")
+
+    status = row["status"]
+    if _is_parlay(row):
+        if not _settled_parlay_identities(row):
+            raise ValueError("terminal parlay result evidence is invalid")
+        expected_return = MONEY_ZERO
+        if status == REFUNDED:
+            expected_return = stake
+        elif status == WON:
+            result_legs = json.loads(row["result_legs_json"])
+            effective_odds = Decimal("1")
+            for raw, result in zip(
+                _sorted_raw_legs(_raw_legs(row)),
+                _sorted_result_legs(result_legs),
+            ):
+                if result.get("result_status") != "refunded":
+                    effective_odds *= _decimal_odds(
+                        raw.get("locked_odds", raw.get("odds")),
+                        "parlay leg locked odds",
+                    )
+            expected_return = _money(stake * effective_odds)
+    else:
+        if not _is_proven_result(row):
+            raise ValueError("terminal result provenance is invalid")
+        identity = _identity_payload(row)
+        expected_status = _single_terminal_status(
+            {
+                "market_type": identity["market_type"],
+                "selection": identity["selection"],
+                "line": identity["line"],
+            },
+            row,
+        )
+        if expected_status != status:
+            raise ValueError("terminal status differs from result")
+        expected_return = (
+            stake
+            if status == REFUNDED
+            else MONEY_ZERO
+            if status == LOST
+            else _money(stake * _decimal_odds(row.get("locked_odds"), "locked_odds"))
+        )
+    if returned != expected_return:
+        raise ValueError("terminal return is inconsistent")
+
+
+def _required_money(
+    value: object,
+    name: str,
+    *,
+    allow_negative: bool = False,
+) -> Decimal:
+    amount = _required_decimal(value, name)
+    if (not allow_negative and amount < MONEY_ZERO) or amount != amount.quantize(
+        MONEY_QUANTUM
+    ):
+        qualifier = "canonical money" if allow_negative else "nonnegative canonical money"
+        raise ValueError(f"{name} must be {qualifier}")
+    return amount
+
+
+def _validate_existing_legacy_economics(row: dict) -> None:
+    if row.get("stake") not in (None, ""):
+        try:
+            stake = _required_decimal(row.get("stake"), "legacy stake")
+        except ValueError as exc:
+            raise ValueError("invalid existing legacy economics") from exc
+        if stake < MONEY_ZERO:
+            raise ValueError("invalid existing legacy economics")
+    if row.get("status") in TERMINAL_STATUSES:
+        try:
+            _required_decimal(row.get("profit"), "legacy profit")
+        except ValueError as exc:
+            raise ValueError("invalid existing legacy economics") from exc
 
 
 def _existing_canonical_state(row: dict) -> str:
@@ -969,7 +1132,8 @@ def _new_locked_row(source_row: dict, lock: dict, lock_source: str, bet_id: str)
     row["status"] = PENDING
     for field in (
         "result_status", "result_source", "source_record_id", "captured_at_bjt",
-        "home_goals", "away_goals", "settled_at_bjt", "result_legs_json", "clv",
+        "score_scope", "settlement_minutes", "home_goals", "away_goals",
+        "settled_at_bjt", "result_legs_json", "clv",
     ):
         row[field] = ""
     row["return"] = "0.00"
@@ -978,7 +1142,7 @@ def _new_locked_row(source_row: dict, lock: dict, lock_source: str, bet_id: str)
 
 
 def _set_settlement_defaults(row: dict) -> None:
-    for field in ("result_status", "result_source", "source_record_id", "captured_at_bjt", "home_goals", "away_goals", "settled_at_bjt", "result_legs_json", "clv"):
+    for field in ("result_status", "result_source", "source_record_id", "captured_at_bjt", "score_scope", "settlement_minutes", "home_goals", "away_goals", "settled_at_bjt", "result_legs_json", "clv"):
         row.setdefault(field, "")
     row.setdefault("return", "0.00")
     row.setdefault("profit", "0.00")
@@ -1117,7 +1281,13 @@ def _is_proven_result(result: dict | None) -> bool:
     status = result.get("result_status")
     if status == "refunded":
         return True
-    return status == "finished" and _goal(result.get("home_goals")) is not None and _goal(result.get("away_goals")) is not None
+    return (
+        status == "finished"
+        and result.get("score_scope") == "regular_time_90"
+        and str(result.get("settlement_minutes", "")).strip() == "90"
+        and _goal(result.get("home_goals")) is not None
+        and _goal(result.get("away_goals")) is not None
+    )
 
 
 def _is_invalid_with_provenance(result: dict | None) -> bool:
@@ -1130,6 +1300,8 @@ def _has_provenance(result: dict) -> bool:
         for field in ("result_source", "source_record_id", "captured_at_bjt")
     ):
         return False
+    if result["result_source"].strip().lower() not in DOMESTIC_ODDS_SOURCES:
+        return False
     try:
         _aware_iso(result["captured_at_bjt"], "captured_at_bjt")
     except ValueError:
@@ -1138,7 +1310,7 @@ def _has_provenance(result: dict) -> bool:
 
 
 def _result_fields(result: dict) -> dict:
-    return {field: result.get(field, "") for field in ("result_status", "result_source", "source_record_id", "captured_at_bjt", "home_goals", "away_goals")}
+    return {field: result.get(field, "") for field in ("result_status", "result_source", "source_record_id", "captured_at_bjt", "score_scope", "settlement_minutes", "home_goals", "away_goals")}
 
 
 def _parlay_provenance(details: list[dict]) -> dict:
@@ -1146,6 +1318,8 @@ def _parlay_provenance(details: list[dict]) -> dict:
         "result_source": "|".join(detail["result_source"] for detail in details),
         "source_record_id": "|".join(detail["source_record_id"] for detail in details),
         "captured_at_bjt": "|".join(detail["captured_at_bjt"] for detail in details),
+        "score_scope": "regular_time_90",
+        "settlement_minutes": "90",
         "result_status": "finished" if all(detail["result_status"] == "finished" for detail in details) else "refunded",
         "result_legs_json": json.dumps(details, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
     }

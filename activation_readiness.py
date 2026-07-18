@@ -9,6 +9,17 @@ from pathlib import Path
 
 AUDIT_SCHEMA_VERSION = "shadow-portfolio-activation-audit-v1"
 AUDIT_OUTPUT_NAME = "shadow_portfolio_activation_audit.json"
+ACTIVATION_EVIDENCE_SCHEMA_VERSION = "activation-evidence-v1"
+ACTIVATION_EVIDENCE_FILES = frozenset({
+    "decision_bundle",
+    "snapshot",
+    "predictions",
+    "fixtures",
+    "betting_config",
+    "paid_history",
+    "observation_history",
+    "training_samples",
+})
 
 
 def activation_config_digest(config: dict) -> str:
@@ -148,10 +159,48 @@ def assert_activation_ready(
         raise ValueError("activation audit evidence is invalid")
     if [item.get("date") for item in evidence if isinstance(item, dict)] != checked:
         raise ValueError("activation audit evidence dates are stale")
-    required = {"snapshot", "predictions", "domestic_odds", "fixtures_file"}
+    required = {"activation_evidence"}
     for item in evidence:
         if not isinstance(item, dict) or not required.issubset(item):
             raise ValueError("activation audit evidence is incomplete")
+        activation_evidence = item["activation_evidence"]
+        if (
+            not isinstance(activation_evidence, dict)
+            or not isinstance(activation_evidence.get("manifest"), dict)
+            or not isinstance(activation_evidence.get("files"), dict)
+        ):
+            raise ValueError("activation audit immutable evidence is incomplete")
+        report_date = item.get("date")
+        files = activation_evidence["files"]
+        manifest_record = activation_evidence["manifest"]
+        prefix = f"output/activation_evidence/{report_date}/"
+        if set(files) != ACTIVATION_EVIDENCE_FILES:
+            raise ValueError("activation audit manifest file set is invalid")
+        if manifest_record.get("path") != f"{prefix}manifest.json":
+            raise ValueError("activation audit manifest path is invalid")
+        for record in files.values():
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("path"), str)
+                or Path(record["path"]).parent.as_posix() != prefix.rstrip("/")
+            ):
+                raise ValueError("activation audit manifest file path is invalid")
+        _verify_file_record(root, manifest_record)
+        try:
+            manifest = json.loads((root / manifest_record["path"]).read_text(
+                encoding="utf-8"
+            ))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("activation audit manifest is invalid") from exc
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schema_version") != ACTIVATION_EVIDENCE_SCHEMA_VERSION
+            or manifest.get("target_date") != report_date
+            or manifest.get("locked_at_bjt") != item.get("decision_capture_timestamp")
+            or manifest.get("decision_source") != item.get("decision_source")
+            or manifest.get("files") != files
+        ):
+            raise ValueError("activation audit manifest differs from audit evidence")
         if int(item.get("candidate_count") or 0) <= 0:
             raise ValueError("activation audit candidate reconstruction is unproven")
         if int(item.get("observation_count") or 0) <= 0:
@@ -161,6 +210,8 @@ def assert_activation_ready(
     if not records:
         raise ValueError("activation audit has no hashed evidence")
     for record in records:
+        if not record["path"].startswith("output/activation_evidence/"):
+            raise ValueError("activation audit references mutable evidence")
         _verify_file_record(root, record)
     return payload
 

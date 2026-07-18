@@ -160,6 +160,59 @@ class WorkflowScheduleTest(unittest.TestCase):
         shutil.copy2(ROOT / "plan_lock.py", root / "plan_lock.py")
         shutil.copy2(ROOT / "betting_ledger.py", root / "betting_ledger.py")
         shutil.copy2(ROOT / "official_markets.py", root / "official_markets.py")
+        (root / "decision_bundle.py").write_text(
+            '''import argparse
+import hashlib
+import json
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def read_valid_decision_bundle(root, target_date, *, expected_locked_at=None, verify_current_inputs=False):
+    path = Path(root) / "output" / f"decision_bundle_{target_date.isoformat()}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("target_date") != target_date.isoformat():
+        raise ValueError("bundle date mismatch")
+    if expected_locked_at is not None:
+        persisted = datetime.fromisoformat(payload.get("locked_at_bjt"))
+        if persisted.astimezone(timezone.utc) != expected_locked_at.astimezone(timezone.utc):
+            raise ValueError("bundle lock mismatch")
+    snapshot = payload["decision_snapshot"]
+    snapshot_path = Path(root) / snapshot["path"]
+    if _sha256(snapshot_path) != snapshot["sha256"]:
+        raise ValueError("bundle snapshot mismatch")
+    return payload
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", required=True)
+    parser.add_argument("--locked-at", required=True)
+    args = parser.parse_args()
+    with Path("writer-calls.log").open("a", encoding="utf-8") as handle:
+        handle.write("decision_bundle.py\\n")
+    snapshot_path = Path("data/odds_snapshots") / f"{args.date}-133000-decision.json"
+    payload = {
+        "target_date": args.date,
+        "locked_at_bjt": datetime.fromisoformat(args.locked_at).astimezone(
+            timezone(timedelta(hours=8))
+        ).isoformat(),
+        "decision_snapshot": {
+            "source": "zgzcw",
+            "path": snapshot_path.as_posix(),
+            "sha256": _sha256(snapshot_path),
+        },
+    }
+    output = Path("output") / f"decision_bundle_{args.date}.json"
+    output.write_text(json.dumps(payload, sort_keys=True) + "\\n", encoding="utf-8")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+''',
+            encoding="utf-8",
+        )
         stub = '''import csv
 import json
 import os
@@ -191,6 +244,17 @@ elif name == "capture_odds_snapshot.py":
         }),
         encoding="utf-8",
     )
+    Path("data/odds_snapshots").mkdir(parents=True, exist_ok=True)
+    Path(f"data/odds_snapshots/{target_date}-133000-decision.json").write_text(
+        json.dumps({
+            "target_date": target_date,
+            "captured_at": target_date + "T13:30:00+08:00",
+            "capture_phase": "decision",
+            "source": "zgzcw",
+            "matches": [{"match_id": "workflow-match"}],
+        }),
+        encoding="utf-8",
+    )
 elif name == "generate_betting_plan.py":
     row = {
         "date": target_date,
@@ -206,7 +270,7 @@ elif name == "generate_betting_plan.py":
         "selection": chr(0x80DC),
         "odds": "2.00",
         "locked_odds": "2.00",
-        "odds_source": "sporttery",
+        "odds_source": "zgzcw",
         "odds_source_record_id": "workflow-odds-1",
         "odds_captured_at_bjt": target_date + "T13:30:00+08:00",
         "raw_probability": "0.54",
@@ -494,11 +558,11 @@ elif name == "generate_betting_plan.py":
             'python capture_odds_snapshot.py --date "$TARGET_DATE" --phase decision',
             'python predict_today.py --date "$TARGET_DATE"',
             'LOCKED_AT_BJT="$(date --iso-8601=seconds)"',
+            'python decision_bundle.py --date "$TARGET_DATE" --locked-at "$LOCKED_AT_BJT"',
             'python generate_betting_plan.py --date "$TARGET_DATE" --generate-only --locked-at "$LOCKED_AT_BJT"',
             "python plan_lock.py lock \\",
             "--date \"$TARGET_DATE\" \\",
-            "--locked-at \"$LOCKED_AT_BJT\" \\",
-            "--source sporttery",
+            "--locked-at \"$LOCKED_AT_BJT\"",
             'python betting_ledger.py ingest --date "$TARGET_DATE"',
         ]
         self.assert_commands_in_order(step, expected)
@@ -508,7 +572,7 @@ elif name == "generate_betting_plan.py":
     def test_decision_workflow_uses_active_v4_simulation_entrypoint(self):
         config = json.loads((ROOT / "betting_config.json").read_text(encoding="utf-8"))
         self.assertEqual("value-v4", config["strategy_version"])
-        self.assertEqual("active", config["value_strategy"]["activation_mode"])
+        self.assertEqual("shadow", config["value_strategy"]["activation_mode"])
         self.assertEqual("simulation", config["simulation_account"]["mode"])
         self.assertFalse(config["simulation_account"]["real_money_automation"])
 
@@ -533,6 +597,7 @@ elif name == "generate_betting_plan.py":
             "import_sporttery.py",
             "capture_odds_snapshot.py:decision",
             "predict_today.py",
+            "decision_bundle.py",
             "generate_betting_plan.py",
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -559,7 +624,7 @@ runpy.run_path(str(Path(__file__).with_name("betting_ledger_real.py")), run_name
 
             lock_path = root / "output" / "plan_lock_2026-07-16.json"
             plan_path = root / "output" / "betting_plan_2026-07-16.csv"
-            odds_path = root / "data" / "sporttery_odds_2026-07-16.json"
+            odds_path = root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json"
             ledger_path = root / "output" / "betting_ledger.csv"
             self.assertTrue(lock_path.is_file())
             self.assertFalse(ledger_path.exists())
@@ -571,11 +636,16 @@ runpy.run_path(str(Path(__file__).with_name("betting_ledger_real.py")), run_name
                 check=False,
             )
             self.assertEqual(0, lock_check.returncode, lock_check.stderr)
+            self.assertEqual(
+                "zgzcw",
+                json.loads(lock_path.read_text(encoding="utf-8"))["odds_source"],
+            )
             lock_before = lock_path.read_bytes()
             plan_before = plan_path.read_bytes()
             odds_before = odds_path.read_bytes()
             with plan_path.open(encoding="utf-8-sig", newline="") as handle:
                 locked_plan = list(csv.DictReader(handle))
+            self.assertTrue(locked_plan, "ZGZCW recovery fixture must be nonempty")
             expected_bet_ids = [stable_bet_id(row) for row in locked_plan]
             expected_locked_odds = [row["locked_odds"] for row in locked_plan]
             expected_stakes = [row["stake"] for row in locked_plan]
@@ -589,6 +659,7 @@ runpy.run_path(str(Path(__file__).with_name("betting_ledger_real.py")), run_name
             with ledger_path.open(encoding="utf-8-sig", newline="") as handle:
                 recovered_rows = list(csv.DictReader(handle))
             self.assertEqual(len(locked_plan), len(recovered_rows))
+            self.assertTrue(all(row["odds_source"] == "zgzcw" for row in recovered_rows))
             self.assertEqual(expected_bet_ids, [row["bet_id"] for row in recovered_rows])
             self.assertEqual(
                 expected_locked_odds,
@@ -606,6 +677,7 @@ runpy.run_path(str(Path(__file__).with_name("betting_ledger_real.py")), run_name
             "import_sporttery.py",
             "capture_odds_snapshot.py:decision",
             "predict_today.py",
+            "decision_bundle.py",
             "generate_betting_plan.py",
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -646,6 +718,8 @@ runpy.run_path(str(Path(__file__).with_name("betting_ledger_real.py")), run_name
                     "result_source": "sporttery",
                     "source_record_id": "workflow-result-1",
                     "captured_at_bjt": settled_at.isoformat(),
+                    "score_scope": "regular_time_90",
+                    "settlement_minutes": "90",
                 }
             }
             settle_ledger(root, results, settled_at)
@@ -695,12 +769,13 @@ runpy.run_path(str(Path(__file__).with_name("betting_ledger_real.py")), run_name
                 "import_sporttery.py",
                 "capture_odds_snapshot.py:decision",
                 "predict_today.py",
+                "decision_bundle.py",
                 "generate_betting_plan.py",
             ]
             self.assertEqual(expected_initial_calls, self.writer_calls(root))
 
             plan_path = root / "output" / "betting_plan_2026-07-16.csv"
-            odds_path = root / "data" / "sporttery_odds_2026-07-16.json"
+            odds_path = root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json"
             lock_path = root / "output" / "plan_lock_2026-07-16.json"
             plan_before = plan_path.read_bytes()
             odds_before = odds_path.read_bytes()
@@ -753,6 +828,7 @@ runpy.run_path(str(Path(__file__).with_name("betting_ledger_real.py")), run_name
                     "import_sporttery.py",
                     "capture_odds_snapshot.py:decision",
                     "predict_today.py",
+                    "decision_bundle.py",
                     "generate_betting_plan.py",
                 ],
                 self.writer_calls(root),

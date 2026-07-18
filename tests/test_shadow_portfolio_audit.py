@@ -15,6 +15,7 @@ from audit_shadow_portfolio import (
     validate_audit_payload,
 )
 from betting_ledger import stable_bet_id
+from decision_bundle import create_decision_bundle, write_prediction_metadata
 from official_markets import THREE_WAY_SELECTIONS
 
 
@@ -353,6 +354,29 @@ class RepositoryAuditTest(unittest.TestCase):
         (self.root / "betting_config.json").write_text(
             json.dumps(config()), encoding="utf-8"
         )
+        (self.root / "config.json").write_text("{}\n", encoding="utf-8")
+        for name in (
+            "predict_today.py",
+            "generate_betting_plan.py",
+            "value_candidates.py",
+            "value_portfolio.py",
+            "official_markets.py",
+            "betting_ledger.py",
+            "strategy_controls.py",
+        ):
+            (self.root / name).write_text(f"MODULE = {name!r}\n", encoding="utf-8")
+        (self.root / "data" / "team_ratings.csv").write_text(
+            "team,elo\nHome,1500\nAway,1490\n", encoding="utf-8"
+        )
+        (self.root / "output" / "betting_ledger.csv").write_text(
+            "placeholder\n", encoding="utf-8"
+        )
+        (self.root / "output" / "observation_ledger.csv").write_text(
+            "placeholder\n", encoding="utf-8"
+        )
+        (self.root / "data" / "draw_training_samples.csv").write_text(
+            "placeholder\n", encoding="utf-8"
+        )
         with (self.root / "data" / "fixtures.csv").open(
             "w", encoding="utf-8", newline=""
         ) as handle:
@@ -413,8 +437,6 @@ class RepositoryAuditTest(unittest.TestCase):
                 }
             ],
         }
-        if not valid:
-            del payload["matches"][0]["match_id"]
         path = (
             self.root
             / "data"
@@ -422,6 +444,16 @@ class RepositoryAuditTest(unittest.TestCase):
             / f"{report_date}-120000-decision.json"
         )
         path.write_text(json.dumps(payload), encoding="utf-8")
+        target = date.fromisoformat(report_date)
+        generated_at = datetime.fromisoformat(
+            f"{report_date}T11:59:00+08:00"
+        )
+        locked_at = datetime.fromisoformat(f"{report_date}T12:00:00+08:00")
+        write_prediction_metadata(self.root, target, generated_at)
+        create_decision_bundle(self.root, target, locked_at)
+        if not valid:
+            payload["matches"][0].pop("match_id")
+            path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_repository_audit_checks_and_classifies_dates_deterministically(self):
         for report_date in ("2026-07-11", "2026-07-12", "2026-07-13"):
@@ -584,15 +616,14 @@ class RepositoryAuditTest(unittest.TestCase):
 
         self.assertFalse(payload["passed"])
         self.assertEqual(["2026-07-11"], payload["excluded_invalid"])
-        self.assertIn(
-            "snapshot_predictions_identity_mismatch",
+        self.assertEqual(
+            ["activation_evidence_invalid:ValueError"],
             payload["excluded_dates"][0]["reasons"],
         )
         builder.assert_not_called()
 
     def test_audit_injects_root_histories_and_hashes_every_rebuild_input(self):
         self._write_common_evidence("2026-07-11")
-        self._write_snapshot("2026-07-11")
         files = {
             self.root / "output" / "betting_ledger.csv": (
                 "date,locked_at_bjt,stake\n"
@@ -610,6 +641,7 @@ class RepositoryAuditTest(unittest.TestCase):
         }
         for path, content in files.items():
             path.write_text(content, encoding="utf-8")
+        self._write_snapshot("2026-07-11")
         captured = {}
 
         def builder(target_date, **inputs):
@@ -695,18 +727,65 @@ class RepositoryAuditTest(unittest.TestCase):
             build.assert_not_called()
             audit_path.write_text(saved_audit, encoding="utf-8")
 
-            prediction_path = self.root / "output" / "predictions_2026-07-11.csv"
-            prediction_path.write_text(
-                prediction_path.read_text(encoding="utf-8") + "stale",
-                encoding="utf-8",
+    def test_readiness_uses_immutable_as_of_extracts_after_shared_files_advance(self):
+        self._write_common_evidence("2026-07-11")
+        self._write_snapshot("2026-07-11", source="zgzcw")
+        payload = run_audit(
+            self.root,
+            date(2026, 7, 11),
+            date(2026, 7, 11),
+            plan_builder=lambda target_date, **inputs: build_result(plan=[]),
+        )
+        self.assertTrue(payload["passed"])
+        files = payload["evidence"][0]["activation_evidence"]["files"]
+        self.assertTrue(files)
+        for record in files.values():
+            self.assertTrue(
+                record["path"].startswith("output/activation_evidence/2026-07-11/")
             )
-            build.reset_mock()
-            with self.assertRaisesRegex(ValueError, "evidence"):
-                strategy.build_strategy_outputs(
-                    date(2026, 7, 11),
-                    locked_at=datetime(2026, 7, 11, 12, tzinfo=BEIJING),
-                )
-            build.assert_not_called()
+
+        (self.root / "betting_config.json").write_text(
+            json.dumps(config(mode="active")), encoding="utf-8"
+        )
+        strategy.assert_activation_ready(self.root)
+
+        with (self.root / "data" / "fixtures.csv").open(
+            "a", encoding="utf-8", newline=""
+        ) as handle:
+            handle.write(
+                "2026-07-14,next-day,Next Home,Next Away,"
+                "2026-07-14T18:00:00+08:00\n"
+            )
+        (self.root / "output" / "betting_ledger.csv").write_text(
+            "date,stake,status,profit\n2026-07-11,20,命中,20.00\n",
+            encoding="utf-8",
+        )
+        (self.root / "output" / "observation_ledger.csv").write_text(
+            "date,stake,status\n2026-07-11,0,命中\n",
+            encoding="utf-8",
+        )
+        (self.root / "data" / "draw_training_samples.csv").write_text(
+            "date,match_id,outcome\n2026-07-11,settled,1\n",
+            encoding="utf-8",
+        )
+
+        strategy.assert_activation_ready(self.root)
+
+        audit_path = self.root / "output" / "shadow_portfolio_activation_audit.json"
+        saved_audit = audit_path.read_text(encoding="utf-8")
+        incomplete_audit = json.loads(saved_audit)
+        incomplete_audit["evidence"][0]["activation_evidence"]["files"].pop(
+            "decision_bundle"
+        )
+        audit_path.write_text(json.dumps(incomplete_audit), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            strategy.assert_activation_ready(self.root)
+        audit_path.write_text(saved_audit, encoding="utf-8")
+
+        immutable_path = self.root / files["fixtures"]["path"]
+        immutable_path.write_bytes(immutable_path.read_bytes() + b"tamper")
+        with self.assertRaisesRegex(ValueError, "hash mismatch"):
+            strategy.assert_activation_ready(self.root)
 
     def test_active_routing_rejects_missing_or_failed_audit_before_generation(self):
         (self.root / "betting_config.json").write_text(
@@ -750,20 +829,20 @@ class RepositoryAuditTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_audit_payload(payload)
 
-    def test_repository_configuration_is_simulation_only_and_active_is_audit_ready(self):
+    def test_repository_configuration_is_simulation_only_and_shadow_until_prospective_audit(self):
         root = Path(__file__).resolve().parents[1]
         repository_config = json.loads(
             (root / "betting_config.json").read_text(encoding="utf-8")
         )
 
         mode = repository_config["value_strategy"]["activation_mode"]
-        self.assertIn(mode, {"shadow", "active"})
+        self.assertEqual("shadow", mode)
         self.assertEqual("simulation", repository_config["simulation_account"]["mode"])
         self.assertIs(
             False,
             repository_config["simulation_account"]["real_money_automation"],
         )
-        if mode == "active":
+        with self.assertRaisesRegex(ValueError, "has not passed"):
             strategy.assert_activation_ready(root)
 
 

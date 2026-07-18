@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import import_sporttery
+from decision_bundle import create_decision_bundle, write_prediction_metadata
 from plan_lock import lock_plan
 from report_status import (
     OFFICIAL_FIXTURE_SOURCES,
@@ -29,13 +30,13 @@ FIXTURE_FIELDS = [
     "date", "kickoff_local", "stage", "team_a", "team_b", "neutral", "venue",
     "odds_a", "odds_draw", "odds_b", "market_odds_a", "market_odds_draw",
     "market_odds_b", "analysis_source", "is_single_had", "match_num", "match_id",
-    "pool_status",
+    "pool_status", "kickoff_at",
 ]
 PREDICTION_FIELDS = [
     "date", "kickoff", "stage", "match_num", "match_id", "team_a", "team_b",
     "xg_a", "xg_b", "p_a", "p_draw", "p_b", "adv_a", "adv_b", "pick",
     "confidence", "analysis_source", "is_single_had", "score_1", "score_1_prob",
-    "score_2", "score_2_prob", "score_3", "score_3_prob",
+    "score_2", "score_2_prob", "score_3", "score_3_prob", "kickoff_at",
 ]
 PLAN_FIELDS = [
     "date", "strategy_version", "stage", "match", "team_a", "team_b", "play",
@@ -81,6 +82,7 @@ class ReportStatusTest(unittest.TestCase):
                     "neutral": "false",
                     "venue": "test",
                     "match_id": match_id,
+                    "kickoff_at": "2026-07-16T20:00:00+08:00",
                 })
             if fixture_ids:
                 writer.writerow({
@@ -92,6 +94,7 @@ class ReportStatusTest(unittest.TestCase):
                     "neutral": "false",
                     "venue": "test",
                     "match_id": "yesterday",
+                    "kickoff_at": "2026-07-15T20:00:00+08:00",
                 })
         odds = {
             match_id: {"had": {"h": "2.0"}, "hhad": {}, "ttg": {}}
@@ -100,12 +103,54 @@ class ReportStatusTest(unittest.TestCase):
         (data / f"sporttery_odds_{REPORT_DATE.isoformat()}.json").write_text(
             json.dumps(odds), encoding="utf-8"
         )
-        for name, fieldnames in (
-            (f"predictions_{REPORT_DATE.isoformat()}.csv", PREDICTION_FIELDS),
-            (f"betting_plan_{REPORT_DATE.isoformat()}.csv", PLAN_FIELDS),
+        with (output / f"predictions_{REPORT_DATE.isoformat()}.csv").open(
+            "w", encoding="utf-8", newline=""
+        ) as handle:
+            writer = csv.DictWriter(handle, fieldnames=PREDICTION_FIELDS)
+            writer.writeheader()
+            for match_id in fixture_ids:
+                writer.writerow({
+                    "date": REPORT_DATE.isoformat(),
+                    "match_id": match_id,
+                    "team_a": "A",
+                    "team_b": "B",
+                    "kickoff_at": "2026-07-16T20:00:00+08:00",
+                })
+        with (output / f"betting_plan_{REPORT_DATE.isoformat()}.csv").open(
+            "w", encoding="utf-8", newline=""
+        ) as handle:
+            csv.DictWriter(handle, fieldnames=PLAN_FIELDS).writeheader()
+        (root / "config.json").write_text("{}\n", encoding="utf-8")
+        (root / "betting_config.json").write_text(
+            json.dumps({
+                "strategy_version": "value-v4",
+                "value_strategy": {"activation_mode": "shadow"},
+                "simulation_account": {
+                    "mode": "simulation",
+                    "real_money_automation": False,
+                },
+            }),
+            encoding="utf-8",
+        )
+        for name in (
+            "predict_today.py",
+            "generate_betting_plan.py",
+            "value_candidates.py",
+            "value_portfolio.py",
+            "official_markets.py",
+            "betting_ledger.py",
+            "strategy_controls.py",
         ):
-            with (output / name).open("w", encoding="utf-8", newline="") as handle:
-                csv.DictWriter(handle, fieldnames=fieldnames).writeheader()
+            (root / name).write_text(f"MODULE = {name!r}\n", encoding="utf-8")
+        (data / "team_ratings.csv").write_text(
+            "team,elo\nA,1500\nB,1490\n", encoding="utf-8"
+        )
+        (output / "observation_ledger.csv").write_text(
+            "placeholder\n", encoding="utf-8"
+        )
+        (data / "draw_training_samples.csv").write_text(
+            "placeholder\n", encoding="utf-8"
+        )
         (output / f"daily_decision_{REPORT_DATE.isoformat()}.json").write_text(
             json.dumps({"date": REPORT_DATE.isoformat(), "status": "no_bet"}),
             encoding="utf-8",
@@ -120,17 +165,62 @@ class ReportStatusTest(unittest.TestCase):
         root: Path,
         locked_at: datetime = datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
     ) -> None:
+        snapshots = root / "data" / "odds_snapshots"
+        snapshots.mkdir(exist_ok=True)
+        with (root / "data" / "fixtures.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as handle:
+            fixtures = [
+                row
+                for row in csv.DictReader(handle)
+                if row.get("date") == REPORT_DATE.isoformat()
+            ]
+        (snapshots / "2026-07-16-133000-decision.json").write_text(
+            json.dumps({
+                "target_date": REPORT_DATE.isoformat(),
+                "captured_at": "2026-07-16T13:30:00+08:00",
+                "capture_phase": "decision",
+                "source": "sporttery",
+                "source_record_id": "report-status-snapshot",
+                "matches": [{
+                    "match_id": row["match_id"],
+                    "team_a": row["team_a"],
+                    "team_b": row["team_b"],
+                    "match_num": row["match_id"],
+                    "kickoff_at": row["kickoff_at"],
+                    "markets": {
+                        "had": {"h": "2.00", "d": "3.20", "a": "3.50"},
+                        "hhad": {},
+                        "ttg": {},
+                    },
+                    "single_eligibility": {
+                        "had": True,
+                        "hhad": False,
+                        "ttg": False,
+                    },
+                } for row in fixtures],
+            }),
+            encoding="utf-8",
+        )
+        write_prediction_metadata(
+            root,
+            REPORT_DATE,
+            datetime(2026, 7, 16, 13, 30, 30, tzinfo=BJT),
+        )
+        create_decision_bundle(root, REPORT_DATE, locked_at)
         lock_plan(
             root,
             REPORT_DATE,
             locked_at,
-            "test",
         )
 
     def make_decision_snapshot(self, root: Path) -> None:
         snapshots = root / "data" / "odds_snapshots"
-        snapshots.mkdir()
-        (snapshots / "2026-07-16-133000-decision.json").write_text(
+        snapshots.mkdir(exist_ok=True)
+        path = snapshots / "2026-07-16-133000-decision.json"
+        if path.exists():
+            return
+        path.write_text(
             json.dumps({
                 "target_date": REPORT_DATE.isoformat(),
                 "phase": "decision",
@@ -157,6 +247,8 @@ class ReportStatusTest(unittest.TestCase):
         snapshots = root / "data" / "odds_snapshots"
         snapshots.mkdir(exist_ok=True)
         path = snapshots / f"2026-07-16-{timestamp}-decision.json"
+        if path.exists():
+            return path
         path.write_text(
             json.dumps({
                 "target_date": REPORT_DATE.isoformat(),

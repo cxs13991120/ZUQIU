@@ -1,15 +1,13 @@
 {
-  "checked_dates": [
-    "2026-07-18"
-  ],
+  "checked_dates": [],
   "counts": {
-    "candidates": 165,
-    "checked_dates": 1,
+    "candidates": 0,
+    "checked_dates": 0,
     "diagnostics": 0,
-    "excluded_dates": 7,
+    "excluded_dates": 8,
     "excluded_invalid_dates": 0,
-    "excluded_missing_dates": 7,
-    "observations": 165,
+    "excluded_missing_dates": 8,
+    "observations": 0,
     "paid_rows": 0,
     "parlay_legs": 0,
     "parlays": 0,
@@ -17,109 +15,61 @@
     "singles": 0
   },
   "diagnostic_counts": {},
-  "evidence": [
-    {
-      "candidate_count": 165,
-      "date": "2026-07-18",
-      "decision_capture_timestamp": "2026-07-18T16:51:36.178619+08:00",
-      "decision_source": "zgzcw",
-      "diagnostic_count": 0,
-      "diagnostic_counts": {},
-      "domestic_odds": {
-        "bytes": 20195,
-        "path": "data/sporttery_odds_2026-07-18.json",
-        "sha256": "ab888d9d6ea66b8239ec1770566752ed728f08a6d2106780aa214545a5479b2a"
-      },
-      "fixture_match_count": 15,
-      "fixtures_file": {
-        "bytes": 3268,
-        "path": "data/fixtures.csv",
-        "sha256": "9e5e04dd82bb8f89b1218aed0eff3c6322607c87e9043a23beaaad84768650ad"
-      },
-      "generated_bet_ids": [],
-      "generated_paid_count": 0,
-      "observation_count": 165,
-      "predictions": {
-        "bytes": 4860,
-        "path": "output/predictions_2026-07-18.csv",
-        "sha256": "19a166a168cc9c10dc19d1b3c0f9009e60dbd6d00d506d96ea8f27de365a8b7a"
-      },
-      "rebuild_inputs": {
-        "observation_history": {
-          "bytes": 5001,
-          "path": "output/observation_ledger.csv",
-          "sha256": "ca47f935c4ddd8cb15d624a8d1ceb3ad1283bfed5e6ed54a131af0b4765bb1d9"
-        },
-        "paid_history": {
-          "bytes": 3070,
-          "path": "output/betting_ledger.csv",
-          "sha256": "6b5f4f448e9bf8adba7bd008c368fd1440a174cabd83a30a47d3e440139d4f41"
-        },
-        "training_samples": {
-          "bytes": 298,
-          "path": "data/draw_training_samples.csv",
-          "sha256": "7bd6870c48dca3480f6ee39d8fc75607327a3d47a7e0822e72225c5e96fc1104"
-        }
-      },
-      "snapshot": {
-        "bytes": 15041,
-        "path": "data/odds_snapshots/2026-07-18-165136-decision.json",
-        "sha256": "13d768f869a72fd5b607a8e220d60ab26009563fe442e967d13f80dc481326ad"
-      },
-      "snapshot_match_count": 15
-    }
-  ],
+  "evidence": [],
   "excluded_dates": [
     {
       "date": "2026-07-11",
       "reasons": [
-        "decision_snapshot",
-        "fixtures"
+        "decision_bundle"
       ],
       "status": "excluded_missing"
     },
     {
       "date": "2026-07-12",
       "reasons": [
-        "decision_snapshot",
-        "fixtures"
+        "decision_bundle"
       ],
       "status": "excluded_missing"
     },
     {
       "date": "2026-07-13",
       "reasons": [
-        "decision_snapshot",
-        "fixtures"
+        "decision_bundle"
       ],
       "status": "excluded_missing"
     },
     {
       "date": "2026-07-14",
       "reasons": [
-        "decision_snapshot",
-        "fixtures"
+        "decision_bundle"
       ],
       "status": "excluded_missing"
     },
     {
       "date": "2026-07-15",
       "reasons": [
-        "fixtures"
+        "decision_bundle"
       ],
       "status": "excluded_missing"
     },
     {
       "date": "2026-07-16",
       "reasons": [
-        "fixtures"
+        "decision_bundle"
       ],
       "status": "excluded_missing"
     },
     {
       "date": "2026-07-17",
       "reasons": [
-        "fixtures"
+        "decision_bundle"
+      ],
+      "status": "excluded_missing"
+    },
+    {
+      "date": "2026-07-18",
+      "reasons": [
+        "decision_bundle"
       ],
       "status": "excluded_missing"
     }
@@ -132,26 +82,9 @@
     "2026-07-14",
     "2026-07-15",
     "2026-07-16",
-    "2026-07-17"
+    "2026-07-17",
+    "2026-07-18"
   ],
-  "historical_artifact_hashes": {
-    "output/betting_ledger.csv": "6b5f4f448e9bf8adba7bd008c368fd1440a174cabd83a30a47d3e440139d4f41",
-    "output/betting_plan_2026-07-11.csv": "25a8b0d97fdf9bfa3c2f7b2fc7d7fdc0447c8a6e6ee03a89d9ee78214935588d",
-    "output/betting_plan_2026-07-12.csv": "da4aaf20954c1192bd7a0a4b11c928424ae06890d84bade443bcbb18fa94916e",
-    "output/betting_plan_2026-07-13.csv": "829f849117f8a1ee0936fbfac29f3e1589eca6f80dd6b65bbdb86004e274dbb1",
-    "output/betting_plan_2026-07-14.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
-    "output/betting_plan_2026-07-15.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
-    "output/betting_plan_2026-07-16.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
-    "output/betting_plan_2026-07-17.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
-    "output/observation_ledger.csv": "ca47f935c4ddd8cb15d624a8d1ceb3ad1283bfed5e6ed54a131af0b4765bb1d9",
-    "output/observation_plan_2026-07-13.csv": "829f849117f8a1ee0936fbfac29f3e1589eca6f80dd6b65bbdb86004e274dbb1",
-    "output/observation_plan_2026-07-14.csv": "6d2882fbc95ab310d010761223856e4d9b13e5722930e3523f09a5b2e1964597",
-    "output/observation_plan_2026-07-15.csv": "8980e2489551e4d9e4d2358d585e01ca2e27a6a372044a003f8c97b0b9f2bf92",
-    "output/observation_plan_2026-07-16.csv": "b73f79f33f634d00c2985c6724e89b13d4bbb702f66782aded73de4ae3a13e78",
-    "output/observation_plan_2026-07-17.csv": "3d9d5ddb1465568e401b31b053e8442fc38f9a9be2fe0e4edae4078cbe2669e8",
-    "output/plan_lock_2026-07-17.json": "2ceccb908fa29b246dc0e8cbad680c5b92a24cd77c47eb6cd183d00dbfaf2ea7",
-    "output/plan_lock_2026-07-17.json.lock": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
-  },
   "historical_artifacts_unchanged": true,
   "limits": {
     "daily_stake": 500,
@@ -166,7 +99,7 @@
     "monthly_stake": 0,
     "parlay_stake": 0
   },
-  "passed": true,
+  "passed": false,
   "profitability_gate_applied": false,
   "real_money_automation": false,
   "rebuild_config_sha256": "54139af15fcbf193c36936d62448fcd723b450bfededfb9a9232ae71f3733451",
@@ -218,9 +151,13 @@
     {
       "date": "2026-07-18",
       "sporttery": false,
-      "status": "checked",
-      "verified_domestic_fallback": true
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
     }
   ],
-  "violations": []
+  "violations": [
+    {
+      "code": "zero_checked_dates"
+    }
+  ]
 }

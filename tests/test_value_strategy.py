@@ -21,7 +21,7 @@ class ValueV4ConfigurationTest(unittest.TestCase):
 
         self.assertEqual("value-v4", payload["strategy_version"])
         self.assertEqual(500, payload["max_daily_budget"])
-        self.assertEqual("active", value["activation_mode"])
+        self.assertEqual("shadow", value["activation_mode"])
         self.assertEqual(0.06, value["strict_min_ev"])
         self.assertEqual(0.03, value["min_ev"])
         self.assertEqual(0.02, value["strict_min_combo_leg_ev"])

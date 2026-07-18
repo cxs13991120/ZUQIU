@@ -21,7 +21,8 @@ HISTORICAL_HALF_TIME = {
 BASE_FIELDS = (
     "date", "team_a", "team_b", "home_goals", "away_goals",
     "half_home_goals", "half_away_goals", "match_id", "result_status",
-    "result_source", "source_record_id", "captured_at_bjt",
+    "result_source", "source_record_id", "captured_at_bjt", "score_scope",
+    "settlement_minutes",
 )
 
 
@@ -133,6 +134,8 @@ def official_result_rows(target_date: date) -> list[dict]:
             "result_source": "sporttery",
             "source_record_id": match_id,
             "captured_at_bjt": captured_at,
+            "score_scope": "regular_time_90",
+            "settlement_minutes": "90",
         })
     return rows
 
@@ -340,6 +343,8 @@ def _fallback_result_row(item: dict) -> dict:
         "result_source": "zgzcw",
         "source_record_id": str(item.get("source_record_id", "")).strip(),
         "captured_at_bjt": datetime.now(BEIJING).isoformat(),
+        "score_scope": "regular_time_90",
+        "settlement_minutes": "90",
     }
 
 
@@ -368,6 +373,8 @@ def _result_provenance(item: dict, status: str) -> dict:
         "result_source": source,
         "source_record_id": item.get("source_record_id", "") or item.get("match_id", ""),
         "captured_at_bjt": item.get("captured_at_bjt", datetime.now(BEIJING).isoformat()),
+        "score_scope": item.get("score_scope", ""),
+        "settlement_minutes": item.get("settlement_minutes", ""),
     }
 
 

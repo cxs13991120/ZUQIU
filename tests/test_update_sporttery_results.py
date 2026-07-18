@@ -28,6 +28,8 @@ class ResultProvenanceTest(unittest.TestCase):
             "result_source": result_source,
             "source_record_id": source_record_id,
             "captured_at_bjt": captured_at,
+            "score_scope": "regular_time_90",
+            "settlement_minutes": "90",
         }
 
     def read_rows(self, path):
@@ -46,6 +48,8 @@ class ResultProvenanceTest(unittest.TestCase):
         self.assertEqual("sporttery", rows[0]["result_source"])
         self.assertTrue(rows[0]["source_record_id"])
         self.assertIn("+08:00", rows[0]["captured_at_bjt"])
+        self.assertEqual("regular_time_90", rows[0]["score_scope"])
+        self.assertEqual("90", rows[0]["settlement_minutes"])
 
     def test_zgzcw_parser_retains_the_source_row_id(self):
         parser = results.ZgzcwResultParser()
@@ -73,6 +77,8 @@ class ResultProvenanceTest(unittest.TestCase):
             self.assertEqual("zgzcw", migrated["result_source"])
             self.assertEqual("678", migrated["source_record_id"])
             self.assertIn("+08:00", migrated["captured_at_bjt"])
+            self.assertEqual("regular_time_90", migrated["score_scope"])
+            self.assertEqual("90", migrated["settlement_minutes"])
 
     def test_unproven_fallback_id_is_unavailable_and_conflicting_score_never_overwrites_finished_score(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,6 +3,9 @@ import csv
 import hashlib
 import json
 import math
+import os
+import shutil
+import tempfile
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -11,6 +14,7 @@ from typing import Callable
 
 from activation_readiness import activation_config_digest, validate_activation_payload
 from betting_ledger import DOMESTIC_ODDS_SOURCES, stable_bet_id
+from decision_bundle import read_valid_decision_bundle
 from generate_betting_plan import ValueV4BuildResult, build_value_v4_from_inputs
 from official_markets import (
     THREE_WAY_SELECTIONS,
@@ -23,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 BEIJING = timezone(timedelta(hours=8))
 SCHEMA_VERSION = "shadow-portfolio-activation-audit-v1"
 OUTPUT_NAME = "shadow_portfolio_activation_audit.json"
+ACTIVATION_EVIDENCE_SCHEMA_VERSION = "activation-evidence-v1"
 ALLOWED_SINGLE_PLAYS = {"had": "HAD", "hhad": "HHAD", "ttg": "TTG"}
 THREE_WAY_SELECTION_LABELS = frozenset(THREE_WAY_SELECTIONS.values())
 TOTAL_GOALS_SELECTION_LABELS = frozenset(TOTAL_GOALS_SELECTIONS.values())
@@ -264,28 +269,7 @@ def run_audit(
         raise ValueError("from date must not be after through date")
     config = _read_json(root / "betting_config.json")
     protected_before = _protected_hashes(root)
-    fixtures, fixtures_error = _read_fixtures(root / "data" / "fixtures.csv")
     builder = plan_builder or build_value_v4_from_inputs
-    paid_path = root / "output" / "betting_ledger.csv"
-    observation_path = root / "output" / "observation_ledger.csv"
-    training_path = root / "data" / "draw_training_samples.csv"
-    paid_history, paid_error = _read_optional_csv_rows(paid_path)
-    observation_history, observation_error = _read_optional_csv_rows(observation_path)
-    training_samples, training_error = _read_optional_csv_rows(training_path)
-    rebuild_input_errors = [
-        code
-        for code, error in (
-            ("paid_history_invalid", paid_error),
-            ("observation_history_invalid", observation_error),
-            ("training_samples_invalid", training_error),
-        )
-        if error is not None
-    ]
-    rebuild_inputs_evidence = {
-        "paid_history": _optional_file_evidence(root, paid_path),
-        "observation_history": _optional_file_evidence(root, observation_path),
-        "training_samples": _optional_file_evidence(root, training_path),
-    }
     portfolios: dict[str, list[dict]] = {}
     checked_dates: list[str] = []
     excluded_missing: list[str] = []
@@ -300,95 +284,72 @@ def run_audit(
 
     for target_date in _date_range(from_date, through_date):
         report_date = target_date.isoformat()
-        prediction_path = root / "output" / f"predictions_{report_date}.csv"
-        odds_path = root / "data" / f"sporttery_odds_{report_date}.json"
-        snapshot_paths = sorted(
-            (root / "data" / "odds_snapshots").glob(
-                f"{report_date}-*-decision.json"
-            )
-        )
-        missing = []
-        if not prediction_path.is_file():
-            missing.append("saved_predictions")
-        if fixtures_error == "missing" or not fixtures.get(report_date):
-            missing.append("fixtures")
-        if not odds_path.is_file():
-            missing.append("domestic_odds")
-        if not snapshot_paths:
-            missing.append("decision_snapshot")
-        if missing:
+        evidence_directory = root / "output" / "activation_evidence" / report_date
+        bundle_path = root / "output" / f"decision_bundle_{report_date}.json"
+        if not evidence_directory.is_dir() and not bundle_path.is_file():
             _exclude_date(
                 report_date,
                 "excluded_missing",
-                missing,
+                ["decision_bundle"],
                 excluded_missing,
                 excluded_dates,
                 source_coverage,
             )
             continue
-
-        invalid = list(rebuild_input_errors)
-        predictions, prediction_error = _read_csv_rows(prediction_path)
-        if prediction_error or not predictions:
-            invalid.append("saved_predictions_invalid")
-        odds = None
         try:
-            odds = _read_json(odds_path)
-        except (OSError, ValueError, json.JSONDecodeError):
-            invalid.append("domestic_odds_invalid")
-        if not isinstance(odds, dict) or not odds:
-            invalid.append("domestic_odds_invalid")
-        if fixtures_error == "invalid":
-            invalid.append("fixtures_invalid")
-
-        snapshot, snapshot_path, snapshot_errors = _latest_valid_snapshot(
-            snapshot_paths, target_date
-        )
-        invalid.extend(snapshot_errors)
-        if snapshot is not None:
-            snapshot_ids = {row["match_id"] for row in snapshot["matches"]}
-            prediction_ids = {
-                str(row.get("match_id") or "") for row in predictions or []
-            }
-            fixture_ids = {
-                str(row.get("match_id") or "") for row in fixtures.get(report_date, [])
-            }
-            odds_ids = set(odds) if isinstance(odds, dict) else set()
-            if not snapshot_ids.issubset(prediction_ids):
-                invalid.append("snapshot_predictions_mismatch")
-            if not snapshot_ids.issubset(fixture_ids):
-                invalid.append("snapshot_fixtures_mismatch")
-            if not snapshot_ids.issubset(odds_ids):
-                invalid.append("snapshot_domestic_odds_mismatch")
-            invalid.extend(
-                _snapshot_identity_errors(
-                    snapshot["matches"], predictions or [], "predictions"
+            if evidence_directory.is_dir():
+                audit_inputs = _load_activation_evidence(root, target_date)
+            else:
+                bundle = read_valid_decision_bundle(
+                    root,
+                    target_date,
+                    verify_current_inputs=True,
                 )
-            )
-            invalid.extend(
-                _snapshot_identity_errors(
-                    snapshot["matches"], fixtures.get(report_date, []), "fixtures"
-                )
-            )
-
-        invalid = sorted(set(invalid))
-        if invalid or snapshot is None or snapshot_path is None:
+                _persist_activation_evidence(root, target_date, bundle)
+                audit_inputs = _load_activation_evidence(root, target_date)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
             _exclude_date(
                 report_date,
                 "excluded_invalid",
-                invalid or ["decision_snapshot_invalid"],
+                [f"activation_evidence_invalid:{type(exc).__name__}"],
+                excluded_invalid,
+                excluded_dates,
+                source_coverage,
+            )
+            continue
+        snapshot = audit_inputs["snapshot"]
+        predictions = audit_inputs["predictions"]
+        fixture_rows = audit_inputs["fixtures"]
+        paid_history = audit_inputs["paid_history"]
+        observation_history = audit_inputs["observation_history"]
+        training_samples = audit_inputs["training_samples"]
+        date_config = audit_inputs["config"]
+        invalid = _snapshot_errors(snapshot, target_date)
+        invalid.extend(
+            _snapshot_identity_errors(snapshot["matches"], predictions, "predictions")
+        )
+        invalid.extend(
+            _snapshot_identity_errors(snapshot["matches"], fixture_rows, "fixtures")
+        )
+        if activation_config_digest(date_config) != activation_config_digest(config):
+            invalid.append("activation_configuration_mismatch")
+        if invalid:
+            _exclude_date(
+                report_date,
+                "excluded_invalid",
+                sorted(set(invalid)),
                 excluded_invalid,
                 excluded_dates,
                 source_coverage,
             )
             continue
 
-        locked_at = _aware_datetime(snapshot["captured_at"])
+        locked_at = _aware_datetime(audit_inputs["bundle"]["locked_at_bjt"])
         try:
             result = builder(
                 target_date,
                 locked_at=locked_at,
-                config=config,
+                config=date_config,
                 predictions=predictions,
                 snapshot=snapshot,
                 paid_history=paid_history,
@@ -482,11 +443,11 @@ def run_audit(
                 "date": report_date,
                 "decision_capture_timestamp": locked_at.isoformat(),
                 "decision_source": source,
-                "snapshot": _file_evidence(root, snapshot_path),
-                "predictions": _file_evidence(root, prediction_path),
-                "domestic_odds": _file_evidence(root, odds_path),
-                "fixtures_file": _file_evidence(root, root / "data" / "fixtures.csv"),
-                "fixture_match_count": len(fixtures[report_date]),
+                "activation_evidence": audit_inputs["record"],
+                "snapshot": audit_inputs["record"]["files"]["snapshot"],
+                "predictions": audit_inputs["record"]["files"]["predictions"],
+                "fixtures_file": audit_inputs["record"]["files"]["fixtures"],
+                "fixture_match_count": len(fixture_rows),
                 "snapshot_match_count": len(snapshot["matches"]),
                 "candidate_count": len(candidates),
                 "observation_count": len(observations),
@@ -494,7 +455,14 @@ def run_audit(
                 "diagnostic_counts": dict(sorted(date_diagnostic_counts.items())),
                 "generated_paid_count": len(plan),
                 "generated_bet_ids": sorted(str(row.get("bet_id") or "") for row in plan),
-                "rebuild_inputs": rebuild_inputs_evidence,
+                "rebuild_inputs": {
+                    key: audit_inputs["record"]["files"][key]
+                    for key in (
+                        "paid_history",
+                        "observation_history",
+                        "training_samples",
+                    )
+                },
             }
         )
 
@@ -519,7 +487,6 @@ def run_audit(
     payload["diagnostic_counts"] = dict(sorted(diagnostic_counts.items()))
     protected_after = _protected_hashes(root)
     payload["historical_artifacts_unchanged"] = protected_before == protected_after
-    payload["historical_artifact_hashes"] = protected_after
     if not payload["historical_artifacts_unchanged"]:
         payload["violations"].append({"code": "historical_artifact_mutation"})
         payload["violations"] = _sorted_violations(payload["violations"])
@@ -981,6 +948,199 @@ def _protected_hashes(root: Path) -> dict[str, str]:
         path.relative_to(root).as_posix(): _sha256(path)
         for path in sorted(paths)
     }
+
+
+def _persist_activation_evidence(
+    root: Path,
+    target_date: date,
+    bundle: dict,
+) -> dict:
+    report_date = target_date.isoformat()
+    parent = root / "output" / "activation_evidence"
+    directory = parent / report_date
+    if directory.exists():
+        loaded = _load_activation_evidence(root, target_date)
+        if loaded["bundle"] != bundle:
+            raise ValueError("existing activation evidence conflicts with decision bundle")
+        return loaded["record"]
+
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{report_date}-", dir=parent))
+    try:
+        bundle_path = root / "output" / f"decision_bundle_{report_date}.json"
+        source_prediction_path = root / bundle["predictions"]["path"]
+        bundle_bytes = bundle_path.read_bytes()
+        prediction_bytes = source_prediction_path.read_bytes()
+        if json.loads(bundle_bytes.decode("utf-8")) != bundle:
+            raise ValueError("decision bundle changed before activation evidence capture")
+        if (
+            len(prediction_bytes) != bundle["predictions"]["bytes"]
+            or hashlib.sha256(prediction_bytes).hexdigest()
+            != bundle["predictions"]["sha256"]
+        ):
+            raise ValueError("predictions changed before activation evidence capture")
+        values = {
+            "decision_bundle": bundle_bytes,
+            "snapshot": _canonical_json_bytes(bundle["decision_snapshot"]["payload"]),
+            "predictions": prediction_bytes,
+            "fixtures": _canonical_json_bytes(bundle["fixture_extract"]["rows"]),
+            "betting_config": _canonical_json_bytes(
+                bundle["configuration"]["betting"]["payload"]
+            ),
+            "paid_history": _canonical_json_bytes(
+                bundle["history_inputs"]["paid_history"]["rows"]
+            ),
+            "observation_history": _canonical_json_bytes(
+                bundle["history_inputs"]["observation_history"]["rows"]
+            ),
+            "training_samples": _canonical_json_bytes(
+                bundle["history_inputs"]["training_samples"]["rows"]
+            ),
+        }
+        names = {
+            "decision_bundle": "decision_bundle.json",
+            "snapshot": "decision_snapshot.json",
+            "predictions": "predictions.csv",
+            "fixtures": "fixtures.json",
+            "betting_config": "betting_config.json",
+            "paid_history": "paid_history.json",
+            "observation_history": "observation_history.json",
+            "training_samples": "training_samples.json",
+        }
+        for key, filename in names.items():
+            _write_durable_bytes(staging / filename, values[key])
+
+        files = {
+            key: _file_evidence(root, staging / filename)
+            for key, filename in names.items()
+        }
+        for record in files.values():
+            record["path"] = (
+                Path("output")
+                / "activation_evidence"
+                / report_date
+                / Path(record["path"]).name
+            ).as_posix()
+        manifest = {
+            "schema_version": ACTIVATION_EVIDENCE_SCHEMA_VERSION,
+            "target_date": report_date,
+            "locked_at_bjt": bundle["locked_at_bjt"],
+            "decision_source": bundle["decision_snapshot"]["source"],
+            "files": files,
+        }
+        _write_durable_bytes(staging / "manifest.json", _canonical_json_bytes(manifest))
+        os.replace(staging, directory)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    return _load_activation_evidence(root, target_date)["record"]
+
+
+def _load_activation_evidence(root: Path, target_date: date) -> dict:
+    report_date = target_date.isoformat()
+    directory = (root / "output" / "activation_evidence" / report_date).resolve()
+    manifest_path = directory / "manifest.json"
+    manifest = _read_json(manifest_path)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != ACTIVATION_EVIDENCE_SCHEMA_VERSION
+        or manifest.get("target_date") != report_date
+    ):
+        raise ValueError("activation evidence manifest is invalid")
+    files = manifest.get("files")
+    required = {
+        "decision_bundle",
+        "snapshot",
+        "predictions",
+        "fixtures",
+        "betting_config",
+        "paid_history",
+        "observation_history",
+        "training_samples",
+    }
+    if not isinstance(files, dict) or set(files) != required:
+        raise ValueError("activation evidence file manifest is invalid")
+    for record in files.values():
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            raise ValueError("activation evidence file record is invalid")
+        path = (root / record["path"]).resolve()
+        try:
+            relative = path.relative_to(directory)
+        except ValueError as exc:
+            raise ValueError("activation evidence file escapes date directory") from exc
+        if len(relative.parts) != 1 or _file_evidence(root, path) != record:
+            raise ValueError("activation evidence file hash mismatch")
+
+    bundle = _read_json(root / files["decision_bundle"]["path"])
+    snapshot = _read_json(root / files["snapshot"]["path"])
+    fixtures = _read_json(root / files["fixtures"]["path"])
+    date_config = _read_json(root / files["betting_config"]["path"])
+    paid_history = _read_json(root / files["paid_history"]["path"])
+    observation_history = _read_json(root / files["observation_history"]["path"])
+    training_samples = _read_json(root / files["training_samples"]["path"])
+    predictions, prediction_error = _read_csv_rows(root / files["predictions"]["path"])
+    if prediction_error is not None:
+        raise ValueError("activation evidence predictions are invalid")
+    if (
+        not isinstance(bundle, dict)
+        or bundle.get("target_date") != report_date
+        or bundle.get("locked_at_bjt") != manifest.get("locked_at_bjt")
+        or bundle.get("decision_snapshot", {}).get("source")
+        != manifest.get("decision_source")
+        or snapshot != bundle.get("decision_snapshot", {}).get("payload")
+        or fixtures != bundle.get("fixture_extract", {}).get("rows")
+        or date_config != bundle.get("configuration", {}).get("betting", {}).get("payload")
+        or paid_history != bundle.get("history_inputs", {}).get("paid_history", {}).get("rows")
+        or observation_history
+        != bundle.get("history_inputs", {}).get("observation_history", {}).get("rows")
+        or training_samples
+        != bundle.get("history_inputs", {}).get("training_samples", {}).get("rows")
+        or files["predictions"].get("bytes")
+        != bundle.get("predictions", {}).get("bytes")
+        or files["predictions"].get("sha256")
+        != bundle.get("predictions", {}).get("sha256")
+    ):
+        raise ValueError("activation evidence differs from decision bundle")
+    if any(
+        not isinstance(rows, list)
+        for rows in (
+            fixtures,
+            paid_history,
+            observation_history,
+            training_samples,
+            predictions,
+        )
+    ):
+        raise ValueError("activation evidence row extracts are invalid")
+    snapshot["_snapshot_record_id"] = bundle["decision_snapshot"]["path"]
+    return {
+        "bundle": bundle,
+        "snapshot": snapshot,
+        "predictions": predictions,
+        "fixtures": fixtures,
+        "config": date_config,
+        "paid_history": paid_history,
+        "observation_history": observation_history,
+        "training_samples": training_samples,
+        "record": {
+            "manifest": _file_evidence(root, manifest_path),
+            "files": files,
+        },
+    }
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _write_durable_bytes(path: Path, payload: bytes) -> None:
+    with path.open("xb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _file_evidence(root: Path, path: Path) -> dict:

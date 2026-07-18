@@ -3,13 +3,16 @@ import csv
 import json
 import math
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+from decision_bundle import write_prediction_metadata
 
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
+BEIJING = timezone(timedelta(hours=8))
 
 
 @dataclass(frozen=True)
@@ -409,8 +412,12 @@ def main() -> int:
         md_path = OUTPUT_DIR / f"predictions_{target_date.isoformat()}.md"
         md_path.write_text(report, encoding="utf-8")
         csv_path = write_csv(predictions, target_date)
+        metadata_path = write_prediction_metadata(
+            ROOT, target_date, datetime.now(BEIJING)
+        )
         print(f"已生成: {md_path}")
         print(f"已生成: {csv_path}")
+        print(f"已生成: {metadata_path}")
     return 0
 
 

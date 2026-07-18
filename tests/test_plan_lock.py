@@ -9,7 +9,8 @@ from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from plan_lock import lock_plan, main, read_valid_lock
+from decision_bundle import create_decision_bundle, write_prediction_metadata
+from plan_lock import lock_plan, main, read_valid_lock, sha256_file as plan_lock_sha
 
 
 BJT = timezone(timedelta(hours=8))
@@ -41,7 +42,6 @@ def _concurrent_lock_worker(
             Path(root_text),
             TARGET_DATE,
             datetime.fromisoformat(locked_at_text),
-            "sporttery",
         )
     except BaseException as exc:
         result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
@@ -60,30 +60,114 @@ def _abandon_lock_worker(root_text: str) -> None:
         Path(root_text),
         TARGET_DATE,
         datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
-        "sporttery",
     )
 
 
 class PlanLockTest(unittest.TestCase):
     def make_artifacts(self, root: Path) -> None:
         (root / "output").mkdir()
-        (root / "data").mkdir()
+        (root / "data" / "odds_snapshots").mkdir(parents=True)
+        (root / "config.json").write_text("{}\n", encoding="utf-8")
+        (root / "betting_config.json").write_text(
+            json.dumps({
+                "strategy_version": "value-v4",
+                "value_strategy": {"activation_mode": "shadow"},
+                "simulation_account": {
+                    "mode": "simulation",
+                    "real_money_automation": False,
+                },
+            }),
+            encoding="utf-8",
+        )
+        for name in (
+            "predict_today.py",
+            "generate_betting_plan.py",
+            "value_candidates.py",
+            "value_portfolio.py",
+            "official_markets.py",
+            "betting_ledger.py",
+            "strategy_controls.py",
+        ):
+            (root / name).write_text(f"MODULE = {name!r}\n", encoding="utf-8")
+        self.write_csv(
+            root / "data" / "team_ratings.csv",
+            [{"team": "A", "elo": "1500"}, {"team": "B", "elo": "1490"}],
+        )
+        self.write_csv(
+            root / "data" / "fixtures.csv",
+            [{
+                "date": "2026-07-16",
+                "team_a": "A",
+                "team_b": "B",
+                "match_id": "1001",
+                "kickoff_at": "2026-07-16T20:00:00+08:00",
+            }],
+        )
+        self.write_csv(
+            root / "output" / "predictions_2026-07-16.csv",
+            [{
+                "date": "2026-07-16",
+                "team_a": "A",
+                "team_b": "B",
+                "match_id": "1001",
+                "kickoff_at": "2026-07-16T20:00:00+08:00",
+            }],
+        )
+        self.write_csv(root / "output" / "betting_ledger.csv", [])
+        self.write_csv(root / "output" / "observation_ledger.csv", [])
+        self.write_csv(root / "data" / "draw_training_samples.csv", [])
+        (root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json").write_text(
+            json.dumps({
+                "target_date": "2026-07-16",
+                "captured_at": "2026-07-16T13:30:00+08:00",
+                "capture_phase": "decision",
+                "source": "sporttery",
+                "matches": [{
+                    "match_id": "1001",
+                    "team_a": "A",
+                    "team_b": "B",
+                    "match_num": "001",
+                    "kickoff_at": "2026-07-16T20:00:00+08:00",
+                    "markets": {
+                        "had": {"h": "2.00", "d": "3.20", "a": "3.50"},
+                        "hhad": {},
+                        "ttg": {},
+                    },
+                    "single_eligibility": {"had": True, "hhad": False, "ttg": False},
+                }],
+            }),
+            encoding="utf-8",
+        )
         with (root / "output" / "betting_plan_2026-07-16.csv").open(
             "w", encoding="utf-8-sig", newline=""
         ) as handle:
             writer = csv.DictWriter(handle, fieldnames=["date", "match", "stake"])
             writer.writeheader()
             writer.writerow({"date": "2026-07-16", "match": "A vs B", "stake": 20})
-        (root / "data" / "sporttery_odds_2026-07-16.json").write_text(
-            json.dumps({"001": {"had": {"h": "2.00"}}}), encoding="utf-8"
+        write_prediction_metadata(
+            root,
+            TARGET_DATE,
+            datetime(2026, 7, 16, 13, 30, 30, tzinfo=BJT),
         )
+        create_decision_bundle(
+            root,
+            TARGET_DATE,
+            datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
+        )
+
+    @staticmethod
+    def write_csv(path: Path, rows: list[dict]) -> None:
+        fields = sorted({key for row in rows for key in row}) or ["placeholder"]
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
 
     def make_lock(self, root: Path) -> dict:
         return lock_plan(
             root,
             TARGET_DATE,
             datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
-            "sporttery",
         )
 
     def lock_path(self, root: Path) -> Path:
@@ -100,13 +184,77 @@ class PlanLockTest(unittest.TestCase):
                 root,
                 date(2026, 7, 16),
                 datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
-                "sporttery",
             )
             self.assertIsNotNone(read_valid_lock(root, date(2026, 7, 16)))
             (root / "output" / "betting_plan_2026-07-16.csv").write_text(
                 "changed", encoding="utf-8"
             )
             self.assertIsNone(read_valid_lock(root, date(2026, 7, 16)))
+
+    def test_lock_derives_zgzcw_source_from_the_validated_decision_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            bundle_path = root / "output" / "decision_bundle_2026-07-16.json"
+            bundle_path.write_text("{}\n", encoding="utf-8")
+            bundle = {
+                "locked_at_bjt": "2026-07-16T13:31:00+08:00",
+                "decision_snapshot": {
+                    "source": "zgzcw",
+                    "path": "data/odds_snapshots/2026-07-16-133000-decision.json",
+                    "sha256": plan_lock_sha(root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json"),
+                },
+            }
+
+            with patch(
+                "plan_lock.read_valid_decision_bundle",
+                return_value=bundle,
+                create=True,
+            ):
+                payload = lock_plan(
+                    root,
+                    TARGET_DATE,
+                    datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
+                )
+
+            self.assertEqual("zgzcw", payload["odds_source"])
+            self.assertEqual(
+                "output/decision_bundle_2026-07-16.json",
+                payload["decision_bundle_path"],
+            )
+            self.assertEqual(64, len(payload["decision_bundle_sha256"]))
+
+    def test_lock_cli_no_longer_accepts_a_separate_source_argument(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_artifacts(root)
+            bundle_path = root / "output" / "decision_bundle_2026-07-16.json"
+            bundle_path.write_text("{}\n", encoding="utf-8")
+            bundle = {
+                "locked_at_bjt": "2026-07-16T13:31:00+08:00",
+                "decision_snapshot": {
+                    "source": "zgzcw",
+                    "path": "data/odds_snapshots/2026-07-16-133000-decision.json",
+                    "sha256": plan_lock_sha(root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json"),
+                },
+            }
+            with (
+                patch("plan_lock.read_valid_decision_bundle", return_value=bundle, create=True),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "plan_lock.py",
+                        "lock",
+                        "--date",
+                        "2026-07-16",
+                        "--locked-at",
+                        "2026-07-16T13:31:00+08:00",
+                    ],
+                ),
+                patch.object(os, "getcwd", return_value=str(root)),
+            ):
+                self.assertEqual(0, main())
 
     def test_relocking_an_unchanged_plan_preserves_the_first_lock_time(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,13 +264,11 @@ class PlanLockTest(unittest.TestCase):
                 root,
                 date(2026, 7, 16),
                 datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
-                "sporttery",
             )
             second = lock_plan(
                 root,
                 date(2026, 7, 16),
                 datetime(2026, 7, 16, 14, 5, tzinfo=BJT),
-                "sporttery",
             )
             self.assertEqual(first, second)
             self.assertEqual("2026-07-16T13:31:00+08:00", second["locked_at_bjt"])
@@ -132,7 +278,7 @@ class PlanLockTest(unittest.TestCase):
             root = Path(tmp)
             self.make_artifacts(root)
             payload = self.make_lock(root)
-            payload["schema_version"] = 2
+            payload["schema_version"] = 999
             self.write_lock_payload(root, payload)
 
             self.assertIsNone(read_valid_lock(root, TARGET_DATE))
@@ -167,7 +313,8 @@ class PlanLockTest(unittest.TestCase):
     def test_read_valid_lock_rejects_missing_artifacts(self):
         artifacts = (
             Path("output/betting_plan_2026-07-16.csv"),
-            Path("data/sporttery_odds_2026-07-16.json"),
+            Path("output/decision_bundle_2026-07-16.json"),
+            Path("data/odds_snapshots/2026-07-16-133000-decision.json"),
         )
         for artifact in artifacts:
             with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as tmp:
@@ -222,7 +369,6 @@ class PlanLockTest(unittest.TestCase):
                     root,
                     TARGET_DATE,
                     datetime(2026, 7, 16, 14, 5, tzinfo=BJT),
-                    "sporttery",
                 )
 
             self.assertEqual(original_bytes, lock_path.read_bytes())
@@ -246,7 +392,7 @@ class PlanLockTest(unittest.TestCase):
                 )
                 for locked_at in (
                     "2026-07-16T13:31:00+08:00",
-                    "2026-07-16T14:05:00+08:00",
+                    "2026-07-16T13:31:00+08:00",
                 )
             ]
 
@@ -325,7 +471,6 @@ class PlanLockTest(unittest.TestCase):
                 root,
                 date(2026, 7, 16),
                 datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
-                "sporttery",
             )
             with patch.object(sys, "argv", [
                 "plan_lock.py", "is-locked", "--date", "2026-07-16"
@@ -348,9 +493,8 @@ class PlanLockTest(unittest.TestCase):
                 root,
                 date(2026, 7, 16),
                 datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
-                "sporttery",
             )
-            (root / "data" / "sporttery_odds_2026-07-16.json").write_text(
+            (root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json").write_text(
                 "changed", encoding="utf-8"
             )
             with patch.object(sys, "argv", [
@@ -370,8 +514,6 @@ class PlanLockTest(unittest.TestCase):
                 "2026-07-16",
                 "--locked-at",
                 "2026-07-16T13:31:00+08:00",
-                "--source",
-                "sporttery",
             ]), patch.object(os, "getcwd", return_value=str(root)):
                 self.assertNotEqual(0, main())
 
@@ -386,8 +528,6 @@ class PlanLockTest(unittest.TestCase):
                 "2026-07-16",
                 "--locked-at",
                 "2026-07-16T13:31:00",
-                "--source",
-                "sporttery",
             ]), patch.object(os, "getcwd", return_value=str(root)):
                 with self.assertRaises(SystemExit) as raised:
                     main()

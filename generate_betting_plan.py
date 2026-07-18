@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from activation_readiness import assert_activation_ready
+from decision_bundle import read_valid_decision_bundle
 from betting_ledger import (
     PENDING,
     TERMINAL_STATUSES,
@@ -1372,27 +1373,57 @@ def build_value_v4_from_inputs(
     )
 
 
-def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list[dict], list[dict]]:
+def build_value_v4_plan(
+    target_date: date,
+    *,
+    locked_at: datetime,
+    decision_bundle: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
     """Build a value-v4 portfolio from locked decision-market inputs only."""
     global _LAST_VALUE_V4_AUDIT
     locked_time = _aware_locked_at(locked_at)
+    if decision_bundle is not None:
+        snapshot = dict(decision_bundle["decision_snapshot"]["payload"])
+        snapshot["_snapshot_record_id"] = decision_bundle["decision_snapshot"]["path"]
+        bundle_config = decision_bundle["configuration"]["betting"]["payload"]
+        predictions = load_csv(ROOT / decision_bundle["predictions"]["path"])
+        histories = decision_bundle["history_inputs"]
+        paid_history = histories["paid_history"]["rows"]
+        observation_history = histories["observation_history"]["rows"]
+        training_samples = histories["training_samples"]["rows"]
+    else:
+        bundle_config = read_json(ROOT / "betting_config.json")
+        predictions = load_predictions(target_date)
+        snapshot = load_value_snapshot(target_date, locked_at=locked_time)
+        paid_history = load_csv(OUTPUT_DIR / "betting_ledger.csv")
+        observation_history = load_csv(OUTPUT_DIR / "observation_ledger.csv")
+        training_samples = load_draw_training_samples()
     result = build_value_v4_from_inputs(
         target_date,
         locked_at=locked_time,
-        config=read_json(ROOT / "betting_config.json"),
-        predictions=load_predictions(target_date),
-        snapshot=load_value_snapshot(target_date, locked_at=locked_time),
-        paid_history=load_csv(OUTPUT_DIR / "betting_ledger.csv"),
-        observation_history=load_csv(OUTPUT_DIR / "observation_ledger.csv"),
-        training_samples=load_draw_training_samples(),
+        config=bundle_config,
+        predictions=predictions,
+        snapshot=snapshot,
+        paid_history=paid_history,
+        observation_history=observation_history,
+        training_samples=training_samples,
     )
     _LAST_VALUE_V4_AUDIT = result.audit
     return result.plan, result.observations
 
 
-def build_strategy_outputs(target_date: date, *, locked_at: datetime) -> StrategyOutputs:
+def build_strategy_outputs(
+    target_date: date,
+    *,
+    locked_at: datetime,
+    decision_bundle: dict | None = None,
+) -> StrategyOutputs:
     """Select the paid strategy strictly from the configured activation mode."""
-    config = read_json(ROOT / "betting_config.json")
+    config = (
+        decision_bundle["configuration"]["betting"]["payload"]
+        if decision_bundle is not None
+        else read_json(ROOT / "betting_config.json")
+    )
     mode = config.get("value_strategy", {}).get("activation_mode")
     if mode not in {"shadow", "active"}:
         raise ValueError("activation_mode must be shadow or active")
@@ -1401,9 +1432,14 @@ def build_strategy_outputs(target_date: date, *, locked_at: datetime) -> Strateg
     locked_time = _aware_locked_at(locked_at)
     legacy_plan = []
     if mode == "shadow":
-        snapshot = load_value_snapshot(target_date, locked_at=locked_time)
+        if decision_bundle is not None:
+            snapshot = dict(decision_bundle["decision_snapshot"]["payload"])
+            snapshot["_snapshot_record_id"] = decision_bundle["decision_snapshot"]["path"]
+            predictions = load_csv(ROOT / decision_bundle["predictions"]["path"])
+        else:
+            snapshot = load_value_snapshot(target_date, locked_at=locked_time)
+            predictions = load_predictions(target_date)
         markets = load_official_decision_markets(target_date, snapshot=snapshot)
-        predictions = load_predictions(target_date)
         legacy_plan, _ = build_legacy_value_plan(
             target_date,
             predictions=predictions,
@@ -1411,7 +1447,11 @@ def build_strategy_outputs(target_date: date, *, locked_at: datetime) -> Strateg
             odds_source=str(snapshot.get("source") or ""),
         )
         legacy_plan = _finalize_legacy_plan(legacy_plan, markets, locked_time)
-    v4_plan, observations = build_value_v4_plan(target_date, locked_at=locked_time)
+    v4_plan, observations = build_value_v4_plan(
+        target_date,
+        locked_at=locked_time,
+        decision_bundle=decision_bundle,
+    )
     audit = dict(_LAST_VALUE_V4_AUDIT)
     active_plan = legacy_plan if mode == "shadow" else v4_plan
     shadow_plan = v4_plan if mode == "shadow" else []
@@ -1586,7 +1626,21 @@ def main() -> int:
             return 1
         print(f"Reusing locked betting plan: {OUTPUT_DIR / f'betting_plan_{target_date.isoformat()}.csv'}")
         return 0
-    outputs = build_strategy_outputs(target_date, locked_at=locked_at)
+    try:
+        decision_bundle = read_valid_decision_bundle(
+            ROOT,
+            target_date,
+            expected_locked_at=locked_at,
+            verify_current_inputs=True,
+        )
+    except ValueError as exc:
+        print(f"Invalid decision bundle: {exc}")
+        return 1
+    outputs = build_strategy_outputs(
+        target_date,
+        locked_at=locked_at,
+        decision_bundle=decision_bundle,
+    )
     plan_path = write_plan(outputs.active_plan, target_date)
     observation_path = write_observation_plan(outputs.observations, target_date)
     shadow_path = write_shadow_plan(outputs.shadow_plan, target_date)

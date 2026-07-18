@@ -18,7 +18,7 @@ from official_markets import (
     TOTAL_GOALS_SELECTIONS,
     normalize_market,
 )
-from plan_lock import lock_plan
+from plan_lock import lock_plan, sha256_file as plan_lock_sha
 from value_candidates import ValueCandidate
 
 
@@ -27,6 +27,20 @@ BEIJING = timezone(timedelta(hours=8))
 LOCKED_AT = datetime(2026, 7, 18, 13, 30, tzinfo=BEIJING)
 CAPTURED_AT = "2026-07-18T13:20:00+08:00"
 KICKOFF_AT = "2026-07-18T20:00:00+08:00"
+
+
+def synthetic_decision_bundle(root: Path, source: str = "sporttery") -> dict:
+    bundle_path = root / "output" / f"decision_bundle_{TARGET_DATE}.json"
+    bundle_path.write_text("{}\n", encoding="utf-8")
+    odds_path = root / "data" / f"sporttery_odds_{TARGET_DATE}.json"
+    return {
+        "locked_at_bjt": LOCKED_AT.isoformat(),
+        "decision_snapshot": {
+            "source": source,
+            "path": odds_path.relative_to(root).as_posix(),
+            "sha256": plan_lock_sha(odds_path),
+        },
+    }
 
 
 def value_config(mode: str = "shadow") -> dict:
@@ -202,6 +216,8 @@ def settled_value_single(
         "result_source": "sporttery",
         "source_record_id": f"result-{match_id}",
         "captured_at_bjt": "2026-07-17T22:00:00+08:00",
+        "score_scope": "regular_time_90",
+        "settlement_minutes": "90",
         "home_goals": str(home_goals),
         "away_goals": str(away_goals),
     }
@@ -264,6 +280,8 @@ def settled_value_parlay(report_date: str = "2026-07-17") -> dict:
             "result_source": "sporttery",
             "source_record_id": "result-maturity-parlay-a",
             "captured_at_bjt": "2026-07-17T22:00:00+08:00",
+            "score_scope": "regular_time_90",
+            "settlement_minutes": "90",
             "home_goals": "2",
             "away_goals": "0",
         },
@@ -273,6 +291,8 @@ def settled_value_parlay(report_date: str = "2026-07-17") -> dict:
             "result_source": "sporttery",
             "source_record_id": "result-maturity-parlay-b",
             "captured_at_bjt": "2026-07-17T22:00:00+08:00",
+            "score_scope": "regular_time_90",
+            "settlement_minutes": "90",
             "home_goals": "2",
             "away_goals": "0",
         },
@@ -778,6 +798,11 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
                     patch.object(strategy, "ROOT", root),
                     patch.object(strategy, "OUTPUT_DIR", output),
                     patch.object(strategy, "DATA_DIR", root / "data"),
+                    patch.object(
+                        strategy,
+                        "read_valid_decision_bundle",
+                        return_value={"synthetic": True},
+                    ),
                     patch.object(strategy, "build_strategy_outputs", return_value=empty_outputs),
                     patch.object(strategy, "write_daily_decision", return_value=output / "decision.json"),
                     patch.object(strategy, "settle_ledger") as settle_mock,
@@ -870,6 +895,8 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
                     "result_source": "sporttery",
                     "source_record_id": f"result-{match_id}",
                     "captured_at_bjt": "2026-07-19T09:00:00+08:00",
+                    "score_scope": "regular_time_90",
+                    "settlement_minutes": "90",
                 }
                 for match_id, home, away in (
                     ("obs-had", "2", "1"),
@@ -1077,8 +1104,10 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
             ):
                 outputs = strategy.build_strategy_outputs(TARGET_DATE, locked_at=LOCKED_AT)
                 plan_path = strategy.write_plan(outputs.active_plan, TARGET_DATE)
-            lock_plan(root, TARGET_DATE, LOCKED_AT, "sporttery")
-            ledger_path = ingest_date(root, TARGET_DATE)
+            bundle = synthetic_decision_bundle(root)
+            with patch("plan_lock.read_valid_decision_bundle", return_value=bundle):
+                lock_plan(root, TARGET_DATE, LOCKED_AT)
+                ledger_path = ingest_date(root, TARGET_DATE)
             with ledger_path.open(encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             locked_plan_bytes = plan_path.read_bytes()
@@ -1227,7 +1256,7 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
             plan_path = output / f"betting_plan_{TARGET_DATE}.csv"
             plan_path.write_bytes(b"date,stake\n2026-07-18,10\n")
             (data / f"sporttery_odds_{TARGET_DATE}.json").write_text("{}", encoding="utf-8")
-            lock_plan(root, TARGET_DATE, LOCKED_AT, "sporttery")
+            bundle = synthetic_decision_bundle(root)
             snapshots = data / "odds_snapshots"
             snapshots.mkdir()
             later_snapshot = market_fixture("later", "had")[1]
@@ -1238,12 +1267,14 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
             )
             original = plan_path.read_bytes()
             with (
+                patch("plan_lock.read_valid_decision_bundle", return_value=bundle),
                 patch.object(strategy, "ROOT", root),
                 patch.object(strategy, "OUTPUT_DIR", output),
                 patch.object(strategy, "DATA_DIR", data),
                 patch.object(strategy, "build_strategy_outputs", side_effect=AssertionError("regenerated")),
                 patch.object(sys, "argv", ["generate_betting_plan.py", "--date", str(TARGET_DATE), "--locked-at", LOCKED_AT.isoformat()]),
             ):
+                lock_plan(root, TARGET_DATE, LOCKED_AT)
                 result = strategy.main()
                 final = plan_path.read_bytes()
 
