@@ -7,7 +7,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from activation_readiness import assert_activation_ready
 from betting_ledger import (
+    PENDING,
     TERMINAL_STATUSES,
     settle_ledger,
     settled_market_identities,
@@ -604,6 +606,7 @@ build_value_plan = build_legacy_value_plan
 
 
 BEIJING = timezone(timedelta(hours=8))
+TRAINING_RESULT_MATURITY = timedelta(minutes=130)
 _LAST_VALUE_V4_AUDIT: dict = {}
 PLAN_FIELD_ORDER = (
     "date", "bet_id", "report_date", "strategy_version", "model_version",
@@ -626,6 +629,15 @@ class StrategyOutputs:
     active_plan: list[dict]
     observations: list[dict]
     shadow_plan: list[dict]
+    audit: dict
+
+
+@dataclass(frozen=True)
+class ValueV4BuildResult:
+    plan: list[dict]
+    observations: list[dict]
+    candidates: list[ValueCandidate]
+    diagnostics: list[dict]
     audit: dict
 
 
@@ -725,6 +737,8 @@ def load_official_decision_markets(
                     {"match_id": match_id, "market_type": market_type},
                 )
                 continue
+            if not raw:
+                continue
             enriched = dict(raw)
             enriched.setdefault("source", source)
             snapshot_record = snapshot.get("source_record_id") or snapshot.get("_snapshot_record_id")
@@ -774,6 +788,88 @@ def _snapshot_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.astimezone(BEIJING)
+
+
+def ledger_history_as_of(
+    rows: list[dict], target_date: date, locked_at: datetime
+) -> list[dict]:
+    """Return only ledger state knowable at the aware decision boundary."""
+    boundary = _aware_locked_at(locked_at)
+    available = []
+    for index, source_row in enumerate(rows):
+        if not isinstance(source_row, dict):
+            raise ValueError(f"ledger row {index} must be a mapping")
+        row = dict(source_row)
+        report_value = row.get("report_date") or row.get("date")
+        try:
+            report_date = date.fromisoformat(str(report_value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"ledger row {index} report_date is invalid") from exc
+        locked_value = row.get("locked_at_bjt")
+        locked = _snapshot_datetime(locked_value)
+        legacy_without_lock = (
+            not str(locked_value or "").strip()
+            and row.get("strategy_version") != "value-v4"
+            and report_date < target_date
+        )
+        if locked is None and not legacy_without_lock:
+            raise ValueError(f"ledger row {index} locked_at_bjt is invalid")
+        if report_date > target_date or (locked is not None and locked > boundary):
+            continue
+        if row.get("status") in TERMINAL_STATUSES:
+            settled_value = row.get("settled_at_bjt")
+            settled = _snapshot_datetime(settled_value)
+            if settled_value and settled is None:
+                raise ValueError(f"ledger row {index} settled_at_bjt is invalid")
+            if settled is None or settled > boundary:
+                row.update({
+                    "status": PENDING,
+                    "result_status": "",
+                    "result_source": "",
+                    "source_record_id": "",
+                    "captured_at_bjt": "",
+                    "home_goals": "",
+                    "away_goals": "",
+                    "settled_at_bjt": "",
+                    "result_legs_json": "",
+                    "return": "0",
+                    "profit": "0",
+                    "clv": "",
+                })
+        available.append(row)
+    return available
+
+
+def training_samples_as_of(
+    rows: list[dict], target_date: date, locked_at: datetime
+) -> list[dict]:
+    """Filter draw calibration samples to information available before target."""
+    boundary = _aware_locked_at(locked_at)
+    available = []
+    for index, source_row in enumerate(rows):
+        if not isinstance(source_row, dict):
+            raise ValueError(f"training sample {index} must be a mapping")
+        row = dict(source_row)
+        try:
+            sample_date = date.fromisoformat(str(row.get("date")))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"training sample {index} date is invalid") from exc
+        captured = _snapshot_datetime(row.get("captured_at"))
+        if captured is None:
+            raise ValueError(f"training sample {index} captured_at is invalid")
+        kickoff = _snapshot_datetime(row.get("kickoff_at"))
+        if kickoff is None:
+            raise ValueError(f"training sample {index} kickoff_at is invalid")
+        if captured >= kickoff:
+            raise ValueError(f"training sample {index} capture is not pre-match")
+        if (
+            sample_date >= target_date
+            or captured > boundary
+            or kickoff + TRAINING_RESULT_MATURITY > boundary
+        ):
+            continue
+        available.append(row)
+    return available
 
 
 def _snapshot_odds(snapshot: dict) -> dict[str, dict]:
@@ -1091,9 +1187,16 @@ def _portfolio_rows(portfolio: Portfolio, locked_at: datetime) -> list[dict]:
                 "match_id": leg.match_id, "market_type": leg.market_type,
                 "selection": leg.selection, "line": "" if leg.line is None else str(leg.line),
                 "odds": format(Decimal(str(leg.official_odds)), "f"),
+                "locked_odds": format(Decimal(str(leg.official_odds)), "f"),
                 "odds_source": leg.odds_source,
                 "odds_source_record_id": leg.source_record_id,
                 "odds_captured_at_bjt": leg.captured_at_bjt,
+                "expected_value": (
+                    leg.conservative_probability * float(leg.official_odds) - 1.0
+                ),
+                "net_ev": (
+                    leg.conservative_probability * float(leg.official_odds) - 1.0
+                ),
             }
             for leg in item.parlay.legs
         ]
@@ -1193,26 +1296,42 @@ def _portfolio_audit(
     }
 
 
-def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list[dict], list[dict]]:
-    """Build a value-v4 portfolio from locked decision-market inputs only."""
-    global _LAST_VALUE_V4_AUDIT
+def build_value_v4_from_inputs(
+    target_date: date,
+    *,
+    locked_at: datetime,
+    config: dict,
+    predictions: list[dict],
+    snapshot: dict,
+    paid_history: list[dict],
+    observation_history: list[dict],
+    training_samples: list[dict],
+) -> ValueV4BuildResult:
+    """Build value-v4 deterministically from explicit, caller-owned inputs."""
     locked_time = _aware_locked_at(locked_at)
-    config = read_json(ROOT / "betting_config.json")
-    predictions = load_predictions(target_date)
-    snapshot = load_value_snapshot(target_date, locked_at=locked_time)
+    paid_as_of = ledger_history_as_of(paid_history, target_date, locked_time)
+    observations_as_of = ledger_history_as_of(
+        observation_history, target_date, locked_time
+    )
+    training_as_of = training_samples_as_of(
+        training_samples, target_date, locked_time
+    )
     diagnostics: list[dict] = []
     markets = load_official_decision_markets(
         target_date, snapshot=snapshot, diagnostics=diagnostics
     )
-    history = load_csv(OUTPUT_DIR / "betting_ledger.csv")
-    observations_history = load_csv(OUTPUT_DIR / "observation_ledger.csv")
-    settled_samples = _settled_sample_count(history, observations_history, target_date)
+    settled_samples = _settled_sample_count(
+        paid_as_of, observations_as_of, target_date
+    )
     account = simulation_account_state(
-        history, observations_history, target_date, config.get("simulation_account", {})
+        paid_as_of,
+        observations_as_of,
+        target_date,
+        config.get("simulation_account", {}),
     )
     calibrations_config = config.get("league_calibration", {})
     calibrations = fit_league_draw_calibrations(
-        load_draw_training_samples(),
+        training_as_of,
         min_samples=int(calibrations_config.get("min_samples", 30)),
         prior_samples=int(calibrations_config.get("prior_samples", 60)),
         max_adjustment=float(calibrations_config.get("max_adjustment", 0.05)),
@@ -1237,12 +1356,38 @@ def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list
     ]
     audit = _portfolio_audit(candidates, portfolio, limits, diagnostics)
     audit["settled_samples"] = settled_samples
+    audit["candidate_count"] = len(candidates)
+    audit["observation_count"] = len(observations)
+    audit["diagnostic_count"] = len(diagnostics)
     audit["selected_shadow"] = [
         {"bet_id": row["bet_id"], "stake": row["stake"], "market_type": row["market_type"]}
         for row in plan
     ]
-    _LAST_VALUE_V4_AUDIT = audit
-    return plan, observations
+    return ValueV4BuildResult(
+        plan=plan,
+        observations=observations,
+        candidates=candidates,
+        diagnostics=diagnostics,
+        audit=audit,
+    )
+
+
+def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list[dict], list[dict]]:
+    """Build a value-v4 portfolio from locked decision-market inputs only."""
+    global _LAST_VALUE_V4_AUDIT
+    locked_time = _aware_locked_at(locked_at)
+    result = build_value_v4_from_inputs(
+        target_date,
+        locked_at=locked_time,
+        config=read_json(ROOT / "betting_config.json"),
+        predictions=load_predictions(target_date),
+        snapshot=load_value_snapshot(target_date, locked_at=locked_time),
+        paid_history=load_csv(OUTPUT_DIR / "betting_ledger.csv"),
+        observation_history=load_csv(OUTPUT_DIR / "observation_ledger.csv"),
+        training_samples=load_draw_training_samples(),
+    )
+    _LAST_VALUE_V4_AUDIT = result.audit
+    return result.plan, result.observations
 
 
 def build_strategy_outputs(target_date: date, *, locked_at: datetime) -> StrategyOutputs:
@@ -1251,6 +1396,8 @@ def build_strategy_outputs(target_date: date, *, locked_at: datetime) -> Strateg
     mode = config.get("value_strategy", {}).get("activation_mode")
     if mode not in {"shadow", "active"}:
         raise ValueError("activation_mode must be shadow or active")
+    if mode == "active":
+        assert_activation_ready(ROOT, config=config)
     locked_time = _aware_locked_at(locked_at)
     legacy_plan = []
     if mode == "shadow":

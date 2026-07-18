@@ -3,38 +3,63 @@
     "2026-07-18"
   ],
   "counts": {
+    "candidates": 165,
     "checked_dates": 1,
+    "diagnostics": 0,
     "excluded_dates": 7,
     "excluded_invalid_dates": 0,
     "excluded_missing_dates": 7,
+    "observations": 165,
     "paid_rows": 0,
     "parlay_legs": 0,
     "parlays": 0,
     "requested_dates": 8,
     "singles": 0
   },
+  "diagnostic_counts": {},
   "evidence": [
     {
+      "candidate_count": 165,
       "date": "2026-07-18",
       "decision_capture_timestamp": "2026-07-18T16:51:36.178619+08:00",
       "decision_source": "zgzcw",
+      "diagnostic_count": 0,
+      "diagnostic_counts": {},
       "domestic_odds": {
-        "bytes": 20194,
+        "bytes": 20195,
         "path": "data/sporttery_odds_2026-07-18.json",
-        "sha256": "79dd6d7b3fce64f7e48b45bdd541b5bd1999e59b80e21ad6e70b48025d7d32b1"
+        "sha256": "ab888d9d6ea66b8239ec1770566752ed728f08a6d2106780aa214545a5479b2a"
       },
       "fixture_match_count": 15,
       "fixtures_file": {
-        "bytes": 2986,
+        "bytes": 3268,
         "path": "data/fixtures.csv",
-        "sha256": "b0efd5074739e4b76b5c01134ea24b1e724442d38769f37e6ece28de5f2685fb"
+        "sha256": "9e5e04dd82bb8f89b1218aed0eff3c6322607c87e9043a23beaaad84768650ad"
       },
       "generated_bet_ids": [],
       "generated_paid_count": 0,
+      "observation_count": 165,
       "predictions": {
-        "bytes": 4599,
+        "bytes": 4860,
         "path": "output/predictions_2026-07-18.csv",
-        "sha256": "15b1ae88d36887365ae1d73ab1b17d1c4ab58b91be3e147a63336d604f5eb071"
+        "sha256": "19a166a168cc9c10dc19d1b3c0f9009e60dbd6d00d506d96ea8f27de365a8b7a"
+      },
+      "rebuild_inputs": {
+        "observation_history": {
+          "bytes": 5001,
+          "path": "output/observation_ledger.csv",
+          "sha256": "ca47f935c4ddd8cb15d624a8d1ceb3ad1283bfed5e6ed54a131af0b4765bb1d9"
+        },
+        "paid_history": {
+          "bytes": 3070,
+          "path": "output/betting_ledger.csv",
+          "sha256": "6b5f4f448e9bf8adba7bd008c368fd1440a174cabd83a30a47d3e440139d4f41"
+        },
+        "training_samples": {
+          "bytes": 298,
+          "path": "data/draw_training_samples.csv",
+          "sha256": "7bd6870c48dca3480f6ee39d8fc75607327a3d47a7e0822e72225c5e96fc1104"
+        }
       },
       "snapshot": {
         "bytes": 15041,
@@ -144,6 +169,7 @@
   "passed": true,
   "profitability_gate_applied": false,
   "real_money_automation": false,
+  "rebuild_config_sha256": "54139af15fcbf193c36936d62448fcd723b450bfededfb9a9232ae71f3733451",
   "schema_version": "shadow-portfolio-activation-audit-v1",
   "simulation_only": true,
   "source_coverage": [

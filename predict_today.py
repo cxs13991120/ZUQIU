@@ -28,6 +28,7 @@ class TeamRating:
 class Fixture:
     match_date: date
     kickoff_local: str
+    kickoff_at: str
     stage: str
     team_a: str
     team_b: str
@@ -58,6 +59,27 @@ def to_float(value: str, default: float = 0.0) -> float:
 def to_optional_float(value: str) -> float | None:
     value = (value or "").strip()
     return float(value) if value else None
+
+
+def required_kickoff_at(row: dict[str, str]) -> str:
+    value = row.get("kickoff_at")
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) <= 10
+        or value[10] not in {" ", "T"}
+    ):
+        raise ValueError(
+            "fixtures CSV kickoff_at must be a non-empty ISO datetime"
+        )
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            "fixtures CSV kickoff_at must be a non-empty ISO datetime"
+        ) from exc
+    return value
 
 
 def load_ratings() -> dict[str, TeamRating]:
@@ -110,6 +132,7 @@ def load_fixtures() -> list[Fixture]:
                 Fixture(
                     match_date=datetime.strptime(row["date"].strip(), "%Y-%m-%d").date(),
                     kickoff_local=row["kickoff_local"].strip(),
+                    kickoff_at=required_kickoff_at(row),
                     stage=row["stage"].strip().lower(),
                     team_a=row["team_a"].strip(),
                     team_b=row["team_b"].strip(),
@@ -271,6 +294,7 @@ def predict_fixture(fixture: Fixture, ratings: dict[str, TeamRating], config: di
     return {
         "date": fixture.match_date.isoformat(),
         "kickoff": fixture.kickoff_local,
+        "kickoff_at": fixture.kickoff_at,
         "stage": fixture.stage,
         "venue": fixture.venue,
         "match_num": fixture.match_num,
@@ -330,6 +354,7 @@ def write_csv(predictions: list[dict], target_date: date) -> Path:
     fields = [
         "date",
         "kickoff",
+        "kickoff_at",
         "stage",
         "match_num",
         "match_id",

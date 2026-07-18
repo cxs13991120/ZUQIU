@@ -3,14 +3,15 @@ import csv
 import hashlib
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable
 
+from activation_readiness import activation_config_digest, validate_activation_payload
 from betting_ledger import DOMESTIC_ODDS_SOURCES, stable_bet_id
-from generate_betting_plan import build_value_v4_plan
+from generate_betting_plan import ValueV4BuildResult, build_value_v4_from_inputs
 from official_markets import (
     THREE_WAY_SELECTIONS,
     TOTAL_GOALS_SELECTIONS,
@@ -30,6 +31,30 @@ HARD_MATCH_EXPOSURE = Decimal("200")
 HARD_PARLAY_STAKE = Decimal("30")
 HARD_DAILY_STAKE = Decimal("500")
 HARD_MONTHLY_STAKE = Decimal("5000")
+FATAL_RECONSTRUCTION_DIAGNOSTICS = frozenset({
+    "candidate_inputs_invalid",
+    "decision_kickoff_invalid",
+    "decision_market_mismatch",
+    "decision_match_missing",
+    "decision_snapshot_invalid",
+    "market_normalization_rejected",
+    "market_payload_invalid",
+    "market_source_record_missing",
+    "match_started",
+    "model_probabilities_invalid",
+    "official_market_invalid",
+    "official_market_match_id_mismatch",
+    "official_market_type_mismatch",
+    "official_markets_missing",
+    "prediction_identity_mismatch",
+    "prediction_match_id_invalid",
+    "prediction_not_mapping",
+    "snapshot_match_id_invalid",
+    "snapshot_match_invalid",
+    "snapshot_markets_invalid",
+    "snapshot_matches_invalid",
+    "unsupported_market_key",
+})
 
 
 def audit_generated_portfolios(
@@ -71,14 +96,21 @@ def audit_generated_portfolios(
                 )
                 continue
             stake = _decimal(row.get("stake"))
-            if stake is None or stake <= 0:
-                if stake is None or stake < 0:
-                    _violate(
-                        violations,
-                        "stake_invalid",
-                        report_date=report_date,
-                        row_index=row_index,
-                    )
+            if stake is None or stake < 0:
+                _violate(
+                    violations,
+                    "stake_invalid",
+                    report_date=report_date,
+                    row_index=row_index,
+                )
+                continue
+            if stake == 0:
+                _violate(
+                    violations,
+                    "zero_stake_paid_row",
+                    report_date=report_date,
+                    row_index=row_index,
+                )
                 continue
             paid_rows += 1
 
@@ -164,10 +196,9 @@ def audit_generated_portfolios(
             else:
                 singles += 1
 
-            # Invalid identities are deliberately excluded from maxima. The gate
-            # already fails, and malformed match identities cannot hide exposure.
-            if not identity_errors and match_ids:
-                date_rows.append((row, stake, tuple(match_ids)))
+            # Every positive numeric paid stake contributes to broad limits.
+            # Canonical match IDs still contribute even when another field fails.
+            date_rows.append((row, stake, tuple(match_ids)))
         valid_rows[report_date] = date_rows
 
     maxima, limit_violations = _calculate_maxima(valid_rows)
@@ -215,6 +246,7 @@ def audit_generated_portfolios(
         "simulation_only": True,
         "real_money_automation": False,
         "profitability_gate_applied": False,
+        "rebuild_config_sha256": activation_config_digest(config),
     }
     return payload
 
@@ -233,7 +265,27 @@ def run_audit(
     config = _read_json(root / "betting_config.json")
     protected_before = _protected_hashes(root)
     fixtures, fixtures_error = _read_fixtures(root / "data" / "fixtures.csv")
-    builder = plan_builder or build_value_v4_plan
+    builder = plan_builder or build_value_v4_from_inputs
+    paid_path = root / "output" / "betting_ledger.csv"
+    observation_path = root / "output" / "observation_ledger.csv"
+    training_path = root / "data" / "draw_training_samples.csv"
+    paid_history, paid_error = _read_optional_csv_rows(paid_path)
+    observation_history, observation_error = _read_optional_csv_rows(observation_path)
+    training_samples, training_error = _read_optional_csv_rows(training_path)
+    rebuild_input_errors = [
+        code
+        for code, error in (
+            ("paid_history_invalid", paid_error),
+            ("observation_history_invalid", observation_error),
+            ("training_samples_invalid", training_error),
+        )
+        if error is not None
+    ]
+    rebuild_inputs_evidence = {
+        "paid_history": _optional_file_evidence(root, paid_path),
+        "observation_history": _optional_file_evidence(root, observation_path),
+        "training_samples": _optional_file_evidence(root, training_path),
+    }
     portfolios: dict[str, list[dict]] = {}
     checked_dates: list[str] = []
     excluded_missing: list[str] = []
@@ -241,6 +293,10 @@ def run_audit(
     excluded_dates: list[dict] = []
     source_coverage: list[dict] = []
     evidence: list[dict] = []
+    candidate_total = 0
+    observation_total = 0
+    diagnostic_total = 0
+    diagnostic_counts: Counter[str] = Counter()
 
     for target_date in _date_range(from_date, through_date):
         report_date = target_date.isoformat()
@@ -271,7 +327,7 @@ def run_audit(
             )
             continue
 
-        invalid = []
+        invalid = list(rebuild_input_errors)
         predictions, prediction_error = _read_csv_rows(prediction_path)
         if prediction_error or not predictions:
             invalid.append("saved_predictions_invalid")
@@ -304,6 +360,16 @@ def run_audit(
                 invalid.append("snapshot_fixtures_mismatch")
             if not snapshot_ids.issubset(odds_ids):
                 invalid.append("snapshot_domestic_odds_mismatch")
+            invalid.extend(
+                _snapshot_identity_errors(
+                    snapshot["matches"], predictions or [], "predictions"
+                )
+            )
+            invalid.extend(
+                _snapshot_identity_errors(
+                    snapshot["matches"], fixtures.get(report_date, []), "fixtures"
+                )
+            )
 
         invalid = sorted(set(invalid))
         if invalid or snapshot is None or snapshot_path is None:
@@ -319,7 +385,16 @@ def run_audit(
 
         locked_at = _aware_datetime(snapshot["captured_at"])
         try:
-            plan, _observations = builder(target_date, locked_at=locked_at)
+            result = builder(
+                target_date,
+                locked_at=locked_at,
+                config=config,
+                predictions=predictions,
+                snapshot=snapshot,
+                paid_history=paid_history,
+                observation_history=observation_history,
+                training_samples=training_samples,
+            )
         except Exception as exc:
             _exclude_date(
                 report_date,
@@ -330,7 +405,7 @@ def run_audit(
                 source_coverage,
             )
             continue
-        if not isinstance(plan, list):
+        if not isinstance(result, ValueV4BuildResult):
             _exclude_date(
                 report_date,
                 "excluded_invalid",
@@ -339,6 +414,57 @@ def run_audit(
                 excluded_dates,
                 source_coverage,
             )
+            continue
+        plan = result.plan
+        observations = result.observations
+        candidates = result.candidates
+        diagnostics = result.diagnostics
+        if not all(
+            isinstance(value, list)
+            for value in (plan, observations, candidates, diagnostics)
+        ):
+            _exclude_date(
+                report_date,
+                "excluded_invalid",
+                ["portfolio_rebuild_invalid"],
+                excluded_invalid,
+                excluded_dates,
+                source_coverage,
+            )
+            continue
+        candidate_total += len(candidates)
+        observation_total += len(observations)
+        diagnostic_total += len(diagnostics)
+        date_diagnostic_counts = Counter(
+            str(item.get("code") or "diagnostic_invalid")
+            if isinstance(item, dict)
+            else "diagnostic_invalid"
+            for item in diagnostics
+        )
+        diagnostic_counts.update(date_diagnostic_counts)
+        reconstruction_errors = []
+        if not candidates or not observations:
+            reconstruction_errors.append("portfolio_reconstruction_unproven")
+        fatal_codes = sorted(
+            code
+            for code in date_diagnostic_counts
+            if code in FATAL_RECONSTRUCTION_DIAGNOSTICS
+            or code == "diagnostic_invalid"
+        )
+        if fatal_codes:
+            reconstruction_errors.append("fatal_reconstruction_diagnostics")
+        if reconstruction_errors:
+            _exclude_date(
+                report_date,
+                "excluded_invalid",
+                reconstruction_errors,
+                excluded_invalid,
+                excluded_dates,
+                source_coverage,
+            )
+            excluded_dates[-1]["diagnostic_codes"] = fatal_codes
+            excluded_dates[-1]["candidate_count"] = len(candidates)
+            excluded_dates[-1]["observation_count"] = len(observations)
             continue
 
         source = str(snapshot["source"]).lower()
@@ -362,8 +488,13 @@ def run_audit(
                 "fixtures_file": _file_evidence(root, root / "data" / "fixtures.csv"),
                 "fixture_match_count": len(fixtures[report_date]),
                 "snapshot_match_count": len(snapshot["matches"]),
+                "candidate_count": len(candidates),
+                "observation_count": len(observations),
+                "diagnostic_count": len(diagnostics),
+                "diagnostic_counts": dict(sorted(date_diagnostic_counts.items())),
                 "generated_paid_count": len(plan),
                 "generated_bet_ids": sorted(str(row.get("bet_id") or "") for row in plan),
+                "rebuild_inputs": rebuild_inputs_evidence,
             }
         )
 
@@ -381,7 +512,11 @@ def run_audit(
         excluded_dates=len(excluded_dates),
         excluded_missing_dates=len(excluded_missing),
         excluded_invalid_dates=len(excluded_invalid),
+        candidates=candidate_total,
+        observations=observation_total,
+        diagnostics=diagnostic_total,
     )
+    payload["diagnostic_counts"] = dict(sorted(diagnostic_counts.items()))
     protected_after = _protected_hashes(root)
     payload["historical_artifacts_unchanged"] = protected_before == protected_after
     payload["historical_artifact_hashes"] = protected_after
@@ -406,6 +541,7 @@ def run_audit(
 
 def validate_audit_payload(payload: dict) -> None:
     """Raise ValueError unless payload satisfies the activation audit schema."""
+    validate_activation_payload(payload)
     if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("audit schema_version is invalid")
     if not isinstance(payload.get("passed"), bool):
@@ -433,6 +569,13 @@ def validate_audit_payload(payload: dict) -> None:
         raise ValueError("real_money_automation must be false")
     if payload.get("profitability_gate_applied") is not False:
         raise ValueError("profitability cannot gate activation")
+    config_digest = payload.get("rebuild_config_sha256")
+    if (
+        not isinstance(config_digest, str)
+        or len(config_digest) != 64
+        or any(character not in "0123456789abcdef" for character in config_digest)
+    ):
+        raise ValueError("audit rebuild_config_sha256 is invalid")
     if payload["passed"] and (not checked or payload["violations"]):
         raise ValueError("passed audit requires checked dates and zero violations")
     if payload["passed"] != (bool(checked) and not payload["violations"]):
@@ -443,6 +586,22 @@ def validate_audit_payload(payload: dict) -> None:
     )
     if sorted(coverage_dates) != expected_dates:
         raise ValueError("source coverage does not account for every requested date")
+    evidence_dates = [
+        row.get("date") for row in payload["evidence"] if isinstance(row, dict)
+    ]
+    if evidence_dates != checked:
+        raise ValueError("audit evidence must account for every checked date")
+    for row in payload["evidence"]:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("candidate_count"), int)
+            or row["candidate_count"] <= 0
+            or not isinstance(row.get("observation_count"), int)
+            or row["observation_count"] <= 0
+            or not isinstance(row.get("diagnostic_count"), int)
+            or row["diagnostic_count"] < 0
+        ):
+            raise ValueError("checked evidence lacks proven reconstruction counts")
 
 
 def _validate_safety_config(config: dict, violations: list[dict]) -> None:
@@ -487,9 +646,11 @@ def _validate_paid_identity(row: dict) -> tuple[list[tuple[str, str]], list[str]
             legs = json.loads(row.get("legs_json") or "")
         except (TypeError, json.JSONDecodeError):
             legs = None
-        if not isinstance(legs, list) or len(legs) != 2:
+        if not isinstance(legs, list):
             errors.append(("parlay_leg_count", "paid parlay must contain exactly two legs"))
-            return errors, [], len(legs) if isinstance(legs, list) else 0
+            return errors, [], 0
+        if len(legs) != 2:
+            errors.append(("parlay_leg_count", "paid parlay must contain exactly two legs"))
         match_ids = []
         combined_odds = Decimal("1")
         for leg_index, leg in enumerate(legs):
@@ -499,18 +660,40 @@ def _validate_paid_identity(row: dict) -> tuple[list[tuple[str, str]], list[str]
             leg_source = str(leg.get("odds_source") or "").strip().lower()
             if leg_source not in DOMESTIC_ODDS_SOURCES:
                 errors.append(("non_domestic_odds", f"parlay leg {leg_index} source is not domestic"))
+            if leg_source != source:
+                errors.append((
+                    "parlay_leg_source_mismatch",
+                    f"parlay leg {leg_index} source differs from paid row",
+                ))
             if not _locked_price_evidence_valid(leg, row.get("locked_at_bjt")):
                 errors.append(("invalid_locked_price_evidence", f"parlay leg {leg_index} price is invalid"))
             match_id = _canonical_match_id(leg.get("match_id"))
+            if match_id is not None:
+                match_ids.append(match_id)
             if match_id is None or not _valid_single_market(
                 str(leg.get("market_type") or "").lower(),
                 str(leg.get("selection") or ""),
                 leg.get("line", ""),
             ):
                 errors.append(("invalid_market_identity", f"parlay leg {leg_index} identity is invalid"))
-            else:
-                match_ids.append(match_id)
-            odds = _decimal(leg.get("odds"))
+            expected_value = _decimal(leg.get("expected_value"))
+            net_ev = _decimal(leg.get("net_ev"))
+            if (
+                expected_value is None
+                or net_ev is None
+                or expected_value <= 0
+                or net_ev <= 0
+            ):
+                errors.append((
+                    "nonpositive_configured_ev",
+                    f"parlay leg {leg_index} EV is not positive",
+                ))
+            elif expected_value != net_ev:
+                errors.append((
+                    "inconsistent_configured_ev",
+                    f"parlay leg {leg_index} EV fields differ",
+                ))
+            odds = _decimal(leg.get("locked_odds"))
             if odds is None or odds <= 1:
                 errors.append(("invalid_locked_price_evidence", f"parlay leg {leg_index} odds are invalid"))
             else:
@@ -532,8 +715,7 @@ def _validate_paid_identity(row: dict) -> tuple[list[tuple[str, str]], list[str]
         row.get("market_line", row.get("line", "")),
     ):
         errors.append(("invalid_market_identity", "paid single identity is invalid"))
-        return errors, [], 0
-    return errors, [match_id], 0
+    return errors, [match_id] if match_id is not None else [], 0
 
 
 def _valid_single_market(market_type: str, selection: str, line: object) -> bool:
@@ -555,14 +737,18 @@ def _valid_single_market(market_type: str, selection: str, line: object) -> bool
 
 def _locked_price_evidence_valid(row: dict, lock_value: object = None) -> bool:
     source_record = row.get("odds_source_record_id")
-    odds = _decimal(row.get("locked_odds", row.get("odds")))
+    locked_odds = _decimal(row.get("locked_odds"))
+    display_odds = _decimal(row.get("odds"))
     captured = _try_aware_datetime(row.get("odds_captured_at_bjt"))
     locked = _try_aware_datetime(lock_value or row.get("locked_at_bjt"))
     return (
         isinstance(source_record, str)
         and bool(source_record.strip())
-        and odds is not None
-        and odds > 1
+        and locked_odds is not None
+        and display_odds is not None
+        and locked_odds > 1
+        and display_odds > 1
+        and locked_odds == display_odds
         and captured is not None
         and locked is not None
         and captured <= locked
@@ -747,12 +933,37 @@ def _read_fixtures(path: Path) -> tuple[dict[str, list[dict]], str | None]:
     return dict(fixtures), None
 
 
+def _snapshot_identity_errors(
+    snapshot_rows: list[dict], evidence_rows: list[dict], label: str
+) -> list[str]:
+    by_match: dict[str, list[dict]] = defaultdict(list)
+    for row in evidence_rows:
+        if isinstance(row, dict):
+            by_match[str(row.get("match_id") or "")].append(row)
+    for snapshot_row in snapshot_rows:
+        match_id = str(snapshot_row.get("match_id") or "")
+        matches = by_match.get(match_id, [])
+        if len(matches) != 1 or any(
+            matches[0].get(key) != snapshot_row.get(key)
+            for key in ("team_a", "team_b", "kickoff_at")
+        ):
+            return [f"snapshot_{label}_identity_mismatch"]
+    return []
+
+
 def _read_csv_rows(path: Path) -> tuple[list[dict] | None, str | None]:
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             return list(csv.DictReader(handle)), None
     except (OSError, csv.Error, UnicodeError):
         return None, "invalid"
+
+
+def _read_optional_csv_rows(path: Path) -> tuple[list[dict], str | None]:
+    if not path.is_file():
+        return [], None
+    rows, error = _read_csv_rows(path)
+    return rows or [], error
 
 
 def _protected_hashes(root: Path) -> dict[str, str]:
@@ -778,6 +989,12 @@ def _file_evidence(root: Path, path: Path) -> dict:
         "sha256": _sha256(path),
         "bytes": path.stat().st_size,
     }
+
+
+def _optional_file_evidence(root: Path, path: Path) -> dict:
+    if path.is_file():
+        return _file_evidence(root, path)
+    return {"path": path.relative_to(root).as_posix(), "exists": False}
 
 
 def _sha256(path: Path) -> str:

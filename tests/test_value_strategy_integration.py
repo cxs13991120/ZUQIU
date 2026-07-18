@@ -283,6 +283,125 @@ def settled_value_parlay(report_date: str = "2026-07-17") -> dict:
 
 
 class ValueV4PlanIntegrationTest(unittest.TestCase):
+    def test_explicit_input_builder_returns_candidates_observations_and_diagnostics(self):
+        _markets, snapshot = market_fixture("explicit", "had")
+        snapshot["source_record_id"] = "snapshot-explicit"
+
+        result = strategy.build_value_v4_from_inputs(
+            TARGET_DATE,
+            locked_at=LOCKED_AT,
+            config=value_config(),
+            predictions=[prediction("explicit")],
+            snapshot=snapshot,
+            paid_history=[],
+            observation_history=[],
+            training_samples=[],
+        )
+
+        self.assertGreater(len(result.candidates), 0)
+        self.assertEqual(len(result.candidates), len(result.observations))
+        self.assertEqual([], result.diagnostics)
+        self.assertEqual(len(result.candidates), result.audit["candidate_count"])
+
+    def test_empty_optional_snapshot_markets_are_absent_not_invalid(self):
+        _markets, snapshot = market_fixture("optional-empty", "had")
+        snapshot["source_record_id"] = "snapshot-optional-empty"
+        snapshot["matches"][0]["markets"].update(hhad={}, ttg={})
+        diagnostics = []
+
+        markets = strategy.load_official_decision_markets(
+            TARGET_DATE, snapshot=snapshot, diagnostics=diagnostics
+        )
+
+        self.assertEqual({"had"}, set(markets["optional-empty"]))
+        self.assertEqual([], diagnostics)
+
+    def test_ledger_history_is_cut_off_at_lock_and_later_settlement_is_pending(self):
+        settled = settled_value_single(
+            "known-settlement", "had", THREE_WAY_SELECTIONS["h"], stake="20"
+        )
+        later_settlement = deepcopy(settled)
+        later_settlement["bet_id"] = "later-settlement"
+        later_settlement["settled_at_bjt"] = "2026-07-18T13:30:00.000001+08:00"
+        later_settlement["profit"] = "20"
+        later_settlement["return"] = "40"
+        future_lock = deepcopy(settled)
+        future_lock["bet_id"] = "future-lock"
+        future_lock["locked_at_bjt"] = "2026-07-18T13:30:00.000001+08:00"
+        future_date = deepcopy(settled)
+        future_date["bet_id"] = "future-date"
+        future_date["date"] = "2026-07-19"
+        future_date["report_date"] = "2026-07-19"
+        legacy = {
+            "date": "2026-07-11",
+            "strategy_version": "",
+            "locked_at_bjt": "",
+            "status": ledger_module.WON,
+            "stake": "100",
+            "profit": "100",
+            "return": "200",
+        }
+
+        rows = strategy.ledger_history_as_of(
+            [settled, later_settlement, future_lock, future_date, legacy],
+            TARGET_DATE,
+            LOCKED_AT,
+        )
+
+        self.assertEqual(3, len(rows))
+        by_id = {row.get("bet_id", "legacy"): row for row in rows}
+        self.assertIn(settled["bet_id"], by_id)
+        pending = by_id["later-settlement"]
+        self.assertEqual(ledger_module.PENDING, pending["status"])
+        self.assertEqual("0", pending["profit"])
+        self.assertEqual("0", pending["return"])
+        self.assertEqual(ledger_module.PENDING, by_id["legacy"]["status"])
+        self.assertEqual("0", by_id["legacy"]["profit"])
+
+        with self.assertRaisesRegex(ValueError, "locked_at_bjt"):
+            strategy.ledger_history_as_of(
+                [{**settled, "locked_at_bjt": "not-a-time"}],
+                TARGET_DATE,
+                LOCKED_AT,
+            )
+
+    def test_training_samples_are_strictly_point_in_time_or_fail_invalid(self):
+        past = {
+            "date": "2026-07-17",
+            "match_id": "past",
+            "stage": "Test League",
+            "captured_at": "2026-07-17T12:00:00+08:00",
+            "kickoff_at": "2026-07-17T18:00:00+08:00",
+            "outcome": "1",
+            "base_draw_probability": "0.30",
+        }
+        late_capture = {
+            **past,
+            "match_id": "late",
+            "captured_at": "2026-07-18T13:30:00.000001+08:00",
+            "kickoff_at": "2026-07-18T18:00:00+08:00",
+        }
+        outcome_not_yet_mature = {
+            **past,
+            "match_id": "ongoing",
+            "kickoff_at": "2026-07-18T11:30:00+08:00",
+        }
+        target_day = {**past, "date": "2026-07-18", "match_id": "target"}
+
+        rows = strategy.training_samples_as_of(
+            [past, late_capture, outcome_not_yet_mature, target_day],
+            TARGET_DATE,
+            LOCKED_AT,
+        )
+
+        self.assertEqual(["past"], [row["match_id"] for row in rows])
+        with self.assertRaisesRegex(ValueError, "captured_at"):
+            strategy.training_samples_as_of(
+                [{**past, "captured_at": "naive-time"}],
+                TARGET_DATE,
+                LOCKED_AT,
+            )
+
     def test_generator_exposes_no_public_paid_ledger_rebuild_writer(self):
         self.assertFalse(hasattr(strategy, "write_ledger"))
 
@@ -1198,6 +1317,9 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
             self.assertEqual(f"decision-{leg['match_id']}", leg["odds_source_record_id"])
             self.assertEqual(CAPTURED_AT, leg["odds_captured_at_bjt"])
             self.assertGreater(float(leg["odds"]), 1.0)
+            self.assertEqual(leg["odds"], leg["locked_odds"])
+            self.assertGreater(float(leg["expected_value"]), 0.0)
+            self.assertEqual(leg["expected_value"], leg["net_ev"])
             exact_product *= Decimal(leg["odds"])
         self.assertEqual(exact_product, Decimal(str(parlay["odds"])))
         self.assertEqual(exact_product, Decimal(str(parlay["locked_odds"])))
@@ -1346,6 +1468,12 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
             patch.object(strategy, "load_value_snapshot", return_value=snapshot, create=True),
             patch.object(strategy, "load_official_decision_markets", return_value={}, create=True),
             patch.object(strategy, "load_draw_training_samples", return_value=[]),
+            patch.object(
+                strategy,
+                "assert_activation_ready",
+                return_value={"passed": True},
+                create=True,
+            ),
         )
 
 

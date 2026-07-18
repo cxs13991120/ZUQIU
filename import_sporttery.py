@@ -452,6 +452,7 @@ def write_fixtures(matches: list[dict], target_date: date) -> Path:
     fields = [
         "date",
         "kickoff_local",
+        "kickoff_at",
         "stage",
         "team_a",
         "team_b",
@@ -480,6 +481,7 @@ def write_fixtures(matches: list[dict], target_date: date) -> Path:
                 {
                     "date": target_date.isoformat(),
                     "kickoff_local": match_number(item),
+                    "kickoff_at": item.get("kickoff_at", ""),
                     "stage": league_name(item),
                     "team_a": team_home(item),
                     "team_b": team_away(item),
