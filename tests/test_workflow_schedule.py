@@ -7,8 +7,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import csv
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+from betting_ledger import settle_ledger
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,7 +158,10 @@ class WorkflowScheduleTest(unittest.TestCase):
 
     def write_workflow_writer_stubs(self, root):
         shutil.copy2(ROOT / "plan_lock.py", root / "plan_lock.py")
-        stub = '''import json
+        shutil.copy2(ROOT / "betting_ledger.py", root / "betting_ledger.py")
+        shutil.copy2(ROOT / "official_markets.py", root / "official_markets.py")
+        stub = '''import csv
+import json
 import os
 import sys
 from pathlib import Path
@@ -177,12 +184,54 @@ if name == "import_sporttery.py":
     )
 elif name == "capture_odds_snapshot.py":
     Path(f"data/sporttery_odds_{target_date}.json").write_text(
-        json.dumps({"writer": name, "phase": phase}), encoding="utf-8"
+        json.dumps({
+            "writer": name,
+            "phase": phase,
+            "source_odds": os.environ.get("MOCK_SOURCE_ODDS", "initial"),
+        }),
+        encoding="utf-8",
     )
 elif name == "generate_betting_plan.py":
-    Path(f"output/betting_plan_{target_date}.csv").write_text(
-        "date,plan\\n" + target_date + ",locked-candidate\\n", encoding="utf-8"
-    )
+    row = {
+        "date": target_date,
+        "strategy_version": "value-v4",
+        "model_version": "workflow-test-model",
+        "match_id": "workflow-match",
+        "team_a": "Home",
+        "team_b": "Away",
+        "kickoff_local": target_date + "T14:00:00+08:00",
+        "play": "HAD",
+        "market_type": "had",
+        "market_line": "",
+        "selection": chr(0x80DC),
+        "odds": "2.00",
+        "locked_odds": "2.00",
+        "odds_source": "sporttery",
+        "odds_source_record_id": "workflow-odds-1",
+        "odds_captured_at_bjt": target_date + "T13:30:00+08:00",
+        "raw_probability": "0.54",
+        "calibrated_probability": "0.53",
+        "official_market_probability": "0.50",
+        "conservative_probability": "0.51",
+        "edge": "0.01",
+        "net_ev": "0.02",
+        "full_kelly": "0.02",
+        "kelly_fraction": "0.25",
+        "data_quality_multiplier": "1.0",
+        "volatility_multiplier": "1.0",
+        "performance_multiplier": "1.0",
+        "portfolio_rank": "1",
+        "binding_limits": "daily",
+        "stake": "20",
+        "data_quality": "high",
+        "volatility_band": "low",
+    }
+    with Path(f"output/betting_plan_{target_date}.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row))
+        writer.writeheader()
+        writer.writerow(row)
 '''
         for name in (
             "import_sporttery.py",
@@ -441,18 +490,77 @@ elif name == "generate_betting_plan.py":
             self.INVALID_LOCK_MESSAGE,
             "exit 1",
             "else",
+            'LOCKED_AT_BJT="$(date --iso-8601=seconds)"',
             'python import_sporttery.py --date "$TARGET_DATE"',
             'python capture_odds_snapshot.py --date "$TARGET_DATE" --phase decision',
             'python predict_today.py --date "$TARGET_DATE"',
-            'python generate_betting_plan.py --date "$TARGET_DATE"',
+            'python generate_betting_plan.py --date "$TARGET_DATE" --generate-only --locked-at "$LOCKED_AT_BJT"',
             "python plan_lock.py lock \\",
             "--date \"$TARGET_DATE\" \\",
-            "--locked-at \"$(date --iso-8601=seconds)\" \\",
+            "--locked-at \"$LOCKED_AT_BJT\" \\",
             "--source sporttery",
-            "fi",
+            'python betting_ledger.py ingest --date "$TARGET_DATE"',
         ]
         self.assert_commands_in_order(step, expected)
+        self.assertEqual(1, step.count('LOCKED_AT_BJT="$(date --iso-8601=seconds)"'))
         self.assertNotIn("continue-on-error: true", step)
+
+    def test_decision_workflow_reuses_locked_portfolio_and_settles_idempotently(self):
+        body = self.multiline_step_body(
+            self.read_workflow("draw-alert-refresh.yml"),
+            "refresh",
+            "Refresh required decision plan",
+        )
+        expected_calls = [
+            "import_sporttery.py",
+            "capture_odds_snapshot.py:decision",
+            "predict_today.py",
+            "generate_betting_plan.py",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_workflow_writer_stubs(root)
+
+            first = self.run_workflow_body(body, root)
+            self.assertEqual(0, first.returncode, first.stderr)
+            ledger_path = root / "output" / "betting_ledger.csv"
+            self.assertTrue(ledger_path.exists(), "locked plan was not ingested")
+            first_ledger_bytes = ledger_path.read_bytes()
+            with ledger_path.open(encoding="utf-8-sig", newline="") as handle:
+                first_rows = list(csv.DictReader(handle))
+            self.assertEqual(1, len(first_rows))
+            self.assertEqual(expected_calls, self.writer_calls(root))
+            first_bet_ids = [row["bet_id"] for row in first_rows]
+            first_locked_odds = [row["locked_odds"] for row in first_rows]
+            first_stakes = [row["stake"] for row in first_rows]
+
+            with patch.dict(os.environ, {"MOCK_SOURCE_ODDS": "changed"}):
+                second = self.run_workflow_body(body, root)
+            self.assertEqual(0, second.returncode, second.stderr)
+            self.assertEqual(expected_calls, self.writer_calls(root))
+            self.assertEqual(first_ledger_bytes, ledger_path.read_bytes())
+            with ledger_path.open(encoding="utf-8-sig", newline="") as handle:
+                second_rows = list(csv.DictReader(handle))
+            self.assertEqual(first_bet_ids, [row["bet_id"] for row in second_rows])
+            self.assertEqual(first_locked_odds, [row["locked_odds"] for row in second_rows])
+            self.assertEqual(first_stakes, [row["stake"] for row in second_rows])
+
+            settled_at = datetime(2026, 7, 16, 15, 1, tzinfo=timezone(timedelta(hours=8)))
+            results = {
+                "workflow-match": {
+                    "match_id": "workflow-match",
+                    "result_status": "finished",
+                    "home_goals": "1",
+                    "away_goals": "0",
+                    "result_source": "sporttery",
+                    "source_record_id": "workflow-result-1",
+                    "captured_at_bjt": settled_at.isoformat(),
+                }
+            }
+            settle_ledger(root, results, settled_at)
+            settled_bytes = ledger_path.read_bytes()
+            settle_ledger(root, results, settled_at)
+            self.assertEqual(settled_bytes, ledger_path.read_bytes())
 
     def test_valid_decision_lock_survives_delayed_forecast_rerun_without_writers(self):
         refresh_body = self.multiline_step_body(
@@ -855,6 +963,10 @@ class DeploymentDocumentationTest(unittest.TestCase):
     def test_docs_define_the_fail_closed_prewrite_plan_lock_guard(self):
         apps_readme = self.read_doc(self.APPS_SCRIPT_README)
         cloud_setup = self.read_doc(ROOT / "CLOUD_SETUP.md")
+        self.assertIn(
+            "5000 monthly stake cap and 5000 realized-loss stop are separate controls",
+            apps_readme,
+        )
         for text in (apps_readme, cloud_setup):
             for literal in (
                 "`output/plan_lock_${TARGET_DATE}.json`",

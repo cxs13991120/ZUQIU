@@ -22,6 +22,10 @@
 - 锁文件存在但 `plan_lock.py is-locked` 校验失败：工作流立即失败，且必须发生在任何 writer 运行之前。不能把无效锁当成没有锁，也不能重新生成或覆盖现有方案与赔率。
 - 锁文件不存在：按原顺序导入赔率、生成预测与方案；decision 流程完成后创建锁。opening capture 仍是可选步骤，但也只能在没有锁时运行。
 
+Decision refresh uses one explicit lock timestamp for plan generation and lock publication, then idempotently ingests the immutable locked plan. A valid existing lock skips plan and odds writers but still performs ingestion, so a retry can recover if an earlier run stopped after publication. An invalid lock fails closed and is never replaced.
+
+Settlement retries may update only pending ledger rows; terminal outcomes remain immutable. The 5000 monthly stake cap and 5000 realized-loss stop are separate controls, even though the stake cap usually triggers first.
+
 ## 部署前准备
 
 ### GitHub 仓库设置
