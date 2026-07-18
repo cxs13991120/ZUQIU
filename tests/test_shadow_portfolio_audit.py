@@ -430,21 +430,26 @@ class RepositoryAuditTest(unittest.TestCase):
         extracts.mkdir(parents=True, exist_ok=True)
         extract_fixtures = extracts / "fixtures.csv"
         extract_odds = extracts / "odds.json"
+        extract_ratings = extracts / "ratings.csv"
         extract_fixtures.write_bytes(
             (self.root / "data" / "fixtures.csv").read_bytes()
         )
         extract_odds.write_bytes(
             (self.root / "data" / f"sporttery_odds_{report_date}.json").read_bytes()
         )
+        extract_ratings.write_bytes(
+            (self.root / "data" / "team_ratings.csv").read_bytes()
+        )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             json.dumps({
-                "schema_version": 1,
+                "schema_version": 2,
                 "target_date": report_date,
                 "source": source,
                 "imported_at_bjt": f"{report_date}T11:58:00+08:00",
                 "fixtures": record(extract_fixtures),
                 "odds": record(extract_odds),
+                "ratings": record(extract_ratings),
             }),
             encoding="utf-8",
         )

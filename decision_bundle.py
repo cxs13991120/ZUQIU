@@ -88,6 +88,8 @@ def write_prediction_metadata(
     predictions = _read_csv(prediction_path, required=True)
     _validate_prediction_rows(predictions, target_date)
     fixtures = canonical_fixture_rows(root, target_date)
+    import_manifest = read_valid_import_manifest(root, target_date)
+    ratings_path = root / import_manifest["ratings"]["path"]
     payload = {
         "schema_version": PREDICTION_METADATA_SCHEMA_VERSION,
         "target_date": date_text,
@@ -100,7 +102,7 @@ def write_prediction_metadata(
         },
         "model_inputs": {
             "config": _file_record(root, root / "config.json"),
-            "ratings": _file_record(root, root / "data" / "team_ratings.csv"),
+            "ratings": _file_record(root, ratings_path),
             "prediction_code": _file_record(root, root / "predict_today.py"),
         },
     }
@@ -198,7 +200,7 @@ def create_decision_bundle(
                 "sha256": canonical_json_sha256(prediction_config),
             },
         },
-        "ratings": _file_record(root, root / "data" / "team_ratings.csv"),
+        "ratings": metadata["model_inputs"]["ratings"],
         "model_code": model_code,
         "history_inputs": history_inputs,
         "roles": {
@@ -397,6 +399,13 @@ def _validate_prediction_metadata(
     inputs = payload.get("model_inputs")
     if not isinstance(inputs, dict) or set(inputs) != {"config", "ratings", "prediction_code"}:
         raise ValueError("prediction metadata model inputs are invalid")
+    import_manifest = read_valid_import_manifest(root, target_date)
+    manifest_ratings = import_manifest["ratings"]
+    if any(
+        inputs["ratings"].get(key) != manifest_ratings.get(key)
+        for key in ("path", "sha256", "bytes")
+    ):
+        raise ValueError("prediction metadata ratings differ from import manifest")
     if verify_current_inputs:
         for record in inputs.values():
             _verify_file_record(root, record)

@@ -38,6 +38,7 @@ HARD_SINGLE_COUNT = 2
 HARD_PARLAY_COUNT = 1
 MAX_VALUE_V4_KELLY = Decimal("0.25")
 NEW_PAID_STRATEGY_VERSIONS = frozenset({"legacy-v3", "value-v4"})
+CANONICAL_PAID_CUTOVER_DATE = date(2026, 7, 18)
 
 REQUIRED_FIELD_ORDER = (
     "bet_id", "date", "report_date", "strategy_version", "model_version",
@@ -753,7 +754,8 @@ def _load_locked_plan_evidence(
     for row in existing_rows:
         if not isinstance(row, dict):
             raise ValueError("existing row must be a mapping")
-        if _claims_canonical_identity(row):
+        cutover_report_date = _canonical_cutover_report_date(row)
+        if cutover_report_date is not None or _claims_canonical_identity(row):
             if row.get("strategy_version") in NEW_PAID_STRATEGY_VERSIONS:
                 try:
                     _validate_existing_canonical_paid_row(row)
@@ -762,7 +764,8 @@ def _load_locked_plan_evidence(
                         f"invalid existing canonical paid row: {exc}"
                     ) from exc
             report_dates.add(
-                _strict_canonical_date(row.get("report_date"), "report_date")
+                cutover_report_date
+                or _strict_canonical_date(row.get("report_date"), "report_date")
             )
     evidence: dict[tuple[str, str], str] = {}
     for report_date in sorted(report_dates):
@@ -932,8 +935,11 @@ def _normalize_existing_rows(
         if not isinstance(source_row, dict):
             raise ValueError("existing row must be a mapping")
         canonical_key = _canonical_evidence_key(source_row, canonical_evidence)
+        cutover_report_date = _canonical_cutover_report_date(source_row)
         anchored_canonical = (
-            canonical_key is not None or _claims_canonical_identity(source_row)
+            cutover_report_date is not None
+            or canonical_key is not None
+            or _claims_canonical_identity(source_row)
         )
         if anchored_canonical:
             try:
@@ -994,6 +1000,21 @@ def _claims_canonical_identity(row: dict) -> bool:
     return any(
         row.get(field) not in (None, "")
         for field in ("row_payload_sha256", "plan_sha256", "locked_at_bjt")
+    )
+
+
+def _canonical_cutover_report_date(row: dict) -> str | None:
+    value = row.get("report_date")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = row.get("date")
+    try:
+        report_date = _required_date(value)
+    except (TypeError, ValueError):
+        return None
+    return (
+        report_date
+        if date.fromisoformat(report_date) >= CANONICAL_PAID_CUTOVER_DATE
+        else None
     )
 
 

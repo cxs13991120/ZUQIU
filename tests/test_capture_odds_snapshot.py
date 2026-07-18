@@ -265,8 +265,13 @@ class CaptureOddsSnapshotProductionTest(unittest.TestCase):
         extracts.mkdir(parents=True)
         extract_fixtures = extracts / "fixtures.csv"
         extract_odds = extracts / "odds.json"
+        extract_ratings = extracts / "ratings.csv"
         extract_fixtures.write_bytes(fixtures.read_bytes())
         extract_odds.write_bytes(odds.read_bytes())
+        extract_ratings.write_text(
+            "team,elo\nImported Home,1500\nImported Away,1490\n",
+            encoding="utf-8-sig",
+        )
 
         def record(path: Path) -> dict:
             payload = path.read_bytes()
@@ -279,12 +284,13 @@ class CaptureOddsSnapshotProductionTest(unittest.TestCase):
         manifest = manifests / f"{TARGET_DATE}.json"
         manifest.write_text(
             json.dumps({
-                "schema_version": 1,
+                "schema_version": 2,
                 "target_date": TARGET_DATE,
                 "source": source,
                 "imported_at_bjt": "2026-07-16T13:00:00+08:00",
                 "fixtures": record(extract_fixtures),
                 "odds": record(extract_odds),
+                "ratings": record(extract_ratings),
             }),
             encoding="utf-8",
         )

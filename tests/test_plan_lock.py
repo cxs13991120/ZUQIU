@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import io
 import json
 import multiprocessing
 import os
@@ -20,19 +21,24 @@ from plan_lock import lock_plan, main, read_valid_lock, sha256_file as plan_lock
 
 BJT = timezone(timedelta(hours=8))
 TARGET_DATE = date(2026, 7, 16)
+CUTOVER_DATE = date(2026, 7, 18)
 SETTLED_AT = datetime(2026, 7, 17, 12, 0, tzinfo=BJT)
+CUTOVER_SETTLED_AT = datetime(2026, 7, 19, 12, 0, tzinfo=BJT)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def canonical_paid_row(*, parlay: bool) -> dict:
+def canonical_paid_row(
+    *, parlay: bool, target_date: date = TARGET_DATE
+) -> dict:
+    date_text = target_date.isoformat()
     row = {
-        "date": TARGET_DATE.isoformat(),
+        "date": date_text,
         "strategy_version": "value-v4",
         "model_version": "model-3",
         "match_id": "1001",
         "team_a": "A",
         "team_b": "B",
-        "kickoff_local": "2026-07-16T20:00:00+08:00",
+        "kickoff_local": f"{date_text}T20:00:00+08:00",
         "play": "HAD",
         "market_type": "had",
         "market_line": "",
@@ -41,7 +47,7 @@ def canonical_paid_row(*, parlay: bool) -> dict:
         "locked_odds": "2.00",
         "odds_source": "sporttery",
         "odds_source_record_id": "odds-1001",
-        "odds_captured_at_bjt": "2026-07-16T13:30:00+08:00",
+        "odds_captured_at_bjt": f"{date_text}T13:30:00+08:00",
         "raw_probability": "0.54",
         "calibrated_probability": "0.53",
         "official_market_probability": "0.50",
@@ -71,7 +77,7 @@ def canonical_paid_row(*, parlay: bool) -> dict:
             "odds": "2.00",
             "odds_source": "sporttery",
             "odds_source_record_id": "odds-parlay-1",
-            "odds_captured_at_bjt": "2026-07-16T13:30:00+08:00",
+            "odds_captured_at_bjt": f"{date_text}T13:30:00+08:00",
         },
         {
             "match_id": "parlay-2",
@@ -81,7 +87,7 @@ def canonical_paid_row(*, parlay: bool) -> dict:
             "odds": "3.00",
             "odds_source": "sporttery",
             "odds_source_record_id": "odds-parlay-2",
-            "odds_captured_at_bjt": "2026-07-16T13:30:00+08:00",
+            "odds_captured_at_bjt": f"{date_text}T13:30:00+08:00",
         },
     ]
     return {
@@ -144,7 +150,14 @@ def _abandon_lock_worker(root_text: str) -> None:
 
 
 class PlanLockTest(unittest.TestCase):
-    def make_artifacts(self, root: Path) -> None:
+    def make_artifacts(
+        self,
+        root: Path,
+        target_date: date = TARGET_DATE,
+        *,
+        paid_plan_rows: list[dict] | None = None,
+    ) -> None:
+        date_text = target_date.isoformat()
         (root / "output").mkdir()
         (root / "data" / "odds_snapshots").mkdir(parents=True)
         (root / "config.json").write_text("{}\n", encoding="utf-8")
@@ -168,25 +181,29 @@ class PlanLockTest(unittest.TestCase):
         self.write_csv(
             root / "data" / "fixtures.csv",
             [{
-                "date": "2026-07-16",
+                "date": date_text,
                 "team_a": "A",
                 "team_b": "B",
                 "match_id": "1001",
-                "kickoff_at": "2026-07-16T20:00:00+08:00",
+                "kickoff_at": f"{date_text}T20:00:00+08:00",
             }],
         )
-        odds_path = root / "data" / "sporttery_odds_2026-07-16.json"
+        odds_path = root / "data" / f"sporttery_odds_{date_text}.json"
         odds_path.write_text(
             json.dumps({"1001": {"had": {"h": "2.00", "d": "3.20", "a": "3.50"}}}),
             encoding="utf-8",
         )
         extract_fixtures = (
-            root / "data" / "import_extracts" / "2026-07-16" / "fixtures.csv"
+            root / "data" / "import_extracts" / date_text / "fixtures.csv"
         )
         extract_odds = extract_fixtures.with_name("odds.json")
+        extract_ratings = extract_fixtures.with_name("ratings.csv")
         extract_fixtures.parent.mkdir(parents=True)
         extract_fixtures.write_bytes((root / "data" / "fixtures.csv").read_bytes())
         extract_odds.write_bytes(odds_path.read_bytes())
+        extract_ratings.write_bytes(
+            (root / "data" / "team_ratings.csv").read_bytes()
+        )
         def record(path: Path) -> dict:
             content = path.read_bytes()
             return {
@@ -194,36 +211,37 @@ class PlanLockTest(unittest.TestCase):
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "bytes": len(content),
             }
-        manifest_path = root / "data" / "import_manifests" / "2026-07-16.json"
+        manifest_path = root / "data" / "import_manifests" / f"{date_text}.json"
         manifest_path.parent.mkdir(parents=True)
         manifest_path.write_text(
             json.dumps({
-                "schema_version": 1,
-                "target_date": "2026-07-16",
+                "schema_version": 2,
+                "target_date": date_text,
                 "source": "sporttery",
-                "imported_at_bjt": "2026-07-16T13:29:00+08:00",
+                "imported_at_bjt": f"{date_text}T13:29:00+08:00",
                 "fixtures": record(extract_fixtures),
                 "odds": record(extract_odds),
+                "ratings": record(extract_ratings),
             }),
             encoding="utf-8",
         )
         self.write_csv(
-            root / "output" / "predictions_2026-07-16.csv",
+            root / "output" / f"predictions_{date_text}.csv",
             [{
-                "date": "2026-07-16",
+                "date": date_text,
                 "team_a": "A",
                 "team_b": "B",
                 "match_id": "1001",
-                "kickoff_at": "2026-07-16T20:00:00+08:00",
+                "kickoff_at": f"{date_text}T20:00:00+08:00",
             }],
         )
         self.write_csv(root / "output" / "betting_ledger.csv", [])
         self.write_csv(root / "output" / "observation_ledger.csv", [])
         self.write_csv(root / "data" / "draw_training_samples.csv", [])
-        (root / "data" / "odds_snapshots" / "2026-07-16-133000-decision.json").write_text(
+        (root / "data" / "odds_snapshots" / f"{date_text}-133000-decision.json").write_text(
             json.dumps({
-                "target_date": "2026-07-16",
-                "captured_at": "2026-07-16T13:30:00+08:00",
+                "target_date": date_text,
+                "captured_at": f"{date_text}T13:30:00+08:00",
                 "capture_phase": "decision",
                 "source": "sporttery",
                 "import_manifest": record(manifest_path),
@@ -232,7 +250,7 @@ class PlanLockTest(unittest.TestCase):
                     "team_a": "A",
                     "team_b": "B",
                     "match_num": "001",
-                    "kickoff_at": "2026-07-16T20:00:00+08:00",
+                    "kickoff_at": f"{date_text}T20:00:00+08:00",
                     "markets": {
                         "had": {"h": "2.00", "d": "3.20", "a": "3.50"},
                         "hhad": {},
@@ -245,15 +263,49 @@ class PlanLockTest(unittest.TestCase):
         )
         write_prediction_metadata(
             root,
-            TARGET_DATE,
-            datetime(2026, 7, 16, 13, 30, 30, tzinfo=BJT),
+            target_date,
+            datetime.combine(
+                target_date,
+                datetime.min.time(),
+                tzinfo=BJT,
+            ).replace(hour=13, minute=30, second=30),
         )
+        locked_at = datetime.combine(
+            target_date,
+            datetime.min.time(),
+            tzinfo=BJT,
+        ).replace(hour=13, minute=31)
         bundle = create_decision_bundle(
             root,
-            TARGET_DATE,
-            datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
+            target_date,
+            locked_at,
         )
-        (root / "output" / "betting_plan_2026-07-16.csv").write_bytes(
+        if paid_plan_rows is not None:
+            serialized = plan_csv_bytes(paid_plan_rows)
+            with io.StringIO(
+                serialized.decode("utf-8-sig"), newline=""
+            ) as handle:
+                normalized_rows = list(csv.DictReader(handle))
+            bundle["paid_plan_evidence"] = {
+                "schema_version": 1,
+                "plan_sha256": hashlib.sha256(serialized).hexdigest(),
+                "bytes": len(serialized),
+                "row_count": len(normalized_rows),
+                "rows": normalized_rows,
+                "rows_sha256": hashlib.sha256(
+                    json.dumps(
+                        normalized_rows,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            (root / "output" / f"decision_bundle_{date_text}.json").write_text(
+                json.dumps(bundle, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        (root / "output" / f"betting_plan_{date_text}.csv").write_bytes(
             plan_csv_bytes(bundle["paid_plan_evidence"]["rows"])
         )
 
@@ -265,15 +317,24 @@ class PlanLockTest(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
-    def make_lock(self, root: Path) -> dict:
+    def make_lock(
+        self, root: Path, target_date: date = TARGET_DATE
+    ) -> dict:
+        locked_at = datetime.combine(
+            target_date,
+            datetime.min.time(),
+            tzinfo=BJT,
+        ).replace(hour=13, minute=31)
         return lock_plan(
             root,
-            TARGET_DATE,
-            datetime(2026, 7, 16, 13, 31, tzinfo=BJT),
+            target_date,
+            locked_at,
         )
 
-    def lock_path(self, root: Path) -> Path:
-        return root / "output" / "plan_lock_2026-07-16.json"
+    def lock_path(
+        self, root: Path, target_date: date = TARGET_DATE
+    ) -> Path:
+        return root / "output" / f"plan_lock_{target_date.isoformat()}.json"
 
     def write_lock_payload(self, root: Path, payload: dict) -> None:
         self.lock_path(root).write_text(json.dumps(payload), encoding="utf-8")
@@ -318,6 +379,102 @@ class PlanLockTest(unittest.TestCase):
                 self.assertIsNone(read_valid_lock(root, TARGET_DATE))
                 with self.assertRaisesRegex(ValueError, "lock|evidence|anchor"):
                     ledger_module.settle_ledger(root, {}, SETTLED_AT)
+
+    def test_cutover_rejects_replaced_ids_and_stripped_markers_with_valid_lock(self):
+        for parlay in (False, True):
+            with self.subTest(parlay=parlay), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                plan_row = canonical_paid_row(
+                    parlay=parlay, target_date=CUTOVER_DATE
+                )
+                self.make_artifacts(
+                    root,
+                    CUTOVER_DATE,
+                    paid_plan_rows=[plan_row],
+                )
+                lock = self.make_lock(root, CUTOVER_DATE)
+                self.assertIsNotNone(read_valid_lock(root, CUTOVER_DATE))
+                canonical = ingest_locked_plan(
+                    [], [plan_row], lock, canonical_evidence={}
+                )[0]
+                tampered = self._replace_id_and_strip_markers(canonical, parlay)
+                write_ledger_atomic(
+                    root / "output" / "betting_ledger.csv", [tampered]
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "canonical|evidence|bet_id|digest"
+                ):
+                    ledger_module.settle_ledger(
+                        root, {}, CUTOVER_SETTLED_AT
+                    )
+
+    def test_cutover_rejects_replaced_ids_and_stripped_markers_without_lock(self):
+        for parlay in (False, True):
+            with self.subTest(parlay=parlay), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                plan_row = canonical_paid_row(
+                    parlay=parlay, target_date=CUTOVER_DATE
+                )
+                self.make_artifacts(
+                    root,
+                    CUTOVER_DATE,
+                    paid_plan_rows=[plan_row],
+                )
+                lock = self.make_lock(root, CUTOVER_DATE)
+                canonical = ingest_locked_plan(
+                    [], [plan_row], lock, canonical_evidence={}
+                )[0]
+                tampered = self._replace_id_and_strip_markers(canonical, parlay)
+                write_ledger_atomic(
+                    root / "output" / "betting_ledger.csv", [tampered]
+                )
+                self.lock_path(root, CUTOVER_DATE).unlink()
+
+                with self.assertRaisesRegex(ValueError, "lock|evidence"):
+                    ledger_module.settle_ledger(
+                        root, {}, CUTOVER_SETTLED_AT
+                    )
+
+    def test_pre_cutover_legacy_row_migrates_without_a_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger_path = root / "output" / "betting_ledger.csv"
+            legacy = {
+                "date": "2026-07-12",
+                "strategy_version": "legacy-v1",
+                "play": "historical",
+                "market_type": "historical",
+                "match_id": "legacy-2026-07-12",
+                "selection": "historical",
+                "stake": "10",
+                "status": ledger_module.PENDING,
+                "profit": "0.00",
+            }
+            write_ledger_atomic(ledger_path, [legacy])
+
+            ledger_module.settle_ledger(root, {}, SETTLED_AT)
+
+            with ledger_path.open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(1, len(rows))
+            self.assertRegex(rows[0]["bet_id"], r"^[0-9a-f]{64}$")
+            self.assertEqual("legacy-v1", rows[0]["strategy_version"])
+
+    @staticmethod
+    def _replace_id_and_strip_markers(row: dict, parlay: bool) -> dict:
+        tampered = dict(row)
+        tampered["bet_id"] = "replaced-parlay-id" if parlay else "replaced-single-id"
+        for field in (
+            "strategy_version",
+            "row_payload_sha256",
+            "plan_sha256",
+            "locked_at_bjt",
+        ):
+            tampered[field] = ""
+        return tampered
 
     def test_next_day_shared_fixture_update_preserves_prior_lock(self):
         with tempfile.TemporaryDirectory() as tmp:

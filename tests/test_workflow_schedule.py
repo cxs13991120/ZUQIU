@@ -320,12 +320,18 @@ if name == "import_sporttery.py":
     odds_path.write_text(
         json.dumps({"writer": name}), encoding="utf-8"
     )
+    ratings_path = Path("data/team_ratings.csv")
+    ratings_path.write_text(
+        "team,elo\\nHome,1500\\nAway,1490\\n", encoding="utf-8-sig"
+    )
     extracts = Path("data/import_extracts") / target_date
     extracts.mkdir(parents=True, exist_ok=True)
     extract_fixtures = extracts / "fixtures.csv"
     extract_odds = extracts / "odds.json"
+    extract_ratings = extracts / "ratings.csv"
     extract_fixtures.write_bytes(fixture_path.read_bytes())
     extract_odds.write_bytes(odds_path.read_bytes())
+    extract_ratings.write_bytes(ratings_path.read_bytes())
     manifest_path = Path("data/import_manifests") / f"{target_date}.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     def file_record(path):
@@ -337,12 +343,13 @@ if name == "import_sporttery.py":
         }
     manifest_path.write_text(
         json.dumps({
-            "schema_version": 1,
+            "schema_version": 2,
             "target_date": target_date,
             "source": "zgzcw",
             "imported_at_bjt": target_date + "T13:25:00+08:00",
             "fixtures": file_record(extract_fixtures),
             "odds": file_record(extract_odds),
+            "ratings": file_record(extract_ratings),
         }, sort_keys=True) + "\\n",
         encoding="utf-8",
     )
@@ -350,7 +357,7 @@ elif name == "capture_odds_snapshot.py":
     manifest_path = Path("data/import_manifests") / f"{target_date}.json"
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)
-    for key in ("fixtures", "odds"):
+    for key in ("fixtures", "odds", "ratings"):
         record = manifest[key]
         payload = Path(record["path"]).read_bytes()
         if len(payload) != record["bytes"] or hashlib.sha256(payload).hexdigest() != record["sha256"]:

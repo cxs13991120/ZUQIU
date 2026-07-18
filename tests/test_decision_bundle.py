@@ -86,10 +86,14 @@ class DecisionBundleTest(unittest.TestCase):
             self.root / "data" / "import_extracts" / "2026-07-16" / "fixtures.csv"
         )
         extract_odds = extract_fixtures.with_name("odds.json")
+        extract_ratings = extract_fixtures.with_name("ratings.csv")
         extract_fixtures.parent.mkdir(parents=True)
         extract_fixtures.write_bytes((self.root / "data" / "fixtures.csv").read_bytes())
         extract_odds.write_bytes(
             (self.root / "data" / "sporttery_odds_2026-07-16.json").read_bytes()
+        )
+        extract_ratings.write_bytes(
+            (self.root / "data" / "team_ratings.csv").read_bytes()
         )
         self.import_manifest_path = (
             self.root / "data" / "import_manifests" / "2026-07-16.json"
@@ -97,12 +101,13 @@ class DecisionBundleTest(unittest.TestCase):
         self._write_json(
             "data/import_manifests/2026-07-16.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "target_date": "2026-07-16",
                 "source": "zgzcw",
                 "imported_at_bjt": "2026-07-16T13:00:00+08:00",
                 "fixtures": self._file_record(extract_fixtures),
                 "odds": self._file_record(extract_odds),
+                "ratings": self._file_record(extract_ratings),
             },
         )
         self._write_csv(

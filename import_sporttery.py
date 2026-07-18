@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 BEIJING = timezone(timedelta(hours=8))
-IMPORT_MANIFEST_SCHEMA_VERSION = 1
+IMPORT_MANIFEST_SCHEMA_VERSION = 2
 APPROVED_IMPORT_SOURCES = frozenset({"sporttery", "zgzcw"})
 API_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getUniformMatchResultV1.qry"
 MATCH_LIST_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getMatchListV1.qry"
@@ -60,9 +60,15 @@ def import_manifest_path(root: Path, target_date: date) -> Path:
     return Path(root) / "data" / "import_manifests" / f"{target_date.isoformat()}.json"
 
 
-def import_extract_paths(root: Path, target_date: date) -> tuple[Path, Path]:
+def import_extract_paths(
+    root: Path, target_date: date
+) -> tuple[Path, Path, Path]:
     directory = Path(root) / "data" / "import_extracts" / target_date.isoformat()
-    return directory / "fixtures.csv", directory / "odds.json"
+    return (
+        directory / "fixtures.csv",
+        directory / "odds.json",
+        directory / "ratings.csv",
+    )
 
 
 def write_import_manifest(
@@ -70,6 +76,7 @@ def write_import_manifest(
     target_date: date,
     fixtures_path: Path,
     odds_path: Path,
+    ratings_path: Path,
     imported_at: datetime | None = None,
 ) -> Path:
     canonical_source = str(source).strip().lower()
@@ -79,7 +86,8 @@ def write_import_manifest(
     root = DATA_DIR.resolve().parent
     fixtures = Path(fixtures_path).resolve()
     odds = Path(odds_path).resolve()
-    for input_path in (fixtures, odds):
+    ratings = Path(ratings_path).resolve()
+    for input_path in (fixtures, odds, ratings):
         try:
             input_path.relative_to(root)
         except ValueError as exc:
@@ -91,6 +99,7 @@ def write_import_manifest(
         target_date,
         fixtures.read_bytes(),
         odds.read_bytes(),
+        ratings.read_bytes(),
         imported,
     )
 
@@ -100,12 +109,16 @@ def publish_import_manifest(
     target_date: date,
     fixture_bytes: bytes,
     odds_bytes: bytes,
+    ratings_bytes: bytes,
     imported_at: datetime | None = None,
 ) -> Path:
     canonical_source = str(source).strip().lower()
     if canonical_source not in APPROVED_IMPORT_SOURCES:
         raise ValueError("import manifest source is not approved")
-    if not isinstance(fixture_bytes, bytes) or not isinstance(odds_bytes, bytes):
+    if not all(
+        isinstance(payload, bytes)
+        for payload in (fixture_bytes, odds_bytes, ratings_bytes)
+    ):
         raise ValueError("import manifest extracts must be bytes")
     imported = _aware_import_datetime(imported_at or datetime.now(BEIJING))
     root = DATA_DIR.resolve().parent
@@ -113,13 +126,18 @@ def publish_import_manifest(
     if path.exists():
         existing = read_valid_import_manifest(root, target_date)
         _require_matching_import(
-            existing, canonical_source, fixture_bytes, odds_bytes
+            existing,
+            canonical_source,
+            fixture_bytes,
+            odds_bytes,
+            ratings_bytes,
         )
         return path
 
-    fixtures, odds = import_extract_paths(root, target_date)
+    fixtures, odds, ratings = import_extract_paths(root, target_date)
     _publish_immutable_bytes(fixtures, fixture_bytes)
     _publish_immutable_bytes(odds, odds_bytes)
+    _publish_immutable_bytes(ratings, ratings_bytes)
     payload = {
         "schema_version": IMPORT_MANIFEST_SCHEMA_VERSION,
         "target_date": target_date.isoformat(),
@@ -127,10 +145,17 @@ def publish_import_manifest(
         "imported_at_bjt": imported.astimezone(BEIJING).isoformat(),
         "fixtures": _manifest_file_record(root, fixtures),
         "odds": _manifest_file_record(root, odds),
+        "ratings": _manifest_file_record(root, ratings),
     }
     if path.exists() or not _atomic_publish_manifest(path, payload):
         existing = read_valid_import_manifest(root, target_date)
-        _require_matching_import(existing, canonical_source, fixture_bytes, odds_bytes)
+        _require_matching_import(
+            existing,
+            canonical_source,
+            fixture_bytes,
+            odds_bytes,
+            ratings_bytes,
+        )
     return path
 
 
@@ -139,10 +164,12 @@ def _require_matching_import(
     source: str,
     fixture_bytes: bytes,
     odds_bytes: bytes,
+    ratings_bytes: bytes,
 ) -> None:
     expected = {
         "fixtures": fixture_bytes,
         "odds": odds_bytes,
+        "ratings": ratings_bytes,
     }
     if existing.get("source") != source:
         raise ValueError("existing conflicting import manifest")
@@ -166,7 +193,7 @@ def read_valid_import_manifest(root: Path, target_date: date) -> dict:
         not isinstance(payload, dict)
         or set(payload) != {
             "schema_version", "target_date", "source", "imported_at_bjt",
-            "fixtures", "odds",
+            "fixtures", "odds", "ratings",
         }
         or payload.get("schema_version") != IMPORT_MANIFEST_SCHEMA_VERSION
         or payload.get("target_date") != target_date.isoformat()
@@ -177,6 +204,7 @@ def read_valid_import_manifest(root: Path, target_date: date) -> dict:
     expected = {
         "fixtures": f"data/import_extracts/{target_date.isoformat()}/fixtures.csv",
         "odds": f"data/import_extracts/{target_date.isoformat()}/odds.json",
+        "ratings": f"data/import_extracts/{target_date.isoformat()}/ratings.csv",
     }
     for key, relative in expected.items():
         record = payload.get(key)
@@ -902,16 +930,6 @@ def restore_manifest_compatibility_outputs(
     fixture_count = sum(
         row.get("date") == target_date.isoformat() for row in fixture_rows
     )
-    rating_inputs = [
-        {
-            "homeTeam": row.get("team_a", ""),
-            "awayTeam": row.get("team_b", ""),
-            "market_h": row.get("market_odds_a") or row.get("odds_a", ""),
-            "market_a": row.get("market_odds_b") or row.get("odds_b", ""),
-        }
-        for row in fixture_rows
-        if row.get("date") == target_date.isoformat()
-    ]
     source_name = source or (
         "竞彩网" if manifest["source"] == "sporttery" else "中国足彩网"
     )
@@ -929,11 +947,6 @@ def restore_manifest_compatibility_outputs(
     imported_at = _aware_import_datetime(manifest["imported_at_bjt"])
     with tempfile.TemporaryDirectory(prefix="compatibility-stage-", dir=DATA_DIR) as tmp:
         staging = Path(tmp)
-        staged_ratings = write_ratings(
-            rating_inputs,
-            path=staging / "team_ratings.csv",
-            existing_path=shared_ratings,
-        )
         staged_status = write_source_status(
             source_name,
             target_date,
@@ -943,7 +956,10 @@ def restore_manifest_compatibility_outputs(
             path=staging / "source_status.json",
             updated_at=imported_at,
         )
-        _atomic_replace_bytes(shared_ratings, staged_ratings.read_bytes())
+        _atomic_replace_bytes(
+            shared_ratings,
+            (root / manifest["ratings"]["path"]).read_bytes(),
+        )
         _atomic_replace_bytes(shared_status, staged_status.read_bytes())
     return shared_ratings, shared_status, fixture_count
 
@@ -1020,12 +1036,18 @@ def main() -> int:
         staged_odds = write_odds_data(
             odds_data, target_date, path=staging / "odds.json"
         )
+        staged_ratings = write_ratings(
+            selected,
+            path=staging / "ratings.csv",
+            existing_path=DATA_DIR / "team_ratings.csv",
+        )
         fixture_count = count_written_fixtures(staged_fixtures, target_date)
         manifest_path = write_import_manifest(
             manifest_source,
             target_date,
             staged_fixtures,
             staged_odds,
+            staged_ratings,
             datetime.now(BEIJING),
         )
         manifest = read_valid_import_manifest(root, target_date)
