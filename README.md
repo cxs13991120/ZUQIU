@@ -123,3 +123,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\open_website.ps1
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\serve_website.ps1
 ```
+
+## Shadow portfolio activation audit
+
+The value-v4 activation gate is a deterministic mechanical-safety audit. It
+rebuilds eligible repository dates from their saved predictions, fixtures,
+domestic odds evidence, and schema-valid pre-kickoff decision snapshots:
+
+```powershell
+$env:OPENBLAS_NUM_THREADS = "1"
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe audit_shadow_portfolio.py --from 2026-07-11 --through 2026-07-18
+```
+
+The result is written to
+`output/shadow_portfolio_activation_audit.json`. Missing and invalid evidence
+is excluded explicitly and is never reconstructed from later odds or match
+results. The gate fails closed when no dates qualify. Historical ROI and win
+rate do not affect this safety gate.
+
+`betting_config.json` may change from `shadow` to `active` only after the
+persisted report is schema-valid, has `passed: true`, and contains at least one
+checked date. The strategy remains simulation-only, historical plans, locks,
+and ledger rows are immutable, and `real_money_automation` remains `false`.

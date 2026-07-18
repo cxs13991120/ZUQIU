@@ -19,7 +19,7 @@
     "combo_max_legs": 4
   },
   "value_strategy": {
-    "activation_mode": "shadow",
+    "activation_mode": "active",
     "strict_until_samples": 100,
     "strict_min_probability_edge": 0.05,
     "strict_min_ev": 0.06,

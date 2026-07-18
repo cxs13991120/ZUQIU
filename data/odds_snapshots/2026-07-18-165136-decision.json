@@ -1,0 +1,623 @@
+{
+  "target_date": "2026-07-18",
+  "captured_at": "2026-07-18T16:51:36.178619+08:00",
+  "capture_phase": "decision",
+  "source": "zgzcw",
+  "matches": [
+    {
+      "match_id": "2040540",
+      "team_a": "法国",
+      "team_b": "英格兰",
+      "match_num": "周六103",
+      "kickoff_at": "2026-07-19 05:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 728,
+      "markets": {
+        "had": {
+          "h": "1.70",
+          "d": "3.80",
+          "a": "3.60"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "23.00",
+          "s1": "7.80",
+          "s2": "4.60",
+          "s3": "3.45",
+          "s4": "4.20",
+          "s5": "6.50",
+          "s6": "10.00",
+          "s7": "12.00"
+        }
+      },
+      "single_eligibility": {
+        "had": true,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "1.70",
+      "d": "3.80",
+      "a": "3.60",
+      "market_h": "1.87",
+      "market_d": "4.04",
+      "market_a": "3.74",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040546",
+      "team_a": "大田市民",
+      "team_b": "蔚山现代",
+      "match_num": "周六201",
+      "kickoff_at": "2026-07-18 18:30",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 98,
+      "markets": {
+        "had": {
+          "h": "2.46",
+          "d": "3.15",
+          "a": "2.47"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "11.00",
+          "s1": "4.80",
+          "s2": "3.30",
+          "s3": "3.50",
+          "s4": "5.60",
+          "s5": "10.00",
+          "s6": "19.00",
+          "s7": "29.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "2.46",
+      "d": "3.15",
+      "a": "2.47",
+      "market_h": "2.58",
+      "market_d": "3.25",
+      "market_a": "2.54",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040547",
+      "team_a": "江原FC",
+      "team_b": "金泉尚武",
+      "match_num": "周六202",
+      "kickoff_at": "2026-07-18 18:30",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 98,
+      "markets": {
+        "had": {
+          "h": "1.56",
+          "d": "3.55",
+          "a": "4.85"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "11.00",
+          "s1": "4.25",
+          "s2": "3.15",
+          "s3": "3.70",
+          "s4": "5.75",
+          "s5": "11.00",
+          "s6": "22.00",
+          "s7": "35.00"
+        }
+      },
+      "single_eligibility": {
+        "had": true,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "1.56",
+      "d": "3.55",
+      "a": "4.85",
+      "market_h": "1.70",
+      "market_d": "3.59",
+      "market_a": "4.60",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040548",
+      "team_a": "济州SK",
+      "team_b": "浦项制铁",
+      "match_num": "周六203",
+      "kickoff_at": "2026-07-18 18:30",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 98,
+      "markets": {
+        "had": {
+          "h": "3.20",
+          "d": "3.04",
+          "a": "2.05"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "7.50",
+          "s1": "3.60",
+          "s2": "3.00",
+          "s3": "3.85",
+          "s4": "7.50",
+          "s5": "16.00",
+          "s6": "29.00",
+          "s7": "50.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "3.20",
+      "d": "3.04",
+      "a": "2.05",
+      "market_h": "2.99",
+      "market_d": "2.97",
+      "market_a": "2.41",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040549",
+      "team_a": "仁川联队",
+      "team_b": "全北现代",
+      "match_num": "周六204",
+      "kickoff_at": "2026-07-18 18:30",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 98,
+      "markets": {
+        "had": {
+          "h": "3.45",
+          "d": "3.06",
+          "a": "1.95"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "9.00",
+          "s1": "4.10",
+          "s2": "2.95",
+          "s3": "3.70",
+          "s4": "6.60",
+          "s5": "14.00",
+          "s6": "25.00",
+          "s7": "37.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "3.45",
+      "d": "3.06",
+      "a": "1.95",
+      "market_h": "3.23",
+      "market_d": "3.04",
+      "market_a": "2.23",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040550",
+      "team_a": "汉坎",
+      "team_b": "特罗姆瑟",
+      "match_num": "周六205",
+      "kickoff_at": "2026-07-18 20:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 188,
+      "markets": {
+        "had": {
+          "h": "3.50",
+          "d": "3.36",
+          "a": "1.83"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "11.00",
+          "s1": "4.60",
+          "s2": "3.40",
+          "s3": "3.70",
+          "s4": "5.50",
+          "s5": "9.50",
+          "s6": "18.00",
+          "s7": "26.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "3.50",
+      "d": "3.36",
+      "a": "1.83",
+      "market_h": "3.50",
+      "market_d": "3.26",
+      "market_a": "2.07",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040551",
+      "team_a": "赫尔辛基",
+      "team_b": "瓦萨",
+      "match_num": "周六206",
+      "kickoff_at": "2026-07-18 20:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 188,
+      "markets": {
+        "had": {
+          "h": "1.77",
+          "d": "3.72",
+          "a": "3.38"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "19.00",
+          "s1": "6.50",
+          "s2": "4.00",
+          "s3": "3.40",
+          "s4": "4.50",
+          "s5": "7.50",
+          "s6": "12.00",
+          "s7": "16.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "1.77",
+      "d": "3.72",
+      "a": "3.38",
+      "market_h": "2.03",
+      "market_d": "3.67",
+      "market_a": "3.16",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040552",
+      "team_a": "索尔纳",
+      "team_b": "盖斯",
+      "match_num": "周六207",
+      "kickoff_at": "2026-07-18 21:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 248,
+      "markets": {
+        "had": {
+          "h": "2.33",
+          "d": "3.25",
+          "a": "2.55"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "13.00",
+          "s1": "5.05",
+          "s2": "3.50",
+          "s3": "3.50",
+          "s4": "5.20",
+          "s5": "9.00",
+          "s6": "16.00",
+          "s7": "24.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "2.33",
+      "d": "3.25",
+      "a": "2.55",
+      "market_h": "2.57",
+      "market_d": "3.39",
+      "market_a": "2.53",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040553",
+      "team_a": "利勒斯特",
+      "team_b": "KF奥斯陆",
+      "match_num": "周六208",
+      "kickoff_at": "2026-07-18 22:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 308,
+      "markets": {
+        "had": {
+          "h": "1.45",
+          "d": "4.15",
+          "a": "5.05"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "16.00",
+          "s1": "6.00",
+          "s2": "3.85",
+          "s3": "3.40",
+          "s4": "4.80",
+          "s5": "7.50",
+          "s6": "13.00",
+          "s7": "19.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "1.45",
+      "d": "4.15",
+      "a": "5.05",
+      "market_h": "1.63",
+      "market_d": "3.97",
+      "market_a": "4.80",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040554",
+      "team_a": "斯达",
+      "team_b": "罗森博格",
+      "match_num": "周六209",
+      "kickoff_at": "2026-07-18 22:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 308,
+      "markets": {
+        "had": {
+          "h": "2.88",
+          "d": "3.48",
+          "a": "2.02"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "15.00",
+          "s1": "5.70",
+          "s2": "3.85",
+          "s3": "3.35",
+          "s4": "4.75",
+          "s5": "8.00",
+          "s6": "14.00",
+          "s7": "21.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "2.88",
+      "d": "3.48",
+      "a": "2.02",
+      "market_h": "2.97",
+      "market_d": "3.49",
+      "market_a": "2.20",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040555",
+      "team_a": "克里斯蒂",
+      "team_b": "萨普斯堡",
+      "match_num": "周六210",
+      "kickoff_at": "2026-07-18 22:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 308,
+      "markets": {
+        "had": {
+          "h": "2.73",
+          "d": "3.55",
+          "a": "2.08"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "19.00",
+          "s1": "6.40",
+          "s2": "4.00",
+          "s3": "3.40",
+          "s4": "4.50",
+          "s5": "7.00",
+          "s6": "13.00",
+          "s7": "17.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "2.73",
+      "d": "3.55",
+      "a": "2.08",
+      "market_h": "3.01",
+      "market_d": "3.57",
+      "market_a": "2.15",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040556",
+      "team_a": "奥卢",
+      "team_b": "赫尔火花",
+      "match_num": "周六211",
+      "kickoff_at": "2026-07-18 22:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 308,
+      "markets": {
+        "had": {
+          "h": "2.08",
+          "d": "3.30",
+          "a": "2.90"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "14.00",
+          "s1": "5.30",
+          "s2": "3.65",
+          "s3": "3.40",
+          "s4": "5.00",
+          "s5": "8.70",
+          "s6": "15.00",
+          "s7": "23.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "2.08",
+      "d": "3.30",
+      "a": "2.90",
+      "market_h": "2.15",
+      "market_d": "3.43",
+      "market_a": "3.06",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040557",
+      "team_a": "塞纳乔琪",
+      "team_b": "库普斯",
+      "match_num": "周六212",
+      "kickoff_at": "2026-07-18 22:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 308,
+      "markets": {
+        "had": {
+          "h": "2.78",
+          "d": "3.35",
+          "a": "2.12"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "15.00",
+          "s1": "6.00",
+          "s2": "3.75",
+          "s3": "3.40",
+          "s4": "4.80",
+          "s5": "7.80",
+          "s6": "14.00",
+          "s7": "20.00"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "2.78",
+      "d": "3.35",
+      "a": "2.12",
+      "market_h": "2.94",
+      "market_d": "3.62",
+      "market_a": "2.14",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040558",
+      "team_a": "莫尔德",
+      "team_b": "布兰",
+      "match_num": "周六213",
+      "kickoff_at": "2026-07-19 00:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 428,
+      "markets": {
+        "had": {
+          "h": "1.85",
+          "d": "3.88",
+          "a": "3.02"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "27.00",
+          "s1": "7.75",
+          "s2": "4.60",
+          "s3": "3.45",
+          "s4": "4.15",
+          "s5": "6.25",
+          "s6": "10.00",
+          "s7": "12.50"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "1.85",
+      "d": "3.88",
+      "a": "3.02",
+      "market_h": "2.07",
+      "market_d": "3.82",
+      "market_a": "3.02",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    },
+    {
+      "match_id": "2040559",
+      "team_a": "维京",
+      "team_b": "桑纳菲",
+      "match_num": "周六214",
+      "kickoff_at": "2026-07-19 00:00",
+      "capture_phase": "decision",
+      "minutes_to_kickoff": 428,
+      "markets": {
+        "had": {
+          "h": "1.15",
+          "d": "6.40",
+          "a": "9.65"
+        },
+        "hhad": {},
+        "ttg": {
+          "s0": "33.00",
+          "s1": "9.80",
+          "s2": "5.30",
+          "s3": "3.75",
+          "s4": "3.90",
+          "s5": "5.60",
+          "s6": "8.50",
+          "s7": "8.75"
+        }
+      },
+      "single_eligibility": {
+        "had": false,
+        "hhad": false,
+        "ttg": false
+      },
+      "h": "1.15",
+      "d": "6.40",
+      "a": "9.65",
+      "market_h": "1.25",
+      "market_d": "5.93",
+      "market_a": "9.07",
+      "market_type": "win_draw_loss",
+      "settlement_minutes": 90,
+      "includes_extra_time": false
+    }
+  ]
+}

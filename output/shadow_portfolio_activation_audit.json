@@ -1,0 +1,200 @@
+{
+  "checked_dates": [
+    "2026-07-18"
+  ],
+  "counts": {
+    "checked_dates": 1,
+    "excluded_dates": 7,
+    "excluded_invalid_dates": 0,
+    "excluded_missing_dates": 7,
+    "paid_rows": 0,
+    "parlay_legs": 0,
+    "parlays": 0,
+    "requested_dates": 8,
+    "singles": 0
+  },
+  "evidence": [
+    {
+      "date": "2026-07-18",
+      "decision_capture_timestamp": "2026-07-18T16:51:36.178619+08:00",
+      "decision_source": "zgzcw",
+      "domestic_odds": {
+        "bytes": 20194,
+        "path": "data/sporttery_odds_2026-07-18.json",
+        "sha256": "79dd6d7b3fce64f7e48b45bdd541b5bd1999e59b80e21ad6e70b48025d7d32b1"
+      },
+      "fixture_match_count": 15,
+      "fixtures_file": {
+        "bytes": 2986,
+        "path": "data/fixtures.csv",
+        "sha256": "b0efd5074739e4b76b5c01134ea24b1e724442d38769f37e6ece28de5f2685fb"
+      },
+      "generated_bet_ids": [],
+      "generated_paid_count": 0,
+      "predictions": {
+        "bytes": 4599,
+        "path": "output/predictions_2026-07-18.csv",
+        "sha256": "15b1ae88d36887365ae1d73ab1b17d1c4ab58b91be3e147a63336d604f5eb071"
+      },
+      "snapshot": {
+        "bytes": 15041,
+        "path": "data/odds_snapshots/2026-07-18-165136-decision.json",
+        "sha256": "13d768f869a72fd5b607a8e220d60ab26009563fe442e967d13f80dc481326ad"
+      },
+      "snapshot_match_count": 15
+    }
+  ],
+  "excluded_dates": [
+    {
+      "date": "2026-07-11",
+      "reasons": [
+        "decision_snapshot",
+        "fixtures"
+      ],
+      "status": "excluded_missing"
+    },
+    {
+      "date": "2026-07-12",
+      "reasons": [
+        "decision_snapshot",
+        "fixtures"
+      ],
+      "status": "excluded_missing"
+    },
+    {
+      "date": "2026-07-13",
+      "reasons": [
+        "decision_snapshot",
+        "fixtures"
+      ],
+      "status": "excluded_missing"
+    },
+    {
+      "date": "2026-07-14",
+      "reasons": [
+        "decision_snapshot",
+        "fixtures"
+      ],
+      "status": "excluded_missing"
+    },
+    {
+      "date": "2026-07-15",
+      "reasons": [
+        "fixtures"
+      ],
+      "status": "excluded_missing"
+    },
+    {
+      "date": "2026-07-16",
+      "reasons": [
+        "fixtures"
+      ],
+      "status": "excluded_missing"
+    },
+    {
+      "date": "2026-07-17",
+      "reasons": [
+        "fixtures"
+      ],
+      "status": "excluded_missing"
+    }
+  ],
+  "excluded_invalid": [],
+  "excluded_missing": [
+    "2026-07-11",
+    "2026-07-12",
+    "2026-07-13",
+    "2026-07-14",
+    "2026-07-15",
+    "2026-07-16",
+    "2026-07-17"
+  ],
+  "historical_artifact_hashes": {
+    "output/betting_ledger.csv": "6b5f4f448e9bf8adba7bd008c368fd1440a174cabd83a30a47d3e440139d4f41",
+    "output/betting_plan_2026-07-11.csv": "25a8b0d97fdf9bfa3c2f7b2fc7d7fdc0447c8a6e6ee03a89d9ee78214935588d",
+    "output/betting_plan_2026-07-12.csv": "da4aaf20954c1192bd7a0a4b11c928424ae06890d84bade443bcbb18fa94916e",
+    "output/betting_plan_2026-07-13.csv": "829f849117f8a1ee0936fbfac29f3e1589eca6f80dd6b65bbdb86004e274dbb1",
+    "output/betting_plan_2026-07-14.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
+    "output/betting_plan_2026-07-15.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
+    "output/betting_plan_2026-07-16.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
+    "output/betting_plan_2026-07-17.csv": "130d5d79b54fd22fa8543c89378fa4fc14dd05090e45ba201f211a498846d25e",
+    "output/observation_ledger.csv": "ca47f935c4ddd8cb15d624a8d1ceb3ad1283bfed5e6ed54a131af0b4765bb1d9",
+    "output/observation_plan_2026-07-13.csv": "829f849117f8a1ee0936fbfac29f3e1589eca6f80dd6b65bbdb86004e274dbb1",
+    "output/observation_plan_2026-07-14.csv": "6d2882fbc95ab310d010761223856e4d9b13e5722930e3523f09a5b2e1964597",
+    "output/observation_plan_2026-07-15.csv": "8980e2489551e4d9e4d2358d585e01ca2e27a6a372044a003f8c97b0b9f2bf92",
+    "output/observation_plan_2026-07-16.csv": "b73f79f33f634d00c2985c6724e89b13d4bbb702f66782aded73de4ae3a13e78",
+    "output/observation_plan_2026-07-17.csv": "3d9d5ddb1465568e401b31b053e8442fc38f9a9be2fe0e4edae4078cbe2669e8",
+    "output/plan_lock_2026-07-17.json": "2ceccb908fa29b246dc0e8cbad680c5b92a24cd77c47eb6cd183d00dbfaf2ea7",
+    "output/plan_lock_2026-07-17.json.lock": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  "historical_artifacts_unchanged": true,
+  "limits": {
+    "daily_stake": 500,
+    "match_exposure": 200,
+    "monthly_stake": 5000,
+    "parlay_stake": 30,
+    "stake_unit": 2
+  },
+  "maxima": {
+    "daily_stake": 0,
+    "match_exposure": 0,
+    "monthly_stake": 0,
+    "parlay_stake": 0
+  },
+  "passed": true,
+  "profitability_gate_applied": false,
+  "real_money_automation": false,
+  "schema_version": "shadow-portfolio-activation-audit-v1",
+  "simulation_only": true,
+  "source_coverage": [
+    {
+      "date": "2026-07-11",
+      "sporttery": false,
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
+    },
+    {
+      "date": "2026-07-12",
+      "sporttery": false,
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
+    },
+    {
+      "date": "2026-07-13",
+      "sporttery": false,
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
+    },
+    {
+      "date": "2026-07-14",
+      "sporttery": false,
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
+    },
+    {
+      "date": "2026-07-15",
+      "sporttery": false,
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
+    },
+    {
+      "date": "2026-07-16",
+      "sporttery": false,
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
+    },
+    {
+      "date": "2026-07-17",
+      "sporttery": false,
+      "status": "excluded_missing",
+      "verified_domestic_fallback": false
+    },
+    {
+      "date": "2026-07-18",
+      "sporttery": false,
+      "status": "checked",
+      "verified_domestic_fallback": true
+    }
+  ],
+  "violations": []
+}
