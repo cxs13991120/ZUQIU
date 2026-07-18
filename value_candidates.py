@@ -90,37 +90,121 @@ def build_candidates(
     snapshot: dict,
     config: dict,
     league_calibrations: dict,
+    *,
+    diagnostics: list[dict] | None = None,
 ) -> list[ValueCandidate]:
+    discarded: list[dict] = []
     if not isinstance(predictions, list) or not isinstance(odds_by_match, dict):
+        _record_diagnostic(
+            discarded,
+            "candidate_inputs_invalid",
+            predictions_valid=isinstance(predictions, list),
+            odds_by_match_valid=isinstance(odds_by_match, dict),
+        )
+        _publish_diagnostics(diagnostics, discarded)
         return []
     decision_matches, captured_at = _decision_matches(snapshot)
     if captured_at is None:
+        _record_diagnostic(discarded, "decision_snapshot_invalid")
+        _publish_diagnostics(diagnostics, discarded)
         return []
     value_config = config.get("value_strategy", {}) if isinstance(config, dict) else {}
     candidates = []
-    for prediction in predictions:
+    for prediction_index, prediction in enumerate(predictions):
         if not isinstance(prediction, dict):
+            _record_diagnostic(
+                discarded, "prediction_not_mapping", prediction_index=prediction_index
+            )
             continue
         match_id = prediction.get("match_id")
-        decision = decision_matches.get(match_id)
-        markets = odds_by_match.get(match_id)
-        if not isinstance(match_id, str) or decision is None or not isinstance(markets, dict):
+        if not isinstance(match_id, str) or not match_id.strip():
+            _record_diagnostic(
+                discarded, "prediction_match_id_invalid", prediction_index=prediction_index
+            )
             continue
-        if not _same_match(prediction, decision, captured_at):
+        decision = decision_matches.get(match_id)
+        if decision is None:
+            _record_diagnostic(
+                discarded,
+                "decision_match_missing",
+                match_id=match_id,
+                prediction_index=prediction_index,
+            )
+            continue
+        markets = odds_by_match.get(match_id)
+        if not isinstance(markets, dict) or not markets:
+            _record_diagnostic(
+                discarded,
+                "official_markets_missing",
+                match_id=match_id,
+                prediction_index=prediction_index,
+            )
+            continue
+        match_rejection = _match_rejection_code(prediction, decision, captured_at)
+        if match_rejection is not None:
+            _record_diagnostic(
+                discarded,
+                match_rejection,
+                match_id=match_id,
+                prediction_index=prediction_index,
+            )
             continue
         for market_type, official_market in markets.items():
+            market_context = market_type if isinstance(market_type, str) else ""
             market = _official_market(official_market)
-            if market is None or market_type != market.market_type or market.match_id != match_id:
+            if market is None:
+                _record_diagnostic(
+                    discarded,
+                    "official_market_invalid",
+                    match_id=match_id,
+                    market_type=market_context,
+                )
+                continue
+            if market_type != market.market_type:
+                _record_diagnostic(
+                    discarded,
+                    "official_market_type_mismatch",
+                    match_id=match_id,
+                    market_type=market_context,
+                    official_market_type=market.market_type,
+                )
+                continue
+            if market.match_id != match_id:
+                _record_diagnostic(
+                    discarded,
+                    "official_market_match_id_mismatch",
+                    match_id=match_id,
+                    market_type=market.market_type,
+                    official_match_id=market.match_id,
+                )
                 continue
             if not _decision_market_matches(decision, market):
+                _record_diagnostic(
+                    discarded,
+                    "decision_market_mismatch",
+                    match_id=match_id,
+                    market_type=market.market_type,
+                )
                 continue
             opening = _opening_match(snapshot, prediction, decision, captured_at)
             opening_market = _validated_opening_market(opening, market)
             quality, quality_multiplier = _data_quality(market, opening_market)
             if quality == "low":
+                _record_diagnostic(
+                    discarded,
+                    "market_data_quality_low",
+                    match_id=match_id,
+                    market_type=market.market_type,
+                )
                 continue
             selection_data = _selection_probabilities(prediction, market, league_calibrations)
             if selection_data is None:
+                _record_diagnostic(
+                    discarded,
+                    "model_probabilities_invalid",
+                    match_id=match_id,
+                    market_type=market.market_type,
+                )
                 continue
             single_eligibility = decision.get("single_eligibility", {})
             single_eligible = bool(single_eligibility.get(market_type)) if isinstance(single_eligibility, dict) else False
@@ -130,6 +214,14 @@ def build_candidates(
                     _snapshot_price(opening_market, selection), decision_price
                 )
                 if not risk.eligible:
+                    _record_diagnostic(
+                        discarded,
+                        "odds_volatility_ineligible",
+                        match_id=match_id,
+                        market_type=market.market_type,
+                        selection=selection,
+                        volatility_band=risk.band,
+                    )
                     continue
                 model_weight = _model_weight(value_config)
                 conservative = conservative_probability(
@@ -172,7 +264,31 @@ def build_candidates(
                         calibration_samples=samples,
                     )
                 )
+    _publish_diagnostics(diagnostics, discarded)
     return candidates
+
+
+def _record_diagnostic(target: list[dict], code: str, **context: object) -> None:
+    target.append({
+        "code": code,
+        "context": {
+            key: context[key]
+            for key in sorted(context)
+            if context[key] is not None
+        },
+    })
+
+
+def _publish_diagnostics(target: list[dict] | None, discarded: list[dict]) -> None:
+    if target is None:
+        return
+    target.extend(sorted(
+        discarded,
+        key=lambda item: (
+            item["code"],
+            tuple((key, str(value)) for key, value in item["context"].items()),
+        ),
+    ))
 
 
 def _decision_matches(snapshot: dict) -> tuple[dict[str, dict], datetime | None]:
@@ -227,11 +343,17 @@ def _opening_match(
     return None
 
 
-def _same_match(prediction: dict, decision: dict, captured_at: datetime) -> bool:
+def _match_rejection_code(
+    prediction: dict, decision: dict, captured_at: datetime
+) -> str | None:
     if not _same_snapshot_identity(prediction, decision):
-        return False
+        return "prediction_identity_mismatch"
     kickoff = _datetime(decision.get("kickoff_at"))
-    return kickoff is not None and kickoff > captured_at
+    if kickoff is None:
+        return "decision_kickoff_invalid"
+    if kickoff <= captured_at:
+        return "match_started"
+    return None
 
 
 def _same_snapshot_identity(prediction: dict, snapshot_match: dict | None) -> bool:

@@ -202,7 +202,9 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
         def load_history(path: Path):
             return observations if path.name == "observation_ledger.csv" else []
 
-        def capture_candidates(predictions, markets, snapshot, config, calibrations):
+        def capture_candidates(
+            predictions, markets, snapshot, config, calibrations, *, diagnostics=None
+        ):
             captured["candidate_samples"] = config["value_strategy"]["settled_samples"]
             return []
 
@@ -233,6 +235,44 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
 
         self.assertEqual([], outputs.shadow_plan)
         self.assertEqual([], outputs.audit["selected_shadow"])
+
+    def test_active_mode_does_not_construct_or_finalize_legacy(self):
+        with self.strategy_context(value_config("active")):
+            with (
+                patch.object(
+                    strategy,
+                    "build_legacy_value_plan",
+                    side_effect=AssertionError("legacy construction ran"),
+                ) as legacy_build,
+                patch.object(strategy, "build_candidates", return_value=[candidate("active-only")]),
+            ):
+                outputs = strategy.build_strategy_outputs(TARGET_DATE, locked_at=LOCKED_AT)
+
+        legacy_build.assert_not_called()
+        self.assertEqual(["value-v4"], [row["strategy_version"] for row in outputs.active_plan])
+        self.assertEqual([], outputs.shadow_plan)
+        self.assertFalse(any(
+            row.get("strategy_version", "").startswith("legacy")
+            for row in [*outputs.active_plan, *outputs.shadow_plan]
+        ))
+
+    def test_zero_candidate_audit_exposes_early_discard_diagnostics(self):
+        markets, snapshot = market_fixture("audit", "had")
+        snapshot["matches"][0]["team_a"] = "Mismatched Home"
+        with self.strategy_context(value_config("active")):
+            with (
+                patch.object(strategy, "load_predictions", return_value=[prediction("audit")]),
+                patch.object(strategy, "load_value_snapshot", return_value=snapshot),
+                patch.object(strategy, "load_official_decision_markets", return_value=markets),
+                patch.object(strategy, "build_legacy_value_plan", return_value=([], [])),
+            ):
+                outputs = strategy.build_strategy_outputs(TARGET_DATE, locked_at=LOCKED_AT)
+
+        self.assertEqual([], outputs.active_plan)
+        self.assertIn({
+            "code": "prediction_identity_mismatch",
+            "context": {"match_id": "audit", "prediction_index": 0},
+        }, outputs.audit["rejection_reasons"])
 
     def test_empty_shadow_generation_writes_full_schema_and_never_paid_ledger(self):
         for generate_only in (False, True):

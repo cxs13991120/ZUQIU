@@ -99,6 +99,71 @@ class ValueCandidateTest(unittest.TestCase):
                     build_candidates([_prediction()], odds_by_match, snapshot, _config(), {}),
                 )
 
+    def test_early_discards_emit_deterministic_structured_diagnostics(self):
+        identity_diagnostics = []
+        self.assertEqual([], build_candidates(
+            [_prediction()],
+            _official_odds(),
+            _snapshot(team_a="Other Home"),
+            _config(),
+            {},
+            diagnostics=identity_diagnostics,
+        ))
+        self.assertEqual([{
+            "code": "prediction_identity_mismatch",
+            "context": {"match_id": "match-1", "prediction_index": 0},
+        }], identity_diagnostics)
+
+        low_quality = _official_odds()
+        low_quality["match-1"] = {
+            "had": replace(
+                low_quality["match-1"]["had"], source="external-consensus"
+            )
+        }
+        quality_diagnostics = []
+        self.assertEqual([], build_candidates(
+            [_prediction()], low_quality, _snapshot(), _config(), {},
+            diagnostics=quality_diagnostics,
+        ))
+        self.assertEqual([{
+            "code": "market_data_quality_low",
+            "context": {"match_id": "match-1", "market_type": "had"},
+        }], quality_diagnostics)
+
+        volatile_snapshot = _snapshot()
+        volatile_snapshot["opening"] = _opening_snapshot()
+        volatile_snapshot["opening"]["matches"][0]["markets"]["had"]["h"] = 4.50
+        volatile_odds = {"match-1": {"had": _official_odds()["match-1"]["had"]}}
+        volatility_diagnostics = []
+        candidates = build_candidates(
+            [_prediction()], volatile_odds, volatile_snapshot, _config(), {},
+            diagnostics=volatility_diagnostics,
+        )
+        self.assertEqual(2, len(candidates))
+        self.assertEqual([{
+            "code": "odds_volatility_ineligible",
+            "context": {
+                "match_id": "match-1",
+                "market_type": "had",
+                "selection": THREE_WAY_SELECTIONS["h"],
+                "volatility_band": "unverified_jump",
+            },
+        }], volatility_diagnostics)
+
+        malformed_diagnostics = []
+        self.assertEqual([], build_candidates(
+            [_prediction()],
+            {"match-1": {"had": object()}},
+            _snapshot(),
+            _config(),
+            {},
+            diagnostics=malformed_diagnostics,
+        ))
+        self.assertEqual([{
+            "code": "official_market_invalid",
+            "context": {"match_id": "match-1", "market_type": "had"},
+        }], malformed_diagnostics)
+
     def test_external_consensus_never_replaces_domestic_official_odds(self):
         prediction = _prediction()
         prediction["external_consensus_odds"] = {"had": {"胜": 1.01}}

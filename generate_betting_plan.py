@@ -991,11 +991,25 @@ def _portfolio_rows(portfolio: Portfolio, locked_at: datetime) -> list[dict]:
     return rows
 
 
-def _portfolio_audit(candidates: list[ValueCandidate], portfolio: Portfolio, account: dict) -> dict:
+def _portfolio_audit(
+    candidates: list[ValueCandidate],
+    portfolio: Portfolio,
+    account: dict,
+    diagnostics: list[dict] | None = None,
+) -> dict:
     counts = {market: sum(candidate.market_type == market for candidate in candidates) for market in ("had", "hhad", "ttg")}
+    candidate_diagnostics = sorted(
+        (dict(item) for item in diagnostics or []),
+        key=lambda item: json.dumps(
+            item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ),
+    )
     return {
         "candidate_counts": counts,
-        "rejection_reasons": sorted({*portfolio.rejections, *(reason for candidate in candidates for reason in candidate.value_gate_reasons)}),
+        "rejection_reasons": [
+            *sorted({*portfolio.rejections, *(reason for candidate in candidates for reason in candidate.value_gate_reasons)}),
+            *candidate_diagnostics,
+        ],
         "selected_shadow": [],
         "risk_checks": [
             {"name": check.name, "value": check.value, "limit": check.limit, "passed": check.passed}
@@ -1033,8 +1047,14 @@ def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list
         max_adjustment=float(calibrations_config.get("max_adjustment", 0.05)),
         validation_fraction=float(calibrations_config.get("validation_fraction", 0.25)),
     )
+    diagnostics: list[dict] = []
     candidates = build_candidates(
-        predictions, markets, snapshot, _v4_config(config, settled_samples), calibrations
+        predictions,
+        markets,
+        snapshot,
+        _v4_config(config, settled_samples),
+        calibrations,
+        diagnostics=diagnostics,
     )
     portfolio = allocate_portfolio(
         candidates, _v4_limits(config, account, settled_samples), account
@@ -1044,7 +1064,7 @@ def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list
         _candidate_plan_row(candidate, 0, locked_at=locked_time, portfolio_rank=0)
         for candidate in sorted(candidates, key=lambda item: item.candidate_id)
     ]
-    audit = _portfolio_audit(candidates, portfolio, account)
+    audit = _portfolio_audit(candidates, portfolio, account, diagnostics)
     audit["settled_samples"] = settled_samples
     audit["selected_shadow"] = [
         {"bet_id": row["bet_id"], "stake": row["stake"], "market_type": row["market_type"]}
@@ -1061,16 +1081,18 @@ def build_strategy_outputs(target_date: date, *, locked_at: datetime) -> Strateg
     if mode not in {"shadow", "active"}:
         raise ValueError("activation_mode must be shadow or active")
     locked_time = _aware_locked_at(locked_at)
-    snapshot = load_value_snapshot(target_date, locked_at=locked_time)
-    markets = load_official_decision_markets(target_date, snapshot=snapshot)
-    predictions = load_predictions(target_date)
-    legacy_plan, _ = build_legacy_value_plan(
-        target_date,
-        predictions=predictions,
-        odds_by_match=_snapshot_odds(snapshot),
-        odds_source=str(snapshot.get("source") or ""),
-    )
-    legacy_plan = _finalize_legacy_plan(legacy_plan, markets, locked_time)
+    legacy_plan = []
+    if mode == "shadow":
+        snapshot = load_value_snapshot(target_date, locked_at=locked_time)
+        markets = load_official_decision_markets(target_date, snapshot=snapshot)
+        predictions = load_predictions(target_date)
+        legacy_plan, _ = build_legacy_value_plan(
+            target_date,
+            predictions=predictions,
+            odds_by_match=_snapshot_odds(snapshot),
+            odds_source=str(snapshot.get("source") or ""),
+        )
+        legacy_plan = _finalize_legacy_plan(legacy_plan, markets, locked_time)
     v4_plan, observations = build_value_v4_plan(target_date, locked_at=locked_time)
     audit = dict(_LAST_VALUE_V4_AUDIT)
     active_plan = legacy_plan if mode == "shadow" else v4_plan
