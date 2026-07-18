@@ -17,7 +17,7 @@ from import_sporttery import import_manifest_path, read_valid_import_manifest
 
 BEIJING = timezone(timedelta(hours=8))
 BUNDLE_SCHEMA_VERSION = 3
-PREDICTION_METADATA_SCHEMA_VERSION = 1
+PREDICTION_METADATA_SCHEMA_VERSION = 2
 DOMESTIC_DECISION_SOURCES = frozenset({"sporttery", "zgzcw"})
 MODEL_CODE_PATHS = (
     "predict_today.py",
@@ -56,8 +56,15 @@ def canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def canonical_fixture_rows(root: Path, target_date: date) -> list[dict]:
-    rows = _read_csv(Path(root) / "data" / "fixtures.csv", required=True)
+def canonical_fixture_rows(
+    root: Path,
+    target_date: date,
+    *,
+    import_manifest: dict | None = None,
+) -> list[dict]:
+    root = Path(root)
+    manifest = import_manifest or read_valid_import_manifest(root, target_date)
+    rows = _read_csv(root / manifest["fixtures"]["path"], required=True)
     selected = [
         {str(key): "" if value is None else str(value) for key, value in row.items()}
         for row in rows
@@ -80,6 +87,8 @@ def write_prediction_metadata(
     root: Path,
     target_date: date,
     generated_at: datetime,
+    *,
+    consumed_manifest_inputs: dict | None = None,
 ) -> Path:
     root = Path(root).resolve()
     generated = _aware_datetime(generated_at, "prediction generated_at").astimezone(BEIJING)
@@ -87,9 +96,21 @@ def write_prediction_metadata(
     prediction_path = root / "output" / f"predictions_{date_text}.csv"
     predictions = _read_csv(prediction_path, required=True)
     _validate_prediction_rows(predictions, target_date)
-    fixtures = canonical_fixture_rows(root, target_date)
     import_manifest = read_valid_import_manifest(root, target_date)
-    ratings_path = root / import_manifest["ratings"]["path"]
+    fixtures = canonical_fixture_rows(
+        root,
+        target_date,
+        import_manifest=import_manifest,
+    )
+    manifest_inputs = {
+        key: dict(import_manifest[key])
+        for key in ("fixtures", "ratings")
+    }
+    if (
+        consumed_manifest_inputs is not None
+        and consumed_manifest_inputs != manifest_inputs
+    ):
+        raise ValueError("prediction consumed inputs differ from import manifest")
     payload = {
         "schema_version": PREDICTION_METADATA_SCHEMA_VERSION,
         "target_date": date_text,
@@ -102,7 +123,7 @@ def write_prediction_metadata(
         },
         "model_inputs": {
             "config": _file_record(root, root / "config.json"),
-            "ratings": _file_record(root, ratings_path),
+            **manifest_inputs,
             "prediction_code": _file_record(root, root / "predict_today.py"),
         },
     }
@@ -397,19 +418,28 @@ def _validate_prediction_metadata(
     if fixtures.get("match_count") != len(fixtures["rows"]):
         raise ValueError("prediction metadata fixture count mismatch")
     inputs = payload.get("model_inputs")
-    if not isinstance(inputs, dict) or set(inputs) != {"config", "ratings", "prediction_code"}:
+    if not isinstance(inputs, dict) or set(inputs) != {
+        "config", "fixtures", "ratings", "prediction_code"
+    }:
         raise ValueError("prediction metadata model inputs are invalid")
     import_manifest = read_valid_import_manifest(root, target_date)
-    manifest_ratings = import_manifest["ratings"]
-    if any(
-        inputs["ratings"].get(key) != manifest_ratings.get(key)
-        for key in ("path", "sha256", "bytes")
-    ):
-        raise ValueError("prediction metadata ratings differ from import manifest")
+    for input_name in ("fixtures", "ratings"):
+        manifest_record = import_manifest[input_name]
+        if any(
+            inputs[input_name].get(key) != manifest_record.get(key)
+            for key in ("path", "sha256", "bytes")
+        ):
+            raise ValueError(
+                f"prediction metadata {input_name} differ from import manifest"
+            )
     if verify_current_inputs:
         for record in inputs.values():
             _verify_file_record(root, record)
-        if fixtures["rows"] != canonical_fixture_rows(root, target_date):
+        if fixtures["rows"] != canonical_fixture_rows(
+            root,
+            target_date,
+            import_manifest=import_manifest,
+        ):
             raise ValueError("prediction metadata current fixtures differ")
 
 

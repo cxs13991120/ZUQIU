@@ -375,7 +375,7 @@ class IdentityAndIngestionTest(unittest.TestCase):
 
         for alias in aliases:
             with self.subTest(date=alias["date"]), self.assertRaisesRegex(
-                ValueError, "existing canonical paid row"
+                ValueError, "existing canonical paid row|canonical YYYY-MM-DD"
             ):
                 ingest_locked_plan([canonical, alias], [], lock())
 
@@ -393,7 +393,10 @@ class IdentityAndIngestionTest(unittest.TestCase):
                 write_ledger_atomic(ledger_path, [canonical, alias])
                 before = ledger_path.read_bytes()
 
-                with self.assertRaisesRegex(ValueError, "existing canonical paid row"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "existing canonical paid row|canonical YYYY-MM-DD",
+                ):
                     ledger_module.settle_ledger(
                         root, {"1001": finished("1001", 2, 1)}, SETTLED_AT
                     )
@@ -413,7 +416,10 @@ class IdentityAndIngestionTest(unittest.TestCase):
         for alias in aliases:
             with self.subTest(
                 report_date=alias.get("report_date", "missing")
-            ), self.assertRaisesRegex(ValueError, "existing canonical paid row"):
+            ), self.assertRaisesRegex(
+                ValueError,
+                "existing canonical paid row|canonical YYYY-MM-DD",
+            ):
                 ingest_locked_plan([canonical, alias], [], lock())
 
     def test_conflicting_effective_report_date_fails_ingest_and_settle_without_write(self):
@@ -424,7 +430,7 @@ class IdentityAndIngestionTest(unittest.TestCase):
             "report_date": "2026-07-15",
         }
 
-        with self.assertRaisesRegex(ValueError, "existing canonical paid row"):
+        with self.assertRaisesRegex(ValueError, "date and report_date"):
             ingest_locked_plan([first, conflict], [], lock())
 
         with tempfile.TemporaryDirectory() as folder:
@@ -433,7 +439,7 @@ class IdentityAndIngestionTest(unittest.TestCase):
             write_ledger_atomic(ledger_path, [first, conflict])
             before = ledger_path.read_bytes()
 
-            with self.assertRaisesRegex(ValueError, "existing canonical paid row"):
+            with self.assertRaisesRegex(ValueError, "date and report_date"):
                 ledger_module.settle_ledger(
                     root, {"1001": finished("1001", 2, 1)}, SETTLED_AT
                 )
@@ -1361,7 +1367,7 @@ class SettlementTest(unittest.TestCase):
         )
         for row in cases:
             with self.subTest(row=row), self.assertRaisesRegex(
-                ValueError, "existing canonical paid row"
+                ValueError, "existing canonical paid row|canonical YYYY-MM-DD"
             ):
                 ingest_locked_plan([row], [], lock())
 

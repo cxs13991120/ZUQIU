@@ -754,8 +754,11 @@ def _load_locked_plan_evidence(
     for row in existing_rows:
         if not isinstance(row, dict):
             raise ValueError("existing row must be a mapping")
-        cutover_report_date = _canonical_cutover_report_date(row)
-        if cutover_report_date is not None or _claims_canonical_identity(row):
+        effective_date = _paid_ledger_effective_date(row)
+        after_cutover = (
+            date.fromisoformat(effective_date) >= CANONICAL_PAID_CUTOVER_DATE
+        )
+        if after_cutover or _claims_canonical_identity(row):
             if row.get("strategy_version") in NEW_PAID_STRATEGY_VERSIONS:
                 try:
                     _validate_existing_canonical_paid_row(row)
@@ -763,10 +766,7 @@ def _load_locked_plan_evidence(
                     raise ValueError(
                         f"invalid existing canonical paid row: {exc}"
                     ) from exc
-            report_dates.add(
-                cutover_report_date
-                or _strict_canonical_date(row.get("report_date"), "report_date")
-            )
+            report_dates.add(effective_date)
     evidence: dict[tuple[str, str], str] = {}
     for report_date in sorted(report_dates):
         target_date = date.fromisoformat(report_date)
@@ -934,10 +934,14 @@ def _normalize_existing_rows(
     for source_row in existing_rows:
         if not isinstance(source_row, dict):
             raise ValueError("existing row must be a mapping")
-        canonical_key = _canonical_evidence_key(source_row, canonical_evidence)
-        cutover_report_date = _canonical_cutover_report_date(source_row)
+        effective_date = _paid_ledger_effective_date(source_row)
+        canonical_key = _canonical_evidence_key(
+            source_row,
+            effective_date,
+            canonical_evidence,
+        )
         anchored_canonical = (
-            cutover_report_date is not None
+            date.fromisoformat(effective_date) >= CANONICAL_PAID_CUTOVER_DATE
             or canonical_key is not None
             or _claims_canonical_identity(source_row)
         )
@@ -1003,34 +1007,31 @@ def _claims_canonical_identity(row: dict) -> bool:
     )
 
 
-def _canonical_cutover_report_date(row: dict) -> str | None:
-    value = row.get("report_date")
-    if value is None or (isinstance(value, str) and not value.strip()):
-        value = row.get("date")
-    try:
-        report_date = _required_date(value)
-    except (TypeError, ValueError):
-        return None
-    return (
-        report_date
-        if date.fromisoformat(report_date) >= CANONICAL_PAID_CUTOVER_DATE
-        else None
-    )
+def _paid_ledger_effective_date(row: dict) -> str:
+    populated: dict[str, str] = {}
+    for field in ("date", "report_date"):
+        value = row.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        populated[field] = _strict_canonical_date(value, field)
+    if not populated:
+        raise ValueError(
+            "paid ledger row requires a nonblank date or report_date"
+        )
+    if len(set(populated.values())) != 1:
+        raise ValueError("paid ledger date and report_date must match")
+    return next(iter(populated.values()))
 
 
 def _canonical_evidence_key(
-    row: dict, canonical_evidence: dict[tuple[str, str], str]
+    row: dict,
+    effective_date: str,
+    canonical_evidence: dict[tuple[str, str], str],
 ) -> tuple[str, str] | None:
-    try:
-        report_date = _strict_canonical_date(
-            row.get("report_date"), "report_date"
-        )
-    except ValueError:
-        return None
     provided_id = row.get("bet_id")
     if not isinstance(provided_id, str) or not provided_id:
         return None
-    key = (report_date, provided_id)
+    key = (effective_date, provided_id)
     if key not in canonical_evidence:
         return None
     if provided_id not in _canonical_identity_candidates(row):

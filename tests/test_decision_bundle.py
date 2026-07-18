@@ -54,27 +54,56 @@ class DecisionBundleTest(unittest.TestCase):
             (self.root / name).write_text(f"MODULE = {name!r}\n", encoding="utf-8")
         self._write_csv(
             "data/team_ratings.csv",
-            [{"team": "Team A", "elo": "1500"}, {"team": "Team B", "elo": "1490"}],
+            [
+                {
+                    "team": "Team A",
+                    "elo": "1500",
+                    "attack": "0.10",
+                    "defense": "0.05",
+                    "form": "0.02",
+                    "injury": "0",
+                    "rest_days": "4",
+                    "home_adv": "0.08",
+                },
+                {
+                    "team": "Team B",
+                    "elo": "1490",
+                    "attack": "0.04",
+                    "defense": "0.03",
+                    "form": "0.01",
+                    "injury": "0",
+                    "rest_days": "4",
+                    "home_adv": "0",
+                },
+            ],
         )
         self._write_csv(
             "data/fixtures.csv",
             [
                 {
                     "date": "2026-07-16",
+                    "kickoff_local": "20:00",
                     "team_a": "Team A",
                     "team_b": "Team B",
                     "match_id": "1001",
                     "kickoff_at": "2026-07-16T20:00:00+08:00",
+                    "stage": "group",
+                    "neutral": "false",
+                    "venue": "Test Venue",
                     "odds_a": "2.10",
                     "odds_draw": "3.20",
                     "odds_b": "3.40",
                 },
                 {
                     "date": "2026-07-17",
+                    "kickoff_local": "20:00",
                     "team_a": "Later A",
                     "team_b": "Later B",
                     "match_id": "later",
                     "kickoff_at": "2026-07-17T20:00:00+08:00",
+                    "stage": "group",
+                    "neutral": "false",
+                    "venue": "Later Venue",
                 },
             ],
         )
@@ -175,9 +204,145 @@ class DecisionBundleTest(unittest.TestCase):
         self.assertEqual(1, payload["fixture_extract"]["match_count"])
         self.assertEqual(["1001"], [row["match_id"] for row in payload["fixture_extract"]["rows"]])
         self.assertEqual(
-            {"config", "prediction_code", "ratings"},
+            {"config", "fixtures", "prediction_code", "ratings"},
             set(payload["model_inputs"]),
         )
+
+    def test_prediction_cli_consumes_manifest_inputs_without_mutable_history(self):
+        self._write_json(
+            "config.json",
+            json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8")),
+        )
+        self._write_csv(
+            "data/team_ratings.csv",
+            [
+                {
+                    "team": team,
+                    "elo": elo,
+                    "attack": "4.0",
+                    "defense": "4.0",
+                    "form": "4.0",
+                    "injury": "0",
+                    "rest_days": "4",
+                    "home_adv": "0",
+                }
+                for team, elo in (
+                    ("Team A", "2500"),
+                    ("Team B", "500"),
+                    ("Shared A", "1800"),
+                    ("Shared B", "1700"),
+                )
+            ],
+        )
+        self._write_csv(
+            "data/fixtures.csv",
+            [
+                {
+                    "date": TARGET_DATE.isoformat(),
+                    "kickoff_local": "21:00",
+                    "kickoff_at": "2026-07-16T21:00:00+08:00",
+                    "stage": "group",
+                    "team_a": "Shared A",
+                    "team_b": "Shared B",
+                    "neutral": "false",
+                    "venue": "Mutable Venue",
+                    "match_id": "mutable-1",
+                }
+            ],
+        )
+        self._write_csv(
+            "data/team_history_features.csv",
+            [
+                {
+                    "team": "Team A",
+                    "matches": "6",
+                    "attack": "9.0",
+                    "defense": "9.0",
+                    "form": "9.0",
+                    "rest_days": "1",
+                }
+            ],
+        )
+
+        with (
+            patch.object(predict_today, "ROOT", self.root),
+            patch.object(predict_today, "DATA_DIR", self.root / "data"),
+            patch.object(predict_today, "OUTPUT_DIR", self.root / "output"),
+            patch.object(
+                predict_today,
+                "predict_fixture",
+                wraps=predict_today.predict_fixture,
+            ) as predict_fixture,
+            patch("sys.argv", ["predict_today.py", "--date", "2026-07-16"]),
+        ):
+            self.assertEqual(0, predict_today.main())
+
+        fixture, ratings, _config = predict_fixture.call_args.args
+        self.assertEqual(("Team A", "Team B", "1001"), (
+            fixture.team_a,
+            fixture.team_b,
+            fixture.match_id,
+        ))
+        self.assertEqual(1500.0, ratings["Team A"].elo)
+        self.assertEqual(0.10, ratings["Team A"].attack)
+        with (
+            self.root / "output" / "predictions_2026-07-16.csv"
+        ).open(encoding="utf-8-sig", newline="") as handle:
+            prediction = next(csv.DictReader(handle))
+        self.assertEqual("1001", prediction["match_id"])
+
+        metadata = json.loads(
+            (
+                self.root
+                / "output"
+                / "predictions_2026-07-16.meta.json"
+            ).read_text(encoding="utf-8")
+        )
+        manifest = json.loads(
+            self.import_manifest_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["fixtures"], metadata["model_inputs"]["fixtures"])
+        self.assertEqual(manifest["ratings"], metadata["model_inputs"]["ratings"])
+        self.assertNotIn("history", metadata["model_inputs"])
+        self.assertEqual(
+            ["1001"],
+            [row["match_id"] for row in metadata["fixture_extract"]["rows"]],
+        )
+
+    def test_prediction_cli_requires_schema_two_manifest_even_without_files(self):
+        self._write_json(
+            "config.json",
+            json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8")),
+        )
+        manifest_bytes = self.import_manifest_path.read_bytes()
+        for state in ("missing", "old_schema"):
+            with self.subTest(state=state):
+                self.import_manifest_path.write_bytes(manifest_bytes)
+                if state == "missing":
+                    self.import_manifest_path.unlink()
+                else:
+                    manifest = json.loads(manifest_bytes)
+                    manifest["schema_version"] = 1
+                    self.import_manifest_path.write_text(
+                        json.dumps(manifest), encoding="utf-8"
+                    )
+                with (
+                    patch.object(predict_today, "ROOT", self.root),
+                    patch.object(predict_today, "DATA_DIR", self.root / "data"),
+                    patch.object(predict_today, "OUTPUT_DIR", self.root / "output"),
+                    patch(
+                        "sys.argv",
+                        [
+                            "predict_today.py",
+                            "--date",
+                            "2026-07-16",
+                            "--no-files",
+                        ],
+                    ),
+                    self.assertRaisesRegex(ValueError, "manifest|schema"),
+                ):
+                    predict_today.main()
+        self.import_manifest_path.write_bytes(manifest_bytes)
 
     def test_bundle_binds_one_zgzcw_source_and_is_idempotent(self):
         write_prediction_metadata(self.root, TARGET_DATE, GENERATED_AT)
@@ -299,11 +464,18 @@ class DecisionBundleTest(unittest.TestCase):
         bundle_path.write_text(json.dumps(original), encoding="utf-8")
 
     def test_prediction_cli_persists_metadata_with_its_real_generation_time(self):
+        consumed_inputs = {
+            "fixtures": {"path": "fixtures", "sha256": "a" * 64, "bytes": 1},
+            "ratings": {"path": "ratings", "sha256": "b" * 64, "bytes": 1},
+        }
         with (
             patch.object(predict_today, "OUTPUT_DIR", self.root / "output"),
             patch.object(predict_today, "read_config", return_value={}),
-            patch.object(predict_today, "load_ratings", return_value={}),
-            patch.object(predict_today, "load_fixtures", return_value=[]),
+            patch.object(
+                predict_today,
+                "load_manifest_prediction_inputs",
+                return_value=({}, [], consumed_inputs),
+            ),
             patch.object(predict_today, "write_prediction_metadata") as write_metadata,
             patch("sys.argv", ["predict_today.py", "--date", "2026-07-16"]),
         ):
@@ -315,6 +487,10 @@ class DecisionBundleTest(unittest.TestCase):
         self.assertEqual(TARGET_DATE, target_date)
         self.assertIsNotNone(generated_at.tzinfo)
         self.assertIsNotNone(generated_at.utcoffset())
+        self.assertEqual(
+            consumed_inputs,
+            write_metadata.call_args.kwargs["consumed_manifest_inputs"],
+        )
 
     def test_value_generator_uses_only_inputs_selected_by_the_bundle(self):
         write_prediction_metadata(self.root, TARGET_DATE, GENERATED_AT)

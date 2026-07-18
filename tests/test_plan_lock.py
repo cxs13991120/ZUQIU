@@ -436,32 +436,91 @@ class PlanLockTest(unittest.TestCase):
                         root, {}, CUTOVER_SETTLED_AT
                     )
 
+    def test_effective_date_validation_precedes_classification_and_lock_lookup(self):
+        attacks = {
+            "blank": ("", ""),
+            "malformed": (CUTOVER_DATE.isoformat(), "2026/07/18"),
+            "conflicting": (CUTOVER_DATE.isoformat(), "2026-07-19"),
+            "report_date_before_date_after": (
+                CUTOVER_DATE.isoformat(),
+                "2026-07-12",
+            ),
+            "date_before_report_date_after": (
+                "2026-07-12",
+                CUTOVER_DATE.isoformat(),
+            ),
+        }
+        for parlay in (False, True):
+            for keep_lock in (True, False):
+                for attack, (row_date, report_date) in attacks.items():
+                    with (
+                        self.subTest(
+                            parlay=parlay,
+                            keep_lock=keep_lock,
+                            attack=attack,
+                        ),
+                        tempfile.TemporaryDirectory() as tmp,
+                    ):
+                        root = Path(tmp)
+                        plan_row = canonical_paid_row(
+                            parlay=parlay, target_date=CUTOVER_DATE
+                        )
+                        self.make_artifacts(
+                            root,
+                            CUTOVER_DATE,
+                            paid_plan_rows=[plan_row],
+                        )
+                        lock = self.make_lock(root, CUTOVER_DATE)
+                        canonical = ingest_locked_plan(
+                            [], [plan_row], lock, canonical_evidence={}
+                        )[0]
+                        tampered = self._replace_id_and_strip_markers(
+                            canonical, parlay
+                        )
+                        tampered["date"] = row_date
+                        tampered["report_date"] = report_date
+                        write_ledger_atomic(
+                            root / "output" / "betting_ledger.csv",
+                            [tampered],
+                        )
+                        if not keep_lock:
+                            self.lock_path(root, CUTOVER_DATE).unlink()
+
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "date|report_date|effective",
+                        ):
+                            ledger_module.settle_ledger(
+                                root, {}, CUTOVER_SETTLED_AT
+                            )
+
     def test_pre_cutover_legacy_row_migrates_without_a_lock(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ledger_path = root / "output" / "betting_ledger.csv"
-            legacy = {
-                "date": "2026-07-12",
-                "strategy_version": "legacy-v1",
-                "play": "historical",
-                "market_type": "historical",
-                "match_id": "legacy-2026-07-12",
-                "selection": "historical",
-                "stake": "10",
-                "status": ledger_module.PENDING,
-                "profit": "0.00",
-            }
-            write_ledger_atomic(ledger_path, [legacy])
+        for report_date in ("2026-07-11", "2026-07-12"):
+            with self.subTest(report_date=report_date), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                ledger_path = root / "output" / "betting_ledger.csv"
+                legacy = {
+                    "date": report_date,
+                    "strategy_version": "legacy-v1",
+                    "play": "historical",
+                    "market_type": "historical",
+                    "match_id": f"legacy-{report_date}",
+                    "selection": "historical",
+                    "stake": "10",
+                    "status": ledger_module.PENDING,
+                    "profit": "0.00",
+                }
+                write_ledger_atomic(ledger_path, [legacy])
 
-            ledger_module.settle_ledger(root, {}, SETTLED_AT)
+                ledger_module.settle_ledger(root, {}, SETTLED_AT)
 
-            with ledger_path.open(
-                "r", encoding="utf-8-sig", newline=""
-            ) as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertEqual(1, len(rows))
-            self.assertRegex(rows[0]["bet_id"], r"^[0-9a-f]{64}$")
-            self.assertEqual("legacy-v1", rows[0]["strategy_version"])
+                with ledger_path.open(
+                    "r", encoding="utf-8-sig", newline=""
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(1, len(rows))
+                self.assertRegex(rows[0]["bet_id"], r"^[0-9a-f]{64}$")
+                self.assertEqual("legacy-v1", rows[0]["strategy_version"])
 
     @staticmethod
     def _replace_id_and_strip_markers(row: dict, parlay: bool) -> dict:

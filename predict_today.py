@@ -1,5 +1,7 @@
 import argparse
 import csv
+import hashlib
+import io
 import json
 import math
 from dataclasses import dataclass
@@ -7,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from decision_bundle import write_prediction_metadata
+from import_sporttery import read_valid_import_manifest
 
 
 ROOT = Path(__file__).resolve().parent
@@ -85,23 +88,16 @@ def required_kickoff_at(row: dict[str, str]) -> str:
     return value
 
 
-def load_ratings() -> dict[str, TeamRating]:
-    path = DATA_DIR / "team_ratings.csv"
+def load_ratings(
+    path: Path | None = None,
+    *,
+    include_history_overlay: bool = True,
+) -> dict[str, TeamRating]:
+    path = path or DATA_DIR / "team_ratings.csv"
     with path.open("r", encoding="utf-8-sig", newline="") as fh:
-        rows = csv.DictReader(fh)
-        ratings = {
-            row["team"].strip(): TeamRating(
-                team=row["team"].strip(),
-                elo=to_float(row["elo"]),
-                attack=to_float(row["attack"]),
-                defense=to_float(row["defense"]),
-                form=to_float(row["form"]),
-                injury=to_float(row["injury"]),
-                rest_days=to_float(row["rest_days"], 3.0),
-                home_adv=to_float(row["home_adv"]),
-            )
-            for row in rows
-        }
+        ratings = _ratings_from_rows(csv.DictReader(fh))
+    if not include_history_overlay:
+        return ratings
     history_path = DATA_DIR / "team_history_features.csv"
     if history_path.exists():
         with history_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -125,35 +121,94 @@ def load_ratings() -> dict[str, TeamRating]:
     return ratings
 
 
-def load_fixtures() -> list[Fixture]:
-    path = DATA_DIR / "fixtures.csv"
+def _ratings_from_rows(rows) -> dict[str, TeamRating]:
+    return {
+        row["team"].strip(): TeamRating(
+            team=row["team"].strip(),
+            elo=to_float(row["elo"]),
+            attack=to_float(row["attack"]),
+            defense=to_float(row["defense"]),
+            form=to_float(row["form"]),
+            injury=to_float(row["injury"]),
+            rest_days=to_float(row["rest_days"], 3.0),
+            home_adv=to_float(row["home_adv"]),
+        )
+        for row in rows
+    }
+
+
+def load_fixtures(path: Path | None = None) -> list[Fixture]:
+    path = path or DATA_DIR / "fixtures.csv"
     with path.open("r", encoding="utf-8-sig", newline="") as fh:
-        rows = csv.DictReader(fh)
-        fixtures = []
-        for row in rows:
-            fixtures.append(
-                Fixture(
-                    match_date=datetime.strptime(row["date"].strip(), "%Y-%m-%d").date(),
-                    kickoff_local=row["kickoff_local"].strip(),
-                    kickoff_at=required_kickoff_at(row),
-                    stage=row["stage"].strip().lower(),
-                    team_a=row["team_a"].strip(),
-                    team_b=row["team_b"].strip(),
-                    neutral=row["neutral"].strip().lower() in {"true", "1", "yes", "y"},
-                    venue=row["venue"].strip(),
-                    odds_a=to_optional_float(row.get("odds_a", "")),
-                    odds_draw=to_optional_float(row.get("odds_draw", "")),
-                    odds_b=to_optional_float(row.get("odds_b", "")),
-                    market_odds_a=to_optional_float(row.get("market_odds_a", "")),
-                    market_odds_draw=to_optional_float(row.get("market_odds_draw", "")),
-                    market_odds_b=to_optional_float(row.get("market_odds_b", "")),
-                    analysis_source=(row.get("analysis_source", "") or "").strip(),
-                    is_single_had=(row.get("is_single_had", "") or "").strip().lower() in {"true", "1", "yes"},
-                    match_num=(row.get("match_num", "") or "").strip(),
-                    match_id=(row.get("match_id", "") or "").strip(),
-                )
+        return _fixtures_from_rows(csv.DictReader(fh))
+
+
+def _fixtures_from_rows(rows) -> list[Fixture]:
+    fixtures = []
+    for row in rows:
+        fixtures.append(
+            Fixture(
+                match_date=datetime.strptime(row["date"].strip(), "%Y-%m-%d").date(),
+                kickoff_local=row["kickoff_local"].strip(),
+                kickoff_at=required_kickoff_at(row),
+                stage=row["stage"].strip().lower(),
+                team_a=row["team_a"].strip(),
+                team_b=row["team_b"].strip(),
+                neutral=row["neutral"].strip().lower() in {"true", "1", "yes", "y"},
+                venue=row["venue"].strip(),
+                odds_a=to_optional_float(row.get("odds_a", "")),
+                odds_draw=to_optional_float(row.get("odds_draw", "")),
+                odds_b=to_optional_float(row.get("odds_b", "")),
+                market_odds_a=to_optional_float(row.get("market_odds_a", "")),
+                market_odds_draw=to_optional_float(row.get("market_odds_draw", "")),
+                market_odds_b=to_optional_float(row.get("market_odds_b", "")),
+                analysis_source=(row.get("analysis_source", "") or "").strip(),
+                is_single_had=(row.get("is_single_had", "") or "").strip().lower() in {"true", "1", "yes"},
+                match_num=(row.get("match_num", "") or "").strip(),
+                match_id=(row.get("match_id", "") or "").strip(),
             )
-        return fixtures
+        )
+    return fixtures
+
+
+def load_manifest_prediction_inputs(
+    target_date: date,
+    root: Path | None = None,
+) -> tuple[dict[str, TeamRating], list[Fixture], dict[str, dict]]:
+    root = Path(root or ROOT).resolve()
+    manifest = read_valid_import_manifest(root, target_date)
+    records = {
+        key: dict(manifest[key])
+        for key in ("fixtures", "ratings")
+    }
+    fixture_bytes = _bound_manifest_bytes(root, records["fixtures"])
+    ratings_bytes = _bound_manifest_bytes(root, records["ratings"])
+    fixtures = _fixtures_from_rows(
+        _csv_rows_from_bytes(fixture_bytes, "fixture extract")
+    )
+    ratings = _ratings_from_rows(
+        _csv_rows_from_bytes(ratings_bytes, "ratings extract")
+    )
+    return ratings, fixtures, records
+
+
+def _bound_manifest_bytes(root: Path, record: dict) -> bytes:
+    payload = (root / record["path"]).read_bytes()
+    if (
+        len(payload) != record["bytes"]
+        or hashlib.sha256(payload).hexdigest() != record["sha256"]
+    ):
+        raise ValueError("prediction manifest input hash differs")
+    return payload
+
+
+def _csv_rows_from_bytes(payload: bytes, name: str) -> list[dict[str, str]]:
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{name} must be UTF-8 CSV") from exc
+    with io.StringIO(text, newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -401,8 +456,14 @@ def main() -> int:
 
     target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     config = read_config()
-    ratings = load_ratings()
-    fixtures = [fixture for fixture in load_fixtures() if fixture.match_date == target_date]
+    ratings, manifest_fixtures, consumed_inputs = load_manifest_prediction_inputs(
+        target_date
+    )
+    fixtures = [
+        fixture
+        for fixture in manifest_fixtures
+        if fixture.match_date == target_date
+    ]
     predictions = [predict_fixture(fixture, ratings, config) for fixture in fixtures]
     report = markdown_report(predictions, target_date)
 
@@ -413,7 +474,10 @@ def main() -> int:
         md_path.write_text(report, encoding="utf-8")
         csv_path = write_csv(predictions, target_date)
         metadata_path = write_prediction_metadata(
-            ROOT, target_date, datetime.now(BEIJING)
+            ROOT,
+            target_date,
+            datetime.now(BEIJING),
+            consumed_manifest_inputs=consumed_inputs,
         )
         print(f"已生成: {md_path}")
         print(f"已生成: {csv_path}")
