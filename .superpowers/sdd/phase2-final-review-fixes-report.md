@@ -598,3 +598,131 @@ Result: expected exit 1 with `ValueError: activation audit has not passed`.
   new paid ingestion because they lack deterministic plan evidence. Activation
   still requires a future prospective pre-kickoff schema-3 bundle and passing
   immutable audit; readiness correctly remains unavailable until then.
+
+## Final Targeted Wave: Canonical Cutover and Immutable Ratings
+
+This wave resolves the remaining Important and Minor findings assigned on top
+of `ade37645a8ad4139ae9d33fd7304a8ce50bff168`.
+
+### Resolution
+
+1. `betting_ledger.py` now applies an audited canonical paid-ledger cutover of
+   `2026-07-18`. Every row whose effective report date is on or after the
+   cutover is classified as canonical before inspecting `strategy_version`,
+   `bet_id`, row digest, or any other optional marker. Settlement therefore
+   requires a valid schema-3 plan lock and exact immutable plan-evidence
+   membership. Replacing the supplied ID and stripping all markers fails for
+   both singles and parlays, with a valid lock or with the lock missing.
+   Genuine pre-cutover legacy rows, including the audited 2026-07-11 and
+   2026-07-12 history, retain legacy migration and stable IDs.
+2. Import-manifest schema 2 now publishes and hashes
+   `data/import_extracts/<date>/ratings.csv` alongside exact fixture and odds
+   extracts. Prediction metadata and decision bundles consume that immutable
+   ratings record. Existing-manifest recovery restores the exact manifest-era
+   ratings bytes, so later shared Elo edits or newly added teams cannot leak
+   into a same-date recovery.
+3. Temporary raw review artifacts
+   `review-phase2-final-fixes3-42518de..f06b0a8.diff` and
+   `review-phase2-final-fixes4-c744418..a565572.diff` were removed. The
+   human-readable report and the earlier f1/f2 historical packages remain.
+
+### RED/GREEN Evidence
+
+All Python commands used
+`.superpowers\sdd\runtime\verify-venv\Scripts\python.exe`.
+
+Canonical-cutover RED/GREEN:
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_plan_lock.PlanLockTest.test_cutover_rejects_replaced_ids_and_stripped_markers_with_valid_lock tests.test_plan_lock.PlanLockTest.test_cutover_rejects_replaced_ids_and_stripped_markers_without_lock tests.test_plan_lock.PlanLockTest.test_pre_cutover_legacy_row_migrates_without_a_lock -v
+```
+
+RED: 3 tests ran; four attack subtests failed because changed IDs with stripped
+markers entered legacy migration, while the pre-cutover control passed. GREEN:
+the identical command passed all 3 tests in 0.475 seconds. The combined ledger
+and plan-lock suites then passed 89 tests in 4.250 seconds.
+
+Immutable-ratings RED/GREEN:
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_import_sporttery.ImportManifestTest.test_manifest_is_immutable_idempotent_and_hash_validated tests.test_import_sporttery.ImportManifestTest.test_same_date_manifest_recovers_changed_shared_files_without_refetch -v
+```
+
+RED: 2 tests ran with 1 error (`KeyError: ratings`) and 1 failure because
+recovery retained the mutated shared ratings bytes. GREEN: the identical
+command passed both tests in 0.100 seconds. The complete import suite passed 23
+tests in 0.345 seconds, and the cross-evidence suite passed 111 tests in 8.722
+seconds.
+
+### Final Verification
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_betting_ledger tests.test_update_sporttery_results tests.test_shadow_portfolio_audit tests.test_decision_bundle tests.test_plan_lock tests.test_import_sporttery tests.test_capture_odds_snapshot
+```
+
+Result: 175 focused Python tests passed in 7.086 seconds.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
+
+Result: 562 tests passed in 20.791 seconds.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m unittest tests.test_workflow_schedule -q
+```
+
+Result: 39 workflow shell/order tests passed in 7.946 seconds.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -m py_compile betting_ledger.py decision_bundle.py import_sporttery.py tests\test_capture_odds_snapshot.py tests\test_decision_bundle.py tests\test_import_sporttery.py tests\test_plan_lock.py tests\test_report_status.py tests\test_shadow_portfolio_audit.py tests\test_workflow_schedule.py
+```
+
+Result: all 10 changed Python modules compiled with exit 0 and no output.
+
+```powershell
+C:\Users\87562\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe --test tests\apps_script_orchestrator.test.mjs
+```
+
+Result: 42 Node tests passed, 0 failed.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe audit_shadow_portfolio.py --from 2026-07-11 --through 2026-07-18
+```
+
+Result: expected exit 1 with `checked_dates: []`, all eight dates in
+`excluded_missing`, `passed: false`, and one violation.
+
+```powershell
+.superpowers\sdd\runtime\verify-venv\Scripts\python.exe -c "from pathlib import Path; from activation_readiness import assert_activation_ready; assert_activation_ready(Path.cwd())"
+```
+
+Result: expected exit 1 with `ValueError: activation audit has not passed`.
+
+```powershell
+git diff --check ed7dba6aeb21ed54bed080a55b554d59d95cb26a..HEAD
+```
+
+Result: exit 0 with no output.
+
+### Activation, Files, Commits, and Concerns
+
+- Activation remains `shadow`; simulation-only/no-real-money controls are
+  unchanged. No July 18 import, snapshot, prediction, lock, or other real
+  evidence was captured or fabricated.
+- Production files changed: `betting_ledger.py`, `decision_bundle.py`, and
+  `import_sporttery.py`.
+- Tests/callers changed: `tests/test_import_sporttery.py`,
+  `tests/test_plan_lock.py`, `tests/test_capture_odds_snapshot.py`,
+  `tests/test_decision_bundle.py`, `tests/test_report_status.py`,
+  `tests/test_shadow_portfolio_audit.py`, and
+  `tests/test_workflow_schedule.py`.
+- Production/tests commit:
+  `f8c682236789e01ad89acdf90d3e8874142fc1cb`.
+- The cleanup/report commit SHA is supplied in the delivery response so this
+  report does not contain a circular self-reference.
+- Remaining concern: existing schema-1 import manifests do not contain an
+  immutable ratings extract and therefore cannot satisfy the prospective
+  schema-2 evidence contract. Activation still requires a new honest
+  pre-kickoff schema-2 import, schema-3 decision bundle/lock, and passing
+  immutable audit. Readiness correctly remains unavailable until then.
