@@ -26,6 +26,18 @@ VALUE_V4_TOTAL_GOALS_SELECTIONS = frozenset(TOTAL_GOALS_SELECTIONS.values())
 TERMINAL_STATUSES = frozenset({WON, LOST, REFUNDED})
 MONEY_ZERO = Decimal("0.00")
 MONEY_QUANTUM = Decimal("0.01")
+PAID_STAKE_UNIT = Decimal("2")
+HARD_DAILY_STAKE = Decimal("500")
+HARD_MONTHLY_STAKE = Decimal("5000")
+HARD_MONTHLY_STOP_LOSS = Decimal("5000")
+HARD_MATCH_EXPOSURE = Decimal("200")
+HARD_PARLAY_STAKE = Decimal("30")
+HARD_SINGLE_STAKE = Decimal("200")
+HARD_SINGLE_BUDGET = Decimal("200")
+HARD_SINGLE_COUNT = 2
+HARD_PARLAY_COUNT = 1
+MAX_VALUE_V4_KELLY = Decimal("0.25")
+NEW_PAID_STRATEGY_VERSIONS = frozenset({"legacy-v3", "value-v4"})
 
 REQUIRED_FIELD_ORDER = (
     "bet_id", "date", "report_date", "strategy_version", "model_version",
@@ -55,7 +67,6 @@ def ingest_locked_plan(existing_rows: list[dict], plan_rows: list[dict], lock: d
     lock_source = _validate_lock(lock)
     if not isinstance(existing_rows, list) or not isinstance(plan_rows, list):
         raise ValueError("ledger and plan rows must be lists")
-    _validate_value_v4_portfolio(plan_rows, lock_source)
 
     ingested: list[dict] = []
     known_ids: set[str] = set()
@@ -67,17 +78,197 @@ def ingest_locked_plan(existing_rows: list[dict], plan_rows: list[dict], lock: d
         known_ids.add(bet_id)
         ingested.append(row)
 
+    new_rows: list[tuple[dict, str]] = []
+    plan_ids: set[str] = set()
     for source_row in plan_rows:
         if not isinstance(source_row, dict):
             raise ValueError("plan row must be a mapping")
         if source_row.get("date") != lock["report_date"]:
             raise ValueError("plan date must match lock report_date")
         bet_id = stable_bet_id(source_row)
+        if bet_id in plan_ids:
+            raise ValueError("duplicate canonical identity in locked plan")
+        plan_ids.add(bet_id)
         if bet_id in known_ids:
             continue
-        known_ids.add(bet_id)
+        new_rows.append((source_row, bet_id))
+
+    if not new_rows:
+        return ingested
+
+    _validate_new_paid_rows(
+        ingested,
+        [row for row, _bet_id in new_rows],
+        lock_source,
+        lock["report_date"],
+    )
+    for source_row, bet_id in new_rows:
         ingested.append(_new_locked_row(source_row, lock, lock_source, bet_id))
     return ingested
+
+
+def _validate_new_paid_rows(
+    existing_rows: list[dict],
+    new_rows: list[dict],
+    lock_source: str,
+    report_date: str,
+) -> None:
+    new_stakes: dict[int, Decimal] = {}
+    for row in new_rows:
+        strategy_version = _required_text(
+            row.get("strategy_version"), "strategy_version"
+        )
+        if strategy_version not in NEW_PAID_STRATEGY_VERSIONS:
+            raise ValueError("strategy_version is not permitted for new paid rows")
+        stake = _paid_stake(row.get("stake"))
+        new_stakes[id(row)] = stake
+        source = _required_text(row.get("odds_source"), "odds_source").lower()
+        if source not in DOMESTIC_ODDS_SOURCES or source != lock_source:
+            raise ValueError("paid row odds source must match the domestic lock source")
+        _required_text(row.get("odds_source_record_id"), "odds_source_record_id")
+        _aware_iso(row.get("odds_captured_at_bjt"), "odds_captured_at_bjt")
+        display_odds = _decimal_odds(row.get("odds"), "odds")
+        locked_odds = _decimal_odds(row.get("locked_odds"), "locked_odds")
+        if not _is_parlay(row) and display_odds != locked_odds:
+            raise ValueError("single odds and locked_odds must be exactly equal")
+        if strategy_version == "value-v4":
+            _value_v4_kelly(row.get("kelly_fraction"))
+
+    _validate_value_v4_portfolio(new_rows, lock_source)
+    _validate_paid_account_caps(
+        existing_rows, new_rows, new_stakes, report_date
+    )
+
+
+def _validate_paid_account_caps(
+    existing_rows: list[dict],
+    new_rows: list[dict],
+    new_stakes: dict[int, Decimal],
+    report_date: str,
+) -> None:
+    target = date.fromisoformat(report_date)
+    monthly_existing = [
+        row for row in existing_rows if _row_month(row) == (target.year, target.month)
+    ]
+    daily_existing = [
+        row for row in monthly_existing if _row_date(row) == target
+    ]
+    new_total = sum(new_stakes.values(), MONEY_ZERO)
+    daily_total = sum((_account_stake(row) for row in daily_existing), MONEY_ZERO) + new_total
+    if daily_total > HARD_DAILY_STAKE:
+        raise ValueError("daily paid stake exceeds 500")
+
+    monthly_total = sum(
+        (_account_stake(row) for row in monthly_existing), MONEY_ZERO
+    ) + new_total
+    if monthly_total > HARD_MONTHLY_STAKE:
+        raise ValueError("monthly paid stake exceeds 5000")
+
+    realized_profit = sum(
+        (
+            _account_decimal(row.get("profit"))
+            for row in monthly_existing
+            if row.get("status") in TERMINAL_STATUSES
+        ),
+        MONEY_ZERO,
+    )
+    if realized_profit <= -HARD_MONTHLY_STOP_LOSS:
+        raise ValueError("monthly stop loss blocks new paid stake")
+
+    daily_rows = [(row, _account_stake(row)) for row in daily_existing]
+    daily_rows.extend((row, new_stakes[id(row)]) for row in new_rows)
+    parlays = [(row, stake) for row, stake in daily_rows if _is_parlay(row)]
+    singles = [(row, stake) for row, stake in daily_rows if not _is_parlay(row)]
+    if any(stake > HARD_SINGLE_STAKE for _row, stake in singles):
+        raise ValueError("single stake exceeds 200")
+
+    match_exposure: dict[str, Decimal] = {}
+    for row, stake in daily_rows:
+        for match_id in _account_match_ids(row):
+            match_exposure[match_id] = match_exposure.get(match_id, MONEY_ZERO) + stake
+    if any(exposure > HARD_MATCH_EXPOSURE for exposure in match_exposure.values()):
+        raise ValueError("match exposure exceeds 200")
+
+    if sum((stake for _row, stake in parlays), MONEY_ZERO) > HARD_PARLAY_STAKE:
+        raise ValueError("parlay stake exceeds 30")
+    if len(parlays) > HARD_PARLAY_COUNT:
+        raise ValueError("parlay count exceeds 1")
+    if len(singles) > HARD_SINGLE_COUNT:
+        raise ValueError("single count exceeds 2")
+    if sum((stake for _row, stake in singles), MONEY_ZERO) > HARD_SINGLE_BUDGET:
+        raise ValueError("single budget exceeds 200")
+
+
+def _paid_stake(value: object) -> Decimal:
+    stake = _required_decimal(value, "stake")
+    if stake <= MONEY_ZERO:
+        raise ValueError("stake must be positive")
+    if stake % PAID_STAKE_UNIT != MONEY_ZERO:
+        raise ValueError("stake must use exact 2-yuan units")
+    return stake
+
+
+def _value_v4_kelly(value: object) -> Decimal:
+    kelly = _required_decimal(value, "Kelly fraction")
+    if kelly <= MONEY_ZERO or kelly > MAX_VALUE_V4_KELLY:
+        raise ValueError("value-v4 Kelly fraction must be positive and at most 0.25")
+    return kelly
+
+
+def _required_decimal(value: object, name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be finite decimal")
+    try:
+        result = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{name} must be finite decimal") from exc
+    if not result.is_finite():
+        raise ValueError(f"{name} must be finite decimal")
+    return result
+
+
+def _row_date(row: dict) -> date | None:
+    value = row.get("report_date") or row.get("date")
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _row_month(row: dict) -> tuple[int, int] | None:
+    parsed = _row_date(row)
+    return None if parsed is None else (parsed.year, parsed.month)
+
+
+def _account_decimal(value: object) -> Decimal:
+    try:
+        amount = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return MONEY_ZERO
+    return amount if amount.is_finite() else MONEY_ZERO
+
+
+def _account_stake(row: dict) -> Decimal:
+    stake = _account_decimal(row.get("stake"))
+    return stake if stake > MONEY_ZERO else MONEY_ZERO
+
+
+def _account_match_ids(row: dict) -> list[str]:
+    try:
+        if _is_parlay(row):
+            try:
+                legs = _canonical_legs(row, allow_legacy_match=True)
+            except ValueError:
+                canonical_row = dict(row)
+                canonical_row.pop("legs", None)
+                canonical_row["legs_json"] = row.get("canonical_legs_json")
+                legs = _canonical_legs(canonical_row, allow_legacy_match=True)
+            return sorted({leg["match_id"] for leg in legs})
+        return [_canonical_match_id(row.get("match_id"), allow_legacy_match=True)]
+    except ValueError:
+        return []
 
 
 def _validate_value_v4_portfolio(plan_rows: list[dict], lock_source: str) -> None:
@@ -130,7 +321,7 @@ def _validate_value_v4_portfolio(plan_rows: list[dict], lock_source: str) -> Non
         line = _line_value(row.get("market_line", row.get("line", "")))
         _validate_value_v4_market(market_type, selection, line, "single")
     if parlays > 1:
-        raise ValueError("value-v4 permits at most one parlay")
+        raise ValueError("value-v4 parlay count exceeds 1")
 
 
 def _validate_value_v4_market(
@@ -163,6 +354,87 @@ def _decimal_odds(value: object, name: str) -> Decimal:
     if not odds.is_finite() or odds <= Decimal("1"):
         raise ValueError(f"{name} must be finite decimal odds greater than one")
     return odds
+
+
+def update_observation_ledger(
+    existing_rows: list[dict],
+    plan_rows: list[dict],
+    results: dict,
+    settled_at: datetime,
+) -> list[dict]:
+    """Append canonical zero-stake observations and settle them canonically."""
+    if not isinstance(existing_rows, list) or not isinstance(plan_rows, list):
+        raise ValueError("observation ledger and plan rows must be lists")
+    if not isinstance(results, dict):
+        raise ValueError("observation results must be a mapping")
+
+    rows: list[dict] = []
+    known_ids: set[str] = set()
+    for source_row in existing_rows:
+        if not isinstance(source_row, dict):
+            raise ValueError("existing observation row must be a mapping")
+        row = dict(source_row)
+        bet_id = row.get("bet_id")
+        if isinstance(bet_id, str) and bet_id:
+            known_ids.add(bet_id)
+        rows.append(row)
+
+    for source_row in plan_rows:
+        bet_id = _validate_new_observation(source_row)
+        if bet_id in known_ids:
+            continue
+        known_ids.add(bet_id)
+        rows.append(_new_observation_row(source_row, bet_id))
+    return settle_pending(rows, results, settled_at)
+
+
+def _validate_new_observation(row: dict) -> str:
+    if not isinstance(row, dict):
+        raise ValueError("observation plan row must be a mapping")
+    if _required_text(row.get("strategy_version"), "strategy_version") != "value-v4":
+        raise ValueError("observation strategy_version must be value-v4")
+    if _required_decimal(row.get("stake"), "observation stake") != MONEY_ZERO:
+        raise ValueError("observation row must have zero stake")
+
+    market_type = _required_text(row.get("market_type"), "market_type").lower()
+    if market_type not in VALUE_V4_SINGLE_MARKETS:
+        raise ValueError("observation market is unsupported")
+    if _required_text(row.get("play"), "play") != VALUE_V4_PLAY_BY_MARKET[market_type]:
+        raise ValueError("observation play must match market_type")
+    _canonical_match_id(row.get("match_id"))
+    selection = _required_text(row.get("selection"), "selection")
+    line = _line_value(row.get("market_line", row.get("line", "")))
+    _validate_value_v4_market(market_type, selection, line, "observation")
+
+    source = _required_text(row.get("odds_source"), "odds_source").lower()
+    if source not in DOMESTIC_ODDS_SOURCES:
+        raise ValueError("observation odds source must be domestic")
+    _required_text(row.get("odds_source_record_id"), "odds_source_record_id")
+    _aware_iso(row.get("odds_captured_at_bjt"), "odds_captured_at_bjt")
+    display_odds = _decimal_odds(row.get("odds"), "odds")
+    locked_odds = _decimal_odds(row.get("locked_odds"), "locked_odds")
+    if display_odds != locked_odds:
+        raise ValueError("observation odds and locked_odds must be exactly equal")
+
+    bet_id = stable_bet_id(row)
+    provided_id = row.get("bet_id")
+    if provided_id not in (None, "") and provided_id != bet_id:
+        raise ValueError("observation bet_id must equal its canonical stable bet_id")
+    return bet_id
+
+
+def _new_observation_row(source_row: dict, bet_id: str) -> dict:
+    row = dict(source_row)
+    row["bet_id"] = bet_id
+    row["status"] = PENDING
+    for field in (
+        "result_status", "result_source", "source_record_id", "captured_at_bjt",
+        "home_goals", "away_goals", "settled_at_bjt", "result_legs_json", "clv",
+    ):
+        row[field] = ""
+    row["return"] = "0.00"
+    row["profit"] = "0.00"
+    return row
 
 
 def settle_pending(

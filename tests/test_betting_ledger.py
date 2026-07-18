@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from betting_ledger import (
     stable_bet_id,
     write_ledger_atomic,
 )
+from official_markets import THREE_WAY_SELECTIONS, TOTAL_GOALS_SELECTIONS
 from plan_lock import sha256_file
 
 
@@ -120,7 +122,212 @@ def v4_leg(match_id, market_type, selection, odds):
     }
 
 
+def v4_parlay_row(prefix="parlay", stake="10"):
+    legs = [
+        v4_leg(f"{prefix}-1", "had", "胜", "2.00"),
+        v4_leg(f"{prefix}-2", "ttg", "2球", "3.00"),
+    ]
+    return plan_row(
+        play="PARLAY",
+        market_type="parlay",
+        match_id="",
+        odds="6.00",
+        locked_odds="6.00",
+        stake=stake,
+        legs_json=json.dumps(legs, ensure_ascii=False),
+    )
+
+
 class IdentityAndIngestionTest(unittest.TestCase):
+    def test_new_paid_rows_reject_invalid_boundary_fields_and_versions(self):
+        valid = plan_row()
+        cases = (
+            ("unknown version", [{**valid, "strategy_version": "value-v5"}], "strategy_version"),
+            ("zero stake", [{**valid, "stake": "0"}], "positive"),
+            ("nonfinite stake", [{**valid, "stake": "NaN"}], "stake"),
+            ("wrong stake unit", [{**valid, "stake": "3"}], "2-yuan"),
+            ("unsupported source", [{**valid, "odds_source": "external"}], "source"),
+            ("lock source mismatch", [{**valid, "odds_source": "zgzcw"}], "source"),
+            ("missing source record", [{**valid, "odds_source_record_id": ""}], "record"),
+            ("naive capture", [{**valid, "odds_captured_at_bjt": "2026-07-16T13:30:00"}], "timezone"),
+            ("nonfinite odds", [{**valid, "odds": "NaN"}], "odds"),
+            ("invalid locked odds", [{**valid, "locked_odds": "1.00"}], "locked_odds"),
+            ("single price mismatch", [{**valid, "odds": "2.01"}], "equal"),
+            ("zero Kelly", [{**valid, "kelly_fraction": "0"}], "Kelly"),
+            ("excess Kelly", [{**valid, "kelly_fraction": "0.26"}], "Kelly"),
+            ("nonfinite Kelly", [{**valid, "kelly_fraction": "NaN"}], "Kelly"),
+            ("duplicate identity", [valid, copy.deepcopy(valid)], "duplicate"),
+        )
+        for name, rows, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+                ingest_locked_plan([], rows, lock())
+
+        legacy = plan_row(strategy_version="legacy-v3", kelly_fraction="")
+        self.assertEqual(1, len(ingest_locked_plan([], [legacy], lock())))
+
+    def test_new_paid_rows_enforce_daily_monthly_loss_and_portfolio_caps(self):
+        def history(
+            bet_id,
+            *,
+            row_date="2026-07-16",
+            stake="0",
+            market_type="historical",
+            match_id="history",
+            status=PENDING,
+            profit="0.00",
+        ):
+            return {
+                "bet_id": bet_id,
+                "date": row_date,
+                "strategy_version": "historical-v1",
+                "play": "historical",
+                "market_type": market_type,
+                "match_id": match_id,
+                "selection": "historical",
+                "stake": stake,
+                "status": status,
+                "profit": profit,
+            }
+
+        cap_cases = (
+            (
+                "daily stake",
+                [history("daily", stake="490")],
+                [plan_row(match_id="daily-new", stake="20")],
+                "daily",
+            ),
+            (
+                "monthly stake",
+                [history("monthly", row_date="2026-07-01", stake="4990")],
+                [plan_row(match_id="monthly-new", stake="20")],
+                "monthly",
+            ),
+            (
+                "monthly stop loss",
+                [history(
+                    "loss", row_date="2026-07-01", stake="2", status=LOST, profit="-5000"
+                )],
+                [plan_row(match_id="loss-new", stake="20")],
+                "stop loss",
+            ),
+            (
+                "match exposure",
+                [history("match", stake="190", market_type="had", match_id="1001")],
+                [plan_row(match_id="1001", stake="20")],
+                "match exposure",
+            ),
+            (
+                "canonical existing parlay match exposure",
+                [
+                    {
+                        **history(
+                            "canonical-parlay",
+                            stake="30",
+                            market_type="parlay",
+                            match_id="",
+                        ),
+                        "canonical_legs_json": json.dumps([
+                            {
+                                "match_id": "shared-match",
+                                "market_type": "had",
+                                "selection": THREE_WAY_SELECTIONS["h"],
+                                "line": "",
+                            },
+                            {
+                                "match_id": "other-match",
+                                "market_type": "ttg",
+                                "selection": TOTAL_GOALS_SELECTIONS["s2"],
+                                "line": "",
+                            },
+                        ], ensure_ascii=False),
+                    },
+                    history(
+                        "shared-single",
+                        stake="160",
+                        market_type="had",
+                        match_id="shared-match",
+                    ),
+                ],
+                [plan_row(match_id="shared-match", stake="20")],
+                "match exposure",
+            ),
+            ("parlay stake", [], [v4_parlay_row("large", stake="32")], "parlay stake"),
+            (
+                "parlay count",
+                [],
+                [v4_parlay_row("first"), v4_parlay_row("second")],
+                "parlay count",
+            ),
+            (
+                "single count",
+                [],
+                [plan_row(match_id=f"single-{index}", stake="2") for index in range(3)],
+                "single count",
+            ),
+            (
+                "single stake",
+                [],
+                [plan_row(match_id="single-large", stake="202")],
+                "single stake",
+            ),
+            (
+                "single budget",
+                [],
+                [
+                    plan_row(match_id="single-a", stake="102"),
+                    plan_row(match_id="single-b", stake="102"),
+                ],
+                "single budget",
+            ),
+        )
+        for name, existing, rows, message in cap_cases:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+                ingest_locked_plan(existing, rows, lock())
+
+        stale_month = [
+            history(
+                "stale-month",
+                row_date="2026-06-30",
+                stake="5000",
+                status=LOST,
+                profit="-5000",
+            )
+        ]
+        self.assertEqual(
+            2,
+            len(ingest_locked_plan(
+                stale_month,
+                [plan_row(match_id="current-month", stake="20")],
+                lock(),
+            )),
+        )
+
+    def test_idempotent_rerun_at_allocation_and_monthly_caps_adds_no_exposure(self):
+        prior = {
+            "bet_id": "prior-month-stake",
+            "date": "2026-07-01",
+            "strategy_version": "historical-v1",
+            "play": "historical",
+            "market_type": "historical",
+            "match_id": "prior",
+            "selection": "historical",
+            "stake": "4770",
+            "status": PENDING,
+            "profit": "0.00",
+        }
+        plan = [
+            plan_row(match_id="cap-single-1", stake="100"),
+            plan_row(match_id="cap-single-2", stake="100"),
+            v4_parlay_row("cap-parlay", stake="30"),
+        ]
+
+        first = ingest_locked_plan([prior, copy.deepcopy(prior)], plan, lock())
+        rerun = ingest_locked_plan(first, plan, lock())
+
+        self.assertEqual(first, rerun)
+        self.assertEqual(4, len(rerun))
+        self.assertEqual(Decimal("5000"), sum(Decimal(row["stake"]) for row in rerun))
+
     def test_value_v4_parlay_requires_leg_evidence_and_exact_decimal_product(self):
         legs = [
             v4_leg("1001", "had", "胜", "2.00"),
@@ -716,6 +923,77 @@ class SettlementTest(unittest.TestCase):
         self.assertEqual(settled, second)
         changed = {key for key in settled[0] if settled[0].get(key) != pending[0].get(key)}
         self.assertTrue(changed.issubset({"status", "result_status", "result_source", "source_record_id", "captured_at_bjt", "home_goals", "away_goals", "return", "profit", "result_legs_json", "settled_at_bjt"}))
+
+    def test_canonical_observation_lifecycle_preserves_fields_and_settles_all_markets(self):
+        observations = [
+            plan_row(
+                match_id="obs-had",
+                stake="0",
+                model_version="model-observation",
+                raw_probability="0.61",
+            ),
+            plan_row(
+                match_id="obs-hhad",
+                play="HHAD",
+                market_type="hhad",
+                market_line="-1",
+                selection=THREE_WAY_SELECTIONS["d"],
+                stake="0",
+            ),
+            plan_row(
+                match_id="obs-ttg",
+                play="TTG",
+                market_type="ttg",
+                selection=TOTAL_GOALS_SELECTIONS["s3"],
+                stake="0",
+            ),
+        ]
+        results = {
+            "obs-had": finished("obs-had", 2, 1),
+            "obs-hhad": finished("obs-hhad", 2, 1),
+            "obs-ttg": finished("obs-ttg", 2, 1),
+        }
+
+        settled = ledger_module.update_observation_ledger(
+            [], observations, results, SETTLED_AT
+        )
+
+        self.assertEqual(3, len(settled))
+        self.assertEqual({WON}, {row["status"] for row in settled})
+        self.assertEqual({"0"}, {str(row["stake"]) for row in settled})
+        self.assertEqual(
+            {stable_bet_id(row) for row in observations},
+            {row["bet_id"] for row in settled},
+        )
+        self.assertEqual("model-observation", settled[0]["model_version"])
+        self.assertEqual("0.61", settled[0]["raw_probability"])
+        self.assertTrue(all(row["odds_source_record_id"] for row in settled))
+
+        repeated = ledger_module.update_observation_ledger(
+            settled,
+            observations,
+            {
+                "obs-had": finished("obs-had", 0, 1, "later"),
+                "obs-hhad": finished("obs-hhad", 0, 3, "later"),
+                "obs-ttg": finished("obs-ttg", 0, 0, "later"),
+            },
+            SETTLED_AT + timedelta(days=1),
+        )
+        self.assertEqual(settled, repeated)
+
+    def test_new_observations_reject_nonzero_unsupported_or_malformed_rows(self):
+        valid = plan_row(stake="0")
+        cases = (
+            ("nonzero stake", {**valid, "stake": "2"}, "zero stake"),
+            ("unsupported version", {**valid, "strategy_version": "legacy-v3"}, "strategy_version"),
+            ("unsupported market", {**valid, "market_type": "parlay"}, "market"),
+            ("spoofed identity", {**valid, "bet_id": "not-canonical"}, "bet_id"),
+            ("price mismatch", {**valid, "odds": "2.01"}, "equal"),
+            ("missing evidence", {**valid, "odds_source_record_id": ""}, "record"),
+        )
+        for name, row, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+                ledger_module.update_observation_ledger([], [row], {}, SETTLED_AT)
 
 
 class LockedIngestCommandTest(unittest.TestCase):

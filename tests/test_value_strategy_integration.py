@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import generate_betting_plan as strategy
+import betting_ledger as ledger_module
 from betting_ledger import ingest_date
 from official_markets import normalize_market
 from plan_lock import lock_plan
@@ -329,11 +330,17 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
             root = Path(folder)
             (root / "data").mkdir()
             ledger_path = root / "output" / "betting_ledger.csv"
+            observation_path = root / "output" / "observation_ledger.csv"
             with (
                 patch.object(strategy, "ROOT", root),
                 patch.object(strategy, "OUTPUT_DIR", root / "output"),
                 patch.object(strategy, "DATA_DIR", root / "data"),
                 patch.object(strategy, "settle_ledger", return_value=ledger_path) as settle_mock,
+                patch.object(
+                    strategy,
+                    "write_observation_ledger",
+                    return_value=observation_path,
+                ) as observation_mock,
                 patch.object(strategy, "build_strategy_outputs", side_effect=AssertionError("generated")),
                 patch.object(sys, "argv", [
                     "generate_betting_plan.py", "--date", str(TARGET_DATE), "--settle-only"
@@ -344,6 +351,139 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual(root, settle_mock.call_args.args[0])
         self.assertEqual({}, settle_mock.call_args.args[1])
+        self.assertEqual({}, observation_mock.call_args.args[0])
+
+    def test_settle_only_updates_canonical_observations_without_touching_paid_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "output"
+            data = root / "data"
+            output.mkdir()
+            data.mkdir()
+            observations = [
+                strategy._candidate_plan_row(
+                    candidate("obs-had", market_type="had"),
+                    0,
+                    locked_at=LOCKED_AT,
+                    portfolio_rank=0,
+                ),
+                strategy._candidate_plan_row(
+                    candidate("obs-hhad", market_type="hhad"),
+                    0,
+                    locked_at=LOCKED_AT,
+                    portfolio_rank=0,
+                ),
+                strategy._candidate_plan_row(
+                    candidate("obs-ttg", market_type="ttg"),
+                    0,
+                    locked_at=LOCKED_AT,
+                    portfolio_rank=0,
+                ),
+            ]
+            result_rows = [
+                {
+                    "match_id": match_id,
+                    "result_status": "finished",
+                    "home_goals": home,
+                    "away_goals": away,
+                    "result_source": "sporttery",
+                    "source_record_id": f"result-{match_id}",
+                    "captured_at_bjt": "2026-07-19T09:00:00+08:00",
+                }
+                for match_id, home, away in (
+                    ("obs-had", "2", "1"),
+                    ("obs-hhad", "1", "1"),
+                    ("obs-ttg", "2", "0"),
+                )
+            ]
+            with (data / "bet_results.csv").open(
+                "w", encoding="utf-8-sig", newline=""
+            ) as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(result_rows[0]))
+                writer.writeheader()
+                writer.writerows(result_rows)
+            ledger_module.write_ledger_atomic(output / "betting_ledger.csv", [])
+
+            with (
+                patch.object(strategy, "ROOT", root),
+                patch.object(strategy, "OUTPUT_DIR", output),
+                patch.object(strategy, "DATA_DIR", data),
+            ):
+                strategy.write_observation_plan(observations, TARGET_DATE)
+
+                def settle_once():
+                    with (
+                        patch.object(
+                            strategy,
+                            "build_strategy_outputs",
+                            side_effect=AssertionError("generation ran"),
+                        ),
+                        patch.object(sys, "argv", [
+                            "generate_betting_plan.py",
+                            "--date",
+                            str(TARGET_DATE),
+                            "--settle-only",
+                        ]),
+                    ):
+                        self.assertEqual(0, strategy.main())
+
+                settle_once()
+                observation_path = output / "observation_ledger.csv"
+                first_observation_bytes = observation_path.read_bytes()
+                first_paid_bytes = (output / "betting_ledger.csv").read_bytes()
+                with observation_path.open(
+                    encoding="utf-8-sig", newline=""
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+
+                settle_once()
+
+            self.assertEqual(first_observation_bytes, observation_path.read_bytes())
+            self.assertEqual(first_paid_bytes, (output / "betting_ledger.csv").read_bytes())
+            self.assertEqual(3, len(rows))
+            self.assertEqual({ledger_module.WON}, {row["status"] for row in rows})
+            for field in (
+                "bet_id", "match_id", "market_type", "market_line",
+                "odds_source", "odds_source_record_id", "odds_captured_at_bjt",
+                "locked_odds", "model_version", "raw_probability",
+                "calibrated_probability", "official_market_probability",
+            ):
+                self.assertTrue(all(row.get(field, "") != "" or field == "market_line" for row in rows))
+            self.assertEqual(
+                3,
+                strategy._settled_sample_count(
+                    [], rows, TARGET_DATE + timedelta(days=1)
+                ),
+            )
+            with (output / "betting_ledger.csv").open(
+                encoding="utf-8-sig", newline=""
+            ) as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+
+    def test_settle_only_without_observation_plans_writes_valid_empty_ledger(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "output"
+            data = root / "data"
+            output.mkdir()
+            data.mkdir()
+            with (
+                patch.object(strategy, "ROOT", root),
+                patch.object(strategy, "OUTPUT_DIR", output),
+                patch.object(strategy, "DATA_DIR", data),
+                patch.object(sys, "argv", [
+                    "generate_betting_plan.py", "--date", str(TARGET_DATE), "--settle-only"
+                ]),
+            ):
+                self.assertEqual(0, strategy.main())
+
+            with (output / "observation_ledger.csv").open(
+                encoding="utf-8-sig", newline=""
+            ) as handle:
+                reader = csv.DictReader(handle)
+                self.assertIn("bet_id", reader.fieldnames)
+                self.assertIn("market_type", reader.fieldnames)
+                self.assertEqual([], list(reader))
 
     def write_real_generation_fixture(self, root: Path) -> None:
         output = root / "output"
@@ -448,6 +588,100 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
         self.assertEqual(3.0, markets["cutoff"]["had"].prices["胜"])
         self.assertIn("before-lock", markets["cutoff"]["had"].source_record_id)
 
+    def test_normalization_diagnostics_preserve_invalid_siblings_in_final_audit(self):
+        snapshot = {
+            "target_date": TARGET_DATE.isoformat(),
+            "capture_phase": "decision",
+            "captured_at": CAPTURED_AT,
+            "source": "sporttery",
+            "source_record_id": "mixed-snapshot",
+            "matches": [
+                {
+                    "match_id": "mixed",
+                    "markets": {
+                        "had": {"h": "3.00", "d": "3.00", "a": "3.00"},
+                        "hhad": "malformed",
+                        "ttg": {"s0": "8.00"},
+                        "score": {"1-0": "8.00"},
+                    },
+                },
+                {"match_id": "", "markets": {}},
+                {"markets": {}},
+                {"match_id": "bad-markets", "markets": []},
+            ],
+        }
+        diagnostics = []
+        markets = strategy.load_official_decision_markets(
+            TARGET_DATE, snapshot=snapshot, diagnostics=diagnostics
+        )
+
+        self.assertIn("had", markets["mixed"])
+        self.assertEqual(
+            {
+                "market_payload_invalid",
+                "market_normalization_rejected",
+                "snapshot_match_id_invalid",
+                "snapshot_markets_invalid",
+                "unsupported_market_key",
+            },
+            {item["code"] for item in diagnostics},
+        )
+        self.assertIn(
+            {
+                "code": "market_payload_invalid",
+                "context": {"match_id": "mixed", "market_type": "hhad"},
+            },
+            diagnostics,
+        )
+        self.assertIn(
+            {
+                "code": "snapshot_match_id_invalid",
+                "context": {"match_id": "", "match_index": 1},
+            },
+            diagnostics,
+        )
+        self.assertIn(
+            {
+                "code": "market_normalization_rejected",
+                "context": {"match_id": "mixed", "market_type": "ttg"},
+            },
+            diagnostics,
+        )
+
+        real_loader = strategy.load_official_decision_markets
+
+        def reject_candidates(
+            predictions, markets, snapshot, config, calibrations, *, diagnostics=None
+        ):
+            diagnostics.append({
+                "code": "candidate_test_rejection",
+                "context": {"match_id": "mixed"},
+            })
+            return []
+
+        with self.strategy_context(value_config("active")):
+            with (
+                patch.object(strategy, "load_value_snapshot", return_value=snapshot),
+                patch.object(
+                    strategy,
+                    "load_official_decision_markets",
+                    wraps=real_loader,
+                ),
+                patch.object(strategy, "build_candidates", side_effect=reject_candidates),
+            ):
+                outputs = strategy.build_strategy_outputs(
+                    TARGET_DATE, locked_at=LOCKED_AT
+                )
+
+        audit_codes = {
+            item["code"]
+            for item in outputs.audit["rejection_reasons"]
+            if isinstance(item, dict)
+        }
+        self.assertIn("market_payload_invalid", audit_codes)
+        self.assertIn("market_normalization_rejected", audit_codes)
+        self.assertIn("candidate_test_rejection", audit_codes)
+
     def test_valid_existing_lock_bypasses_generation_and_preserves_plan_bytes(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -551,6 +785,35 @@ class ValueV4PlanIntegrationTest(unittest.TestCase):
             exact_product *= Decimal(leg["odds"])
         self.assertEqual(exact_product, Decimal(str(parlay["odds"])))
         self.assertEqual(exact_product, Decimal(str(parlay["locked_odds"])))
+
+    def test_hhad_first_parlay_keeps_line_only_on_the_leg(self):
+        first = candidate("line-first", market_type="hhad")
+        second = candidate("line-second", market_type="had")
+        legs = [
+            {
+                "match_id": leg.match_id,
+                "market_type": leg.market_type,
+                "selection": leg.selection,
+                "line": "" if leg.line is None else str(leg.line),
+            }
+            for leg in (first, second)
+        ]
+
+        row = strategy._candidate_plan_row(
+            first,
+            10,
+            locked_at=LOCKED_AT,
+            portfolio_rank=1,
+            market_type="parlay",
+            play="PARLAY",
+            selection="two legs",
+            odds=Decimal("9.00"),
+            probability=0.36,
+            legs=legs,
+        )
+
+        self.assertEqual("", row["market_line"])
+        self.assertEqual("1", json.loads(row["legs_json"])[0]["line"])
 
     def test_unsupported_play_never_enters_plan_and_is_audited(self):
         invalid = replace(candidate("bad"), play="SCORE")

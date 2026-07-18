@@ -7,7 +7,13 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from betting_ledger import TERMINAL_STATUSES, settle_ledger, stable_bet_id
+from betting_ledger import (
+    TERMINAL_STATUSES,
+    settle_ledger,
+    stable_bet_id,
+    update_observation_ledger,
+    write_ledger_atomic,
+)
 from model_metrics import play_family, summarize, write_metrics
 from official_markets import normalize_market
 from plan_lock import read_valid_lock
@@ -647,35 +653,108 @@ def load_value_snapshot(target_date: date, *, locked_at: datetime | None = None)
 
 
 def load_official_decision_markets(
-    target_date: date, *, snapshot: dict | None = None
+    target_date: date,
+    *,
+    snapshot: dict | None = None,
+    diagnostics: list[dict] | None = None,
 ) -> dict[str, dict]:
     """Normalize only markets evidenced by the decision snapshot."""
     snapshot = load_value_snapshot(target_date) if snapshot is None else snapshot
     markets: dict[str, dict] = {}
-    for match in snapshot.get("matches", []) if isinstance(snapshot, dict) else []:
-        if not isinstance(match, dict) or not isinstance(match.get("match_id"), str):
+    raw_matches = snapshot.get("matches") if isinstance(snapshot, dict) else None
+    if not isinstance(raw_matches, list):
+        _market_diagnostic(
+            diagnostics,
+            "snapshot_matches_invalid",
+            {"target_date": target_date.isoformat()},
+        )
+        return markets
+    for match_index, match in enumerate(raw_matches):
+        if not isinstance(match, dict):
+            _market_diagnostic(
+                diagnostics,
+                "snapshot_match_invalid",
+                {"match_index": match_index},
+            )
             continue
-        match_id = match["match_id"]
+        match_id = match.get("match_id")
+        if not (
+            isinstance(match_id, str)
+            and bool(match_id)
+            and match_id == match_id.strip()
+            and all(
+                character.isprintable() and not character.isspace()
+                for character in match_id
+            )
+        ):
+            _market_diagnostic(
+                diagnostics,
+                "snapshot_match_id_invalid",
+                {
+                    "match_id": match_id if isinstance(match_id, str) else "",
+                    "match_index": match_index,
+                },
+            )
+            continue
         raw_markets = match.get("markets")
         if not isinstance(raw_markets, dict):
+            _market_diagnostic(
+                diagnostics,
+                "snapshot_markets_invalid",
+                {"match_id": match_id},
+            )
             continue
         captured_at = snapshot.get("captured_at")
         source = snapshot.get("source")
+        for market_key in sorted(raw_markets, key=str):
+            if market_key not in {"had", "hhad", "ttg"}:
+                _market_diagnostic(
+                    diagnostics,
+                    "unsupported_market_key",
+                    {"match_id": match_id, "market_type": str(market_key)},
+                )
         for market_type in ("had", "hhad", "ttg"):
+            if market_type not in raw_markets:
+                continue
             raw = raw_markets.get(market_type)
             if not isinstance(raw, dict):
+                _market_diagnostic(
+                    diagnostics,
+                    "market_payload_invalid",
+                    {"match_id": match_id, "market_type": market_type},
+                )
                 continue
             enriched = dict(raw)
             enriched.setdefault("source", source)
             snapshot_record = snapshot.get("source_record_id") or snapshot.get("_snapshot_record_id")
             if not snapshot_record:
+                _market_diagnostic(
+                    diagnostics,
+                    "market_source_record_missing",
+                    {"match_id": match_id, "market_type": market_type},
+                )
                 continue
             enriched.setdefault("source_record_id", f"{snapshot_record}#{match_id}:{market_type}")
             enriched.setdefault("captured_at_bjt", captured_at)
             market = normalize_market(match_id, market_type, enriched)
             if market is not None:
                 markets.setdefault(match_id, {})[market_type] = market
+            else:
+                _market_diagnostic(
+                    diagnostics,
+                    "market_normalization_rejected",
+                    {"match_id": match_id, "market_type": market_type},
+                )
     return markets
+
+
+def _market_diagnostic(
+    diagnostics: list[dict] | None,
+    code: str,
+    context: dict,
+) -> None:
+    if diagnostics is not None:
+        diagnostics.append({"code": code, "context": context})
 
 
 def _aware_locked_at(locked_at: datetime) -> datetime:
@@ -925,7 +1004,10 @@ def _candidate_plan_row(
         "kickoff_local": candidate.kickoff_at,
         "play": play or candidate.play,
         "market_type": market_type,
-        "market_line": "" if candidate.line is None else str(candidate.line),
+        "market_line": (
+            "" if market_type == "parlay" or candidate.line is None
+            else str(candidate.line)
+        ),
         "selection": selection or candidate.selection,
         "probability": probability,
         "raw_probability": candidate.raw_model_probability,
@@ -1090,7 +1172,10 @@ def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list
     config = read_json(ROOT / "betting_config.json")
     predictions = load_predictions(target_date)
     snapshot = load_value_snapshot(target_date, locked_at=locked_time)
-    markets = load_official_decision_markets(target_date, snapshot=snapshot)
+    diagnostics: list[dict] = []
+    markets = load_official_decision_markets(
+        target_date, snapshot=snapshot, diagnostics=diagnostics
+    )
     history = load_csv(OUTPUT_DIR / "betting_ledger.csv")
     observations_history = load_csv(OUTPUT_DIR / "observation_ledger.csv")
     settled_samples = _settled_sample_count(history, observations_history, target_date)
@@ -1105,7 +1190,6 @@ def build_value_v4_plan(target_date: date, *, locked_at: datetime) -> tuple[list
         max_adjustment=float(calibrations_config.get("max_adjustment", 0.05)),
         validation_fraction=float(calibrations_config.get("validation_fraction", 0.25)),
     )
-    diagnostics: list[dict] = []
     candidates = build_candidates(
         predictions,
         markets,
@@ -1179,75 +1263,17 @@ def write_shadow_audit(audit: dict, target_date: date) -> Path:
     return path
 
 
-def load_results() -> dict[tuple[str, str, str], dict]:
+def load_results() -> dict[str, dict]:
     path = DATA_DIR / "bet_results.csv"
     if not path.exists():
         return {}
     results = {}
     with path.open("r", encoding="utf-8-sig", newline="") as fh:
         for row in csv.DictReader(fh):
-            if not row.get("home_goals") or not row.get("away_goals"):
-                continue
-            key = (row["date"], row["team_a"], row["team_b"])
-            results[key] = row
+            match_id = row.get("match_id")
+            if match_id:
+                results[str(match_id)] = row
     return results
-
-
-def settle_item(item: dict, result: dict | None) -> tuple[str, float]:
-    selection = item["selection"]
-    stake = as_float(item, "stake")
-    odds = as_float(item, "odds")
-    if "串1" in item["play"] and item.get("legs_json"):
-        results = load_results()
-        try:
-            legs = json.loads(item.get("legs_json") or "[]")
-        except json.JSONDecodeError:
-            legs = []
-        won = bool(legs)
-        for leg in legs:
-            leg_result = results.get((leg["date"], leg["team_a"], leg["team_b"]))
-            if leg_result is None:
-                return "未结算", 0.0
-            home_goals = int(leg_result["home_goals"])
-            away_goals = int(leg_result["away_goals"])
-            kind = leg.get("kind", "比分")
-            if kind == "胜平负":
-                actual = outcome(home_goals, away_goals)
-                won_leg = actual == leg.get("selection")
-            elif kind == "总进球":
-                goals = home_goals + away_goals
-                actual = "7+球" if goals >= 7 else f"{goals}球"
-                won_leg = actual == leg.get("selection")
-            else:
-                actual = f"{home_goals}-{away_goals}"
-                won_leg = actual == (leg.get("selection") or leg.get("score"))
-            if not won_leg:
-                won = False
-        profit = stake * (odds - 1) if won else -stake
-        return ("命中" if won else "未中", round(profit, 2))
-
-    if result is None:
-        return "未结算", 0.0
-    home = int(result["home_goals"])
-    away = int(result["away_goals"])
-    half_home = int(result.get("half_home_goals") or 0)
-    half_away = int(result.get("half_away_goals") or 0)
-    won = False
-
-    if item["play"] in {"胜平负", "胜平负单场", "平局单场", "观察单"}:
-        won = selection == outcome(home, away)
-    elif item["play"] == "半全场":
-        if result.get("half_home_goals") == "" or result.get("half_away_goals") == "":
-            return "未结算", 0.0
-        won = selection == outcome(half_home, half_away) + outcome(home, away)
-    elif item["play"] == "比分":
-        won = selection == f"{home}-{away}"
-    elif item["play"] == "总进球":
-        total_goals = home + away
-        actual = "7+球" if total_goals >= 7 else f"{total_goals}球"
-        won = selection == actual
-    profit = stake * (odds - 1) if won else -stake
-    return ("命中" if won else "未中", round(profit, 2))
 
 
 def write_plan(plan: list[dict], target_date: date) -> Path:
@@ -1301,63 +1327,20 @@ def load_all_observation_plans() -> list[dict]:
     return rows
 
 
-def write_observation_ledger() -> Path:
+def write_observation_ledger(
+    results: dict | None = None,
+    settled_at: datetime | None = None,
+) -> Path:
     path = OUTPUT_DIR / "observation_ledger.csv"
-    results = load_results()
-    plan = load_all_observation_plans()
-    fields = [
-        "date",
-        "strategy_version",
-        "stage",
-        "match",
-        "play",
-        "selection",
-        "probability",
-        "raw_model_probability",
-        "league_calibrated_probability",
-        "league_calibration_samples",
-        "odds",
-        "market_probability",
-        "value_edge",
-        "expected_value",
-        "stake",
-        "status",
-        "profit",
-        "reason",
-        "legs_json",
-    ]
-    rows = []
-    for item in plan:
-        result = results.get((item["date"], item["team_a"], item["team_b"]))
-        status, profit = settle_item(item, result)
-        rows.append(
-            {
-                "date": item["date"],
-                "strategy_version": item.get("strategy_version", ""),
-                "stage": item.get("stage", ""),
-                "match": item["match"],
-                "play": item["play"],
-                "selection": item["selection"],
-                "probability": item["probability"],
-                "raw_model_probability": item.get("raw_model_probability", item["probability"]),
-                "league_calibrated_probability": item.get("league_calibrated_probability", item.get("raw_model_probability", item["probability"])),
-                "league_calibration_samples": item.get("league_calibration_samples", 0),
-                "odds": item["odds"],
-                "market_probability": item.get("market_probability", ""),
-                "value_edge": item.get("value_edge", ""),
-                "expected_value": item.get("expected_value", ""),
-                "stake": item["stake"],
-                "status": status,
-                "profit": profit,
-                "reason": item["reason"],
-                "legs_json": item.get("legs_json", ""),
-            }
-        )
-    with path.open("w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
-    return path
+    result_map = load_results() if results is None else results
+    settlement_time = datetime.now(BEIJING) if settled_at is None else settled_at
+    rows = update_observation_ledger(
+        load_csv(path),
+        load_all_observation_plans(),
+        result_map,
+        settlement_time,
+    )
+    return write_ledger_atomic(path, rows)
 
 
 def write_daily_decision(
@@ -1413,13 +1396,12 @@ def main() -> int:
     if args.settle_only:
         if args.locked_at:
             parser.error("--locked-at is only valid for generation")
-        results = {
-            str(row.get("match_id")): row
-            for row in load_csv(DATA_DIR / "bet_results.csv")
-            if row.get("match_id")
-        }
-        ledger_path = settle_ledger(ROOT, results, datetime.now(BEIJING))
+        results = load_results()
+        settled_at = datetime.now(BEIJING)
+        ledger_path = settle_ledger(ROOT, results, settled_at)
+        observation_path = write_observation_ledger(results, settled_at)
         print(f"Settled ledger: {ledger_path}")
+        print(f"Settled observation ledger: {observation_path}")
         return 0
 
     if not args.locked_at:
