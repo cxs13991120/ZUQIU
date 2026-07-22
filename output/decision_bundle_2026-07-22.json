@@ -1,0 +1,1699 @@
+{
+  "configuration": {
+    "betting": {
+      "payload": {
+        "base_allocations": {
+          "half_full": 50,
+          "total_goals": 100,
+          "wdw_combo": 30,
+          "win_draw_win": 100
+        },
+        "confidence_multiplier": {
+          "high": 1.15,
+          "low": 0.55,
+          "medium": 0.9
+        },
+        "daily_budget": 230,
+        "default_odds": {},
+        "draw_alert": {
+          "balanced_max_win_gap": 0.1,
+          "balanced_max_xg_total": 2.35,
+          "cold_favorite_probability": 0.55,
+          "daily_additional_budget": 80,
+          "feature_version": "draw-v1",
+          "hypothetical_stake": 10,
+          "max_alerts": 4,
+          "max_drawdown": 100.0,
+          "max_per_league": 2,
+          "max_promoted_stake": 30,
+          "max_xg_total": 2.5,
+          "min_draw_edge": 0.04,
+          "min_draw_probability": 0.27,
+          "min_expected_value": 1.05,
+          "min_promoted_stake": 10,
+          "observation_samples_per_subtype": 30,
+          "promotion_roi": 0.05,
+          "rank_gates": [
+            {
+              "min_edge": 0.04,
+              "min_expected_value": 1.05,
+              "min_probability": 0.27
+            },
+            {
+              "min_edge": 0.05,
+              "min_expected_value": 1.07,
+              "min_probability": 0.29
+            },
+            {
+              "min_edge": 0.06,
+              "min_expected_value": 1.09,
+              "min_probability": 0.31
+            },
+            {
+              "min_edge": 0.07,
+              "min_expected_value": 1.11,
+              "min_probability": 0.33
+            }
+          ]
+        },
+        "draw_strategy": {
+          "combo_max_legs": 4,
+          "combo_min_legs": 3,
+          "combo_stake": 30,
+          "double_stake_each": 100,
+          "max_probability_gap": 0.05,
+          "second_draw_min_probability": 0.27,
+          "single_stake": 150
+        },
+        "league_calibration": {
+          "max_adjustment": 0.05,
+          "min_samples": 30,
+          "prior_samples": 60,
+          "validation_fraction": 0.25
+        },
+        "learning_policy": {
+          "case_study_policy": "regression_only",
+          "minimum_rule_samples": 30
+        },
+        "max_daily_budget": 500,
+        "min_stake": 10,
+        "pre_kickoff_revalidation": {
+          "max_notification_days": 30,
+          "minimum_initial_minutes": 60,
+          "mode": "shadow",
+          "scan_business_days": 2,
+          "stake_unit": 2,
+          "t30_close_minutes": 10,
+          "t30_open_minutes": 40,
+          "t90_close_minutes": 40,
+          "t90_open_minutes": 105
+        },
+        "simulation_account": {
+          "mode": "simulation",
+          "monthly_budget_cap": 5000,
+          "monthly_stop_loss": 5000,
+          "real_money_automation": false,
+          "required_settled_days": 30
+        },
+        "strategy_version": "value-v4",
+        "value_strategy": {
+          "activation_mode": "shadow",
+          "calibration_prior": 100,
+          "combo_max_legs": 2,
+          "combo_min_legs": 2,
+          "combo_stake": 30,
+          "kelly_fraction": 0.25,
+          "max_daily_combo_stake": 30,
+          "max_match_exposure": 200,
+          "max_single_count": 2,
+          "max_single_stake": 200,
+          "min_combo_ev": 0.03,
+          "min_combo_leg_edge": 0.02,
+          "min_combo_leg_ev": 0.01,
+          "min_combo_leg_probability": 0.45,
+          "min_ev": 0.03,
+          "min_history_samples": 30,
+          "min_probability_edge": 0.03,
+          "min_single_stake": 2,
+          "model_edge_weight_base": 0.35,
+          "model_edge_weight_max": 0.75,
+          "observation_count": 5,
+          "reference_bankroll": 5000,
+          "single_budget_cap": 200,
+          "stake_unit": 2,
+          "strict_combo_stake": 20,
+          "strict_kelly_fraction": 0.25,
+          "strict_max_single_stake": 50,
+          "strict_min_combo_ev": 0.1,
+          "strict_min_combo_leg_edge": 0.03,
+          "strict_min_combo_leg_ev": 0.02,
+          "strict_min_ev": 0.06,
+          "strict_min_probability_edge": 0.05,
+          "strict_model_edge_weight_base": 0.15,
+          "strict_model_edge_weight_max": 0.35,
+          "strict_single_budget_cap": 100,
+          "strict_until_samples": 100
+        }
+      },
+      "sha256": "11e4c66276475d4354808f76362419f9b49d8c8f671e9724c1698e8de99cdd2b"
+    },
+    "prediction": {
+      "payload": {
+        "attack_weight": 1.0,
+        "base_goals": 1.35,
+        "confidence_thresholds": {
+          "high": 0.62,
+          "medium": 0.54
+        },
+        "defense_weight": 0.9,
+        "dixon_coles_rho": -0.1,
+        "elo_goal_weight": 0.62,
+        "form_weight": 0.65,
+        "home_adv_weight": 1.0,
+        "injury_weight": 1.0,
+        "knockout_stages": [
+          "round32",
+          "round16",
+          "quarterfinal",
+          "semifinal",
+          "third_place",
+          "final",
+          "knockout"
+        ],
+        "market_blend_weight": 0.28,
+        "max_goals": 10,
+        "rest_weight": 0.035
+      },
+      "sha256": "376bb43a511733bf9a4499021668f09c05f90f6af56192c27427a50e05244e15"
+    }
+  },
+  "decision_snapshot": {
+    "bytes": 2899,
+    "captured_at_bjt": "2026-07-22T21:11:27.315011+08:00",
+    "match_identities": [
+      {
+        "kickoff_at": "2026-07-23T01:00:00+08:00",
+        "match_id": "2040587",
+        "match_num": "周三204",
+        "team_a": "博德闪耀",
+        "team_b": "汉坎"
+      },
+      {
+        "kickoff_at": "2026-07-23T01:00:00+08:00",
+        "match_id": "2040588",
+        "match_num": "周三205",
+        "team_a": "利勒斯特",
+        "team_b": "维京"
+      },
+      {
+        "kickoff_at": "2026-07-23T07:30:00+08:00",
+        "match_id": "2040589",
+        "match_num": "周三206",
+        "team_a": "迈阿密",
+        "team_b": "芝加哥"
+      },
+      {
+        "kickoff_at": "2026-07-23T08:30:00+08:00",
+        "match_id": "2040590",
+        "match_num": "周三207",
+        "team_a": "沙佩科",
+        "team_b": "弗拉门戈"
+      },
+      {
+        "kickoff_at": "2026-07-23T08:30:00+08:00",
+        "match_id": "2040591",
+        "match_num": "周三208",
+        "team_a": "圣保罗",
+        "team_b": "巴竞技"
+      },
+      {
+        "kickoff_at": "2026-07-23T10:30:00+08:00",
+        "match_id": "2040592",
+        "match_num": "周三209",
+        "team_a": "洛杉矶",
+        "team_b": "盐湖城"
+      },
+      {
+        "kickoff_at": "2026-07-23T01:00:00+08:00",
+        "match_id": "2040596",
+        "match_num": "周三210",
+        "team_a": "奥莫尼亚",
+        "team_b": "图凯拉特"
+      }
+    ],
+    "paid_market_values": [
+      {
+        "markets": {
+          "had": {},
+          "hhad": {},
+          "ttg": {
+            "s0": "45.00",
+            "s1": "14.00",
+            "s2": "6.70",
+            "s3": "3.90",
+            "s4": "3.80",
+            "s5": "5.20",
+            "s6": "7.25",
+            "s7": "6.20"
+          }
+        },
+        "match_id": "2040587",
+        "single_eligibility": {
+          "had": false,
+          "hhad": false,
+          "ttg": false
+        }
+      },
+      {
+        "markets": {
+          "had": {},
+          "hhad": {},
+          "ttg": {
+            "s0": "21.00",
+            "s1": "7.25",
+            "s2": "4.35",
+            "s3": "3.20",
+            "s4": "4.00",
+            "s5": "7.10",
+            "s6": "13.00",
+            "s7": "17.00"
+          }
+        },
+        "match_id": "2040588",
+        "single_eligibility": {
+          "had": true,
+          "hhad": false,
+          "ttg": false
+        }
+      },
+      {
+        "markets": {
+          "had": {},
+          "hhad": {},
+          "ttg": {
+            "s0": "33.00",
+            "s1": "10.00",
+            "s2": "5.35",
+            "s3": "3.75",
+            "s4": "4.05",
+            "s5": "5.30",
+            "s6": "8.30",
+            "s7": "8.80"
+          }
+        },
+        "match_id": "2040589",
+        "single_eligibility": {
+          "had": false,
+          "hhad": false,
+          "ttg": false
+        }
+      },
+      {
+        "markets": {
+          "had": {},
+          "hhad": {},
+          "ttg": {
+            "s0": "14.00",
+            "s1": "5.00",
+            "s2": "3.20",
+            "s3": "3.30",
+            "s4": "5.40",
+            "s5": "10.00",
+            "s6": "20.00",
+            "s7": "32.00"
+          }
+        },
+        "match_id": "2040590",
+        "single_eligibility": {
+          "had": false,
+          "hhad": false,
+          "ttg": false
+        }
+      },
+      {
+        "markets": {
+          "had": {},
+          "hhad": {},
+          "ttg": {
+            "s0": "8.75",
+            "s1": "4.20",
+            "s2": "2.80",
+            "s3": "3.55",
+            "s4": "6.80",
+            "s5": "15.00",
+            "s6": "32.00",
+            "s7": "55.00"
+          }
+        },
+        "match_id": "2040591",
+        "single_eligibility": {
+          "had": false,
+          "hhad": false,
+          "ttg": false
+        }
+      },
+      {
+        "markets": {
+          "had": {},
+          "hhad": {},
+          "ttg": {
+            "s0": "20.00",
+            "s1": "7.35",
+            "s2": "4.40",
+            "s3": "3.35",
+            "s4": "4.15",
+            "s5": "6.40",
+            "s6": "12.00",
+            "s7": "16.00"
+          }
+        },
+        "match_id": "2040592",
+        "single_eligibility": {
+          "had": false,
+          "hhad": false,
+          "ttg": false
+        }
+      },
+      {
+        "markets": {
+          "had": {},
+          "hhad": {},
+          "ttg": {
+            "s0": "11.00",
+            "s1": "4.60",
+            "s2": "3.40",
+            "s3": "3.40",
+            "s4": "5.65",
+            "s5": "10.50",
+            "s6": "19.00",
+            "s7": "30.00"
+          }
+        },
+        "match_id": "2040596",
+        "single_eligibility": {
+          "had": false,
+          "hhad": false,
+          "ttg": false
+        }
+      }
+    ],
+    "path": "data/live_odds_snapshots/2026-07-22/20260722T211127+0800-zgzcw-58cc3f3d017b87f3.json",
+    "payload": {
+      "captured_at": "2026-07-22T21:11:27.315011+08:00",
+      "fetch_mode": "live",
+      "matches": [
+        {
+          "kickoff_at": "2026-07-23T01:00:00+08:00",
+          "markets": {
+            "had": {},
+            "hhad": {},
+            "ttg": {
+              "s0": "45.00",
+              "s1": "14.00",
+              "s2": "6.70",
+              "s3": "3.90",
+              "s4": "3.80",
+              "s5": "5.20",
+              "s6": "7.25",
+              "s7": "6.20"
+            }
+          },
+          "match_id": "2040587",
+          "match_num": "周三204",
+          "sales_state": "ZGZCW",
+          "single_eligibility": {
+            "had": false,
+            "hhad": false,
+            "ttg": false
+          },
+          "source_record_id": "2040587",
+          "team_a": "博德闪耀",
+          "team_b": "汉坎"
+        },
+        {
+          "kickoff_at": "2026-07-23T01:00:00+08:00",
+          "markets": {
+            "had": {},
+            "hhad": {},
+            "ttg": {
+              "s0": "21.00",
+              "s1": "7.25",
+              "s2": "4.35",
+              "s3": "3.20",
+              "s4": "4.00",
+              "s5": "7.10",
+              "s6": "13.00",
+              "s7": "17.00"
+            }
+          },
+          "match_id": "2040588",
+          "match_num": "周三205",
+          "sales_state": "ZGZCW",
+          "single_eligibility": {
+            "had": true,
+            "hhad": false,
+            "ttg": false
+          },
+          "source_record_id": "2040588",
+          "team_a": "利勒斯特",
+          "team_b": "维京"
+        },
+        {
+          "kickoff_at": "2026-07-23T07:30:00+08:00",
+          "markets": {
+            "had": {},
+            "hhad": {},
+            "ttg": {
+              "s0": "33.00",
+              "s1": "10.00",
+              "s2": "5.35",
+              "s3": "3.75",
+              "s4": "4.05",
+              "s5": "5.30",
+              "s6": "8.30",
+              "s7": "8.80"
+            }
+          },
+          "match_id": "2040589",
+          "match_num": "周三206",
+          "sales_state": "ZGZCW",
+          "single_eligibility": {
+            "had": false,
+            "hhad": false,
+            "ttg": false
+          },
+          "source_record_id": "2040589",
+          "team_a": "迈阿密",
+          "team_b": "芝加哥"
+        },
+        {
+          "kickoff_at": "2026-07-23T08:30:00+08:00",
+          "markets": {
+            "had": {},
+            "hhad": {},
+            "ttg": {
+              "s0": "14.00",
+              "s1": "5.00",
+              "s2": "3.20",
+              "s3": "3.30",
+              "s4": "5.40",
+              "s5": "10.00",
+              "s6": "20.00",
+              "s7": "32.00"
+            }
+          },
+          "match_id": "2040590",
+          "match_num": "周三207",
+          "sales_state": "ZGZCW",
+          "single_eligibility": {
+            "had": false,
+            "hhad": false,
+            "ttg": false
+          },
+          "source_record_id": "2040590",
+          "team_a": "沙佩科",
+          "team_b": "弗拉门戈"
+        },
+        {
+          "kickoff_at": "2026-07-23T08:30:00+08:00",
+          "markets": {
+            "had": {},
+            "hhad": {},
+            "ttg": {
+              "s0": "8.75",
+              "s1": "4.20",
+              "s2": "2.80",
+              "s3": "3.55",
+              "s4": "6.80",
+              "s5": "15.00",
+              "s6": "32.00",
+              "s7": "55.00"
+            }
+          },
+          "match_id": "2040591",
+          "match_num": "周三208",
+          "sales_state": "ZGZCW",
+          "single_eligibility": {
+            "had": false,
+            "hhad": false,
+            "ttg": false
+          },
+          "source_record_id": "2040591",
+          "team_a": "圣保罗",
+          "team_b": "巴竞技"
+        },
+        {
+          "kickoff_at": "2026-07-23T10:30:00+08:00",
+          "markets": {
+            "had": {},
+            "hhad": {},
+            "ttg": {
+              "s0": "20.00",
+              "s1": "7.35",
+              "s2": "4.40",
+              "s3": "3.35",
+              "s4": "4.15",
+              "s5": "6.40",
+              "s6": "12.00",
+              "s7": "16.00"
+            }
+          },
+          "match_id": "2040592",
+          "match_num": "周三209",
+          "sales_state": "ZGZCW",
+          "single_eligibility": {
+            "had": false,
+            "hhad": false,
+            "ttg": false
+          },
+          "source_record_id": "2040592",
+          "team_a": "洛杉矶",
+          "team_b": "盐湖城"
+        },
+        {
+          "kickoff_at": "2026-07-23T01:00:00+08:00",
+          "markets": {
+            "had": {},
+            "hhad": {},
+            "ttg": {
+              "s0": "11.00",
+              "s1": "4.60",
+              "s2": "3.40",
+              "s3": "3.40",
+              "s4": "5.65",
+              "s5": "10.50",
+              "s6": "19.00",
+              "s7": "30.00"
+            }
+          },
+          "match_id": "2040596",
+          "match_num": "周三210",
+          "sales_state": "ZGZCW",
+          "single_eligibility": {
+            "had": false,
+            "hhad": false,
+            "ttg": false
+          },
+          "source_record_id": "2040596",
+          "team_a": "奥莫尼亚",
+          "team_b": "图凯拉特"
+        }
+      ],
+      "schema_version": 1,
+      "source": "zgzcw",
+      "source_response_sha256": "d11f9896f84163c0d392abdedef1e0047d18afa1fbf77abbffeeed4f67b2094f",
+      "target_date": "2026-07-22"
+    },
+    "sha256": "58cc3f3d017b87f3cf313cb74381d159d9ddce401b9cd2ea920587de11ca3dbf",
+    "source": "zgzcw"
+  },
+  "fixture_extract": {
+    "match_count": 10,
+    "rows": [
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-22 18:30",
+        "kickoff_local": "周三202",
+        "market_odds_a": "2.92",
+        "market_odds_b": "2.45",
+        "market_odds_draw": "2.98",
+        "match_id": "2040585",
+        "match_num": "周三202",
+        "neutral": "false",
+        "odds_a": "3.05",
+        "odds_b": "2.27",
+        "odds_draw": "2.77",
+        "pool_status": "",
+        "stage": "韩K联",
+        "team_a": "富川FC",
+        "team_b": "FC安养",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-22 18:30",
+        "kickoff_local": "周三203",
+        "market_odds_a": "3.91",
+        "market_odds_b": "1.91",
+        "market_odds_draw": "3.26",
+        "match_id": "2040586",
+        "match_num": "周三203",
+        "neutral": "false",
+        "odds_a": "4.15",
+        "odds_b": "1.82",
+        "odds_draw": "2.95",
+        "pool_status": "",
+        "stage": "韩K联",
+        "team_a": "光州FC",
+        "team_b": "金泉尚武",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-23 01:00",
+        "kickoff_local": "周三204",
+        "market_odds_a": "1.10",
+        "market_odds_b": "17.67",
+        "market_odds_draw": "9.66",
+        "match_id": "2040587",
+        "match_num": "周三204",
+        "neutral": "false",
+        "odds_a": "0",
+        "odds_b": "0",
+        "odds_draw": "0",
+        "pool_status": "",
+        "stage": "挪超",
+        "team_a": "博德闪耀",
+        "team_b": "汉坎",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-23 01:00",
+        "kickoff_local": "周三210",
+        "market_odds_a": "1.69",
+        "market_odds_b": "4.68",
+        "market_odds_draw": "3.61",
+        "match_id": "2040596",
+        "match_num": "周三210",
+        "neutral": "false",
+        "odds_a": "1.56",
+        "odds_b": "4.75",
+        "odds_draw": "3.60",
+        "pool_status": "",
+        "stage": "欧冠",
+        "team_a": "奥莫尼亚",
+        "team_b": "图凯拉特",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-23 07:30",
+        "kickoff_local": "周三206",
+        "market_odds_a": "2.09",
+        "market_odds_b": "2.90",
+        "market_odds_draw": "3.98",
+        "match_id": "2040589",
+        "match_num": "周三206",
+        "neutral": "false",
+        "odds_a": "1.97",
+        "odds_b": "2.78",
+        "odds_draw": "3.82",
+        "pool_status": "",
+        "stage": "美职联",
+        "team_a": "迈阿密",
+        "team_b": "芝加哥",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-23 08:30",
+        "kickoff_local": "周三207",
+        "market_odds_a": "6.79",
+        "market_odds_b": "1.45",
+        "market_odds_draw": "4.24",
+        "match_id": "2040590",
+        "match_num": "周三207",
+        "neutral": "false",
+        "odds_a": "6.95",
+        "odds_b": "1.31",
+        "odds_draw": "4.50",
+        "pool_status": "",
+        "stage": "巴西甲",
+        "team_a": "沙佩科",
+        "team_b": "弗拉门戈",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-23 08:30",
+        "kickoff_local": "周三208",
+        "market_odds_a": "1.98",
+        "market_odds_b": "3.85",
+        "market_odds_draw": "3.20",
+        "match_id": "2040591",
+        "match_num": "周三208",
+        "neutral": "false",
+        "odds_a": "1.82",
+        "odds_b": "3.96",
+        "odds_draw": "3.05",
+        "pool_status": "",
+        "stage": "巴西甲",
+        "team_a": "圣保罗",
+        "team_b": "巴竞技",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "false",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-23 10:30",
+        "kickoff_local": "周三209",
+        "market_odds_a": "1.69",
+        "market_odds_b": "4.21",
+        "market_odds_draw": "4.03",
+        "match_id": "2040592",
+        "match_num": "周三209",
+        "neutral": "false",
+        "odds_a": "1.52",
+        "odds_b": "4.35",
+        "odds_draw": "4.15",
+        "pool_status": "",
+        "stage": "美职联",
+        "team_a": "洛杉矶",
+        "team_b": "盐湖城",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "true",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-22 18:30",
+        "kickoff_local": "周三201",
+        "market_odds_a": "1.79",
+        "market_odds_b": "4.44",
+        "market_odds_draw": "3.28",
+        "match_id": "2040584",
+        "match_num": "周三201",
+        "neutral": "false",
+        "odds_a": "1.66",
+        "odds_b": "4.66",
+        "odds_draw": "3.20",
+        "pool_status": "",
+        "stage": "韩K联",
+        "team_a": "首尔FC",
+        "team_b": "浦项制铁",
+        "venue": "中国足彩网备用数据"
+      },
+      {
+        "analysis_source": "中国足彩网专业欧赔市场",
+        "date": "2026-07-22",
+        "is_single_had": "true",
+        "is_single_hhad": "false",
+        "is_single_ttg": "false",
+        "kickoff_at": "2026-07-23 01:00",
+        "kickoff_local": "周三205",
+        "market_odds_a": "2.97",
+        "market_odds_b": "2.17",
+        "market_odds_draw": "3.60",
+        "match_id": "2040588",
+        "match_num": "周三205",
+        "neutral": "false",
+        "odds_a": "2.94",
+        "odds_b": "1.93",
+        "odds_draw": "3.69",
+        "pool_status": "",
+        "stage": "挪超",
+        "team_a": "利勒斯特",
+        "team_b": "维京",
+        "venue": "中国足彩网备用数据"
+      }
+    ],
+    "sha256": "1e40f450fdb79ec288044f92445abe9cd6d9f06fbb8e77538da6a55b02148f8a"
+  },
+  "history_inputs": {
+    "account_metrics": {
+      "payload": {
+        "active_betting_strategy": {
+          "average_expected_return": null,
+          "brier": null,
+          "calibration_error": null,
+          "count": 0,
+          "current_losing_streak": 0,
+          "hit_rate": null,
+          "hits": 0,
+          "log_loss": null,
+          "max_drawdown": 0.0,
+          "max_losing_streak": 0,
+          "profit": 0.0,
+          "roi": null,
+          "settled_days": 0,
+          "stake": 0.0,
+          "version": "value-v3"
+        },
+        "active_strategy": {
+          "average_expected_return": 0.8916547104806837,
+          "brier": 0.2221516252026564,
+          "calibration_error": 0.1346388885633551,
+          "count": 13,
+          "current_losing_streak": 0,
+          "hit_rate": 0.6923076923076923,
+          "hits": 9,
+          "log_loss": 0.6358329447088256,
+          "max_drawdown": 0.0,
+          "max_losing_streak": 2,
+          "profit": 0.0,
+          "roi": null,
+          "settled_days": 3,
+          "stake": 0.0,
+          "version": "value-v3"
+        },
+        "by_league": {},
+        "by_play": {},
+        "by_play_all": {
+          "其他串关": {
+            "average_expected_return": 0.39987024872171517,
+            "brier": 1.9077042487571106e-08,
+            "calibration_error": 0.0001381196672728801,
+            "count": 1,
+            "current_losing_streak": 1,
+            "hit_rate": 0.0,
+            "hits": 0,
+            "log_loss": 0.0010005003335835344,
+            "max_drawdown": 50.0,
+            "max_losing_streak": 1,
+            "profit": -50.0,
+            "roi": -1.0,
+            "settled_days": 1,
+            "stake": 50.0
+          },
+          "半全场": {
+            "average_expected_return": 1.1371791084684206,
+            "brier": 0.22081420748873576,
+            "calibration_error": 0.46990872250761184,
+            "count": 1,
+            "current_losing_streak": 1,
+            "hit_rate": 0.0,
+            "hits": 0,
+            "log_loss": 0.63470606558067,
+            "max_drawdown": 50.0,
+            "max_losing_streak": 1,
+            "profit": -50.0,
+            "roi": -1.0,
+            "settled_days": 1,
+            "stake": 50.0
+          },
+          "总进球": {
+            "average_expected_return": 0.8340392052093563,
+            "brier": 0.5903193764134945,
+            "calibration_error": 0.768322442997401,
+            "count": 1,
+            "current_losing_streak": 0,
+            "hit_rate": 1.0,
+            "hits": 1,
+            "log_loss": 1.4624087145460143,
+            "max_drawdown": 0.0,
+            "max_losing_streak": 0,
+            "profit": 260.0,
+            "roi": 2.6,
+            "settled_days": 1,
+            "stake": 100.0
+          },
+          "胜平负": {
+            "average_expected_return": 0.9283249748961457,
+            "brier": 0.43968737704894373,
+            "calibration_error": 0.6630892677829613,
+            "count": 1,
+            "current_losing_streak": 1,
+            "hit_rate": 0.0,
+            "hits": 0,
+            "log_loss": 1.0879372732828958,
+            "max_drawdown": 100.0,
+            "max_losing_streak": 1,
+            "profit": -100.0,
+            "roi": -1.0,
+            "settled_days": 1,
+            "stake": 100.0
+          }
+        },
+        "calibration_by_league": {
+          "世界杯": {
+            "average_expected_return": 0.9271346462423927,
+            "brier": 0.45827019665549823,
+            "calibration_error": 0.6769565692535218,
+            "count": 1,
+            "current_losing_streak": 0,
+            "hit_rate": 1.0,
+            "hits": 1,
+            "log_loss": 1.1299685042830727,
+            "max_drawdown": 0.0,
+            "max_losing_streak": 0,
+            "paused": false,
+            "profit": 0.0,
+            "recent_brier": 0.45827019665549823,
+            "roi": null,
+            "settled_days": 1,
+            "stake": 0.0
+          },
+          "巴西甲": {
+            "average_expected_return": 0.8923003718318129,
+            "brier": 0.2174766565819538,
+            "calibration_error": 0.18837025664849952,
+            "count": 4,
+            "current_losing_streak": 0,
+            "hit_rate": 0.75,
+            "hits": 3,
+            "log_loss": 0.6244949295400102,
+            "max_drawdown": 0.0,
+            "max_losing_streak": 1,
+            "paused": false,
+            "profit": 0.0,
+            "recent_brier": 0.2174766565819538,
+            "roi": null,
+            "settled_days": 2,
+            "stake": 0.0
+          },
+          "欧冠": {
+            "average_expected_return": 0.8960940079286728,
+            "brier": 0.15046371362689934,
+            "calibration_error": 0.3860380251610439,
+            "count": 2,
+            "current_losing_streak": 1,
+            "hit_rate": 0.5,
+            "hits": 1,
+            "log_loss": 0.48973382381994257,
+            "max_drawdown": 0.0,
+            "max_losing_streak": 1,
+            "paused": false,
+            "profit": 0.0,
+            "recent_brier": 0.15046371362689934,
+            "roi": null,
+            "settled_days": 1,
+            "stake": 0.0
+          },
+          "欧联": {
+            "average_expected_return": 0.8863741017446392,
+            "brier": 0.16153026329987136,
+            "calibration_error": 0.39587166943587754,
+            "count": 2,
+            "current_losing_streak": 0,
+            "hit_rate": 1.0,
+            "hits": 2,
+            "log_loss": 0.5106101769229575,
+            "max_drawdown": 0.0,
+            "max_losing_streak": 0,
+            "paused": false,
+            "profit": 0.0,
+            "recent_brier": 0.16153026329987136,
+            "roi": null,
+            "settled_days": 1,
+            "stake": 0.0
+          },
+          "瑞典超": {
+            "average_expected_return": 0.8567241474861608,
+            "brier": 0.28315893093857836,
+            "calibration_error": 0.5321267996808452,
+            "count": 1,
+            "current_losing_streak": 1,
+            "hit_rate": 0.0,
+            "hits": 0,
+            "log_loss": 0.7595579592642102,
+            "max_drawdown": 0.0,
+            "max_losing_streak": 1,
+            "paused": false,
+            "profit": 0.0,
+            "recent_brier": 0.28315893093857836,
+            "roi": null,
+            "settled_days": 1,
+            "stake": 0.0
+          },
+          "美职联": {
+            "average_expected_return": 0.8911715786154862,
+            "brier": 0.21754913995303335,
+            "calibration_error": 0.005199977311276305,
+            "count": 3,
+            "current_losing_streak": 0,
+            "hit_rate": 0.6666666666666666,
+            "hits": 2,
+            "log_loss": 0.6258780326738694,
+            "max_drawdown": 0.0,
+            "max_losing_streak": 1,
+            "paused": false,
+            "profit": 0.0,
+            "recent_brier": 0.21754913995303335,
+            "roi": null,
+            "settled_days": 2,
+            "stake": 0.0
+          }
+        },
+        "clv": {
+          "average_clv": 0.005072919223315782,
+          "count": 18,
+          "positive_rate": 0.3333333333333333
+        },
+        "league_draw_calibration": {},
+        "overall": {
+          "average_expected_return": 0.8248533843239094,
+          "brier": 0.3127052450070541,
+          "calibration_error": 0.4753646382388118,
+          "count": 4,
+          "current_losing_streak": 2,
+          "hit_rate": 0.25,
+          "hits": 1,
+          "log_loss": 0.7965131384357909,
+          "max_drawdown": 100.0,
+          "max_losing_streak": 2,
+          "profit": 60.0,
+          "roi": 0.2,
+          "settled_days": 1,
+          "stake": 300.0
+        },
+        "snapshot_coverage": {
+          "files": 33,
+          "latest": "2026-07-18T15:11:14.053209+08:00",
+          "matches": 194,
+          "phases": {
+            "decision": 36,
+            "monitoring": 120,
+            "opening": 38,
+            "pre_kickoff": 0
+          }
+        }
+      },
+      "sha256": "19954f98120b8ee5b3574914b0b2338900908b1ff4283c35d5e578c2064c9ba7"
+    },
+    "observation_history": {
+      "rows": [
+        {
+          "date": "2026-07-15",
+          "expected_value": "0.8870959031233508",
+          "league_calibrated_probability": "0.5836226816997432",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.5746975276170436",
+          "match": "尼卡斯克 vs 图凯拉特",
+          "odds": "1.54",
+          "play": "观察单",
+          "probability": "0.5760363007294486",
+          "profit": "0.0",
+          "raw_model_probability": "0.5836226816997432",
+          "reason": "零金额观察单；保守概率57.6%，联赛校准概率58.4%，原模型58.4%，市场公平概率57.5%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "负",
+          "stage": "欧冠",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.001338773112404934"
+        },
+        {
+          "date": "2026-07-15",
+          "expected_value": "0.9271346462423927",
+          "league_calibrated_probability": "0.40524617752195297",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.30853706366845335",
+          "match": "英格兰 vs 阿根廷",
+          "odds": "2.87",
+          "play": "观察单",
+          "probability": "0.3230434307464783",
+          "profit": "0.0",
+          "raw_model_probability": "0.40524617752195297",
+          "reason": "零金额观察单；保守概率32.3%，联赛校准概率40.5%，原模型40.5%，市场公平概率30.9%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "负",
+          "stage": "世界杯",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.01450636707802494"
+        },
+        {
+          "date": "2026-07-15",
+          "expected_value": "0.9050921127339946",
+          "league_calibrated_probability": "0.3888361978013276",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.34092578986039673",
+          "match": "阿特比森 vs 克拉克斯",
+          "odds": "2.6",
+          "play": "观察单",
+          "probability": "0.3481123510515364",
+          "profit": "-0.0",
+          "raw_model_probability": "0.3888361978013276",
+          "reason": "零金额观察单；保守概率34.8%，联赛校准概率38.9%，原模型38.9%，市场公平概率34.1%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "欧冠",
+          "stake": "0",
+          "status": "未中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.00718656119113964"
+        },
+        {
+          "date": "2026-07-16",
+          "expected_value": "0.8957881245554448",
+          "league_calibrated_probability": "0.7137418171624796",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.6664278036546042",
+          "match": "费伦茨瓦 vs 伏伊伏丁",
+          "odds": "1.33",
+          "play": "观察单",
+          "probability": "0.6735249056807855",
+          "profit": "0.0",
+          "raw_model_probability": "0.7137418171624796",
+          "reason": "零金额观察单；保守概率67.4%，联赛校准概率71.4%，原模型71.4%，市场公平概率66.6%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "欧联",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.007097102026181301"
+        },
+        {
+          "date": "2026-07-16",
+          "expected_value": "0.8901481207083168",
+          "league_calibrated_probability": "0.7059073564499114",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.6809920237109358",
+          "match": "圣路易斯 vs 堪萨斯城",
+          "odds": "1.3",
+          "play": "观察单",
+          "probability": "0.6847293236217822",
+          "profit": "0.0",
+          "raw_model_probability": "0.7059073564499114",
+          "reason": "零金额观察单；保守概率68.5%，联赛校准概率70.6%，原模型70.6%，市场公平概率68.1%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "美职联",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.00373729991084637"
+        },
+        {
+          "date": "2026-07-16",
+          "expected_value": "0.8906870411668742",
+          "league_calibrated_probability": "0.6863063583327731",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.6608774917840095",
+          "match": "西雅图 vs 波特兰",
+          "odds": "1.34",
+          "play": "观察单",
+          "probability": "0.664691821766324",
+          "profit": "-0.0",
+          "raw_model_probability": "0.6863063583327731",
+          "reason": "零金额观察单；保守概率66.5%，联赛校准概率68.6%，原模型68.6%，市场公平概率66.1%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "美职联",
+          "stake": "0",
+          "status": "未中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.003814329982314568"
+        },
+        {
+          "date": "2026-07-16",
+          "expected_value": "0.8903191618013494",
+          "league_calibrated_probability": "0.5105518802075626",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.4950614406609391",
+          "match": "博塔弗戈 vs 桑托斯",
+          "odds": "1.79",
+          "play": "观察单",
+          "probability": "0.4973850065929326",
+          "profit": "0.0",
+          "raw_model_probability": "0.5105518802075626",
+          "reason": "零金额观察单；保守概率49.7%，联赛校准概率51.1%，原模型51.1%，市场公平概率49.5%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "巴西甲",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.00232356593199351"
+        },
+        {
+          "date": "2026-07-16",
+          "expected_value": "0.8769600789338334",
+          "league_calibrated_probability": "0.5059873144575872",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.5398043038574369",
+          "match": "德里城 vs 索非陆军",
+          "odds": "1.64",
+          "play": "观察单",
+          "probability": "0.5347317554474594",
+          "profit": "0.0",
+          "raw_model_probability": "0.5059873144575872",
+          "reason": "零金额观察单；保守概率53.5%，联赛校准概率50.6%，原模型50.6%，市场公平概率54.0%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "负",
+          "stage": "欧联",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "-0.0050725484099775064"
+        },
+        {
+          "date": "2026-07-17",
+          "expected_value": "0.8918711585668023",
+          "league_calibrated_probability": "0.7165712444307062",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.6867385577872901",
+          "match": "巴伊亚 vs 沙佩科",
+          "odds": "1.29",
+          "play": "观察单",
+          "probability": "0.6913729911370561",
+          "profit": "0.0",
+          "raw_model_probability": "0.7165712444307062",
+          "reason": "零金额观察单；保守概率69.1%，联赛校准概率71.7%，原模型71.7%，市场公平概率68.7%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "巴西甲",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.004634433349765987"
+        },
+        {
+          "date": "2026-07-17",
+          "expected_value": "0.8926795739712678",
+          "league_calibrated_probability": "0.6966223501251657",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.6605796418473139",
+          "match": "纳什威尔 vs 亚特联",
+          "odds": "1.34",
+          "play": "观察单",
+          "probability": "0.6661787865457223",
+          "profit": "0.0",
+          "raw_model_probability": "0.6966223501251657",
+          "reason": "零金额观察单；保守概率66.6%，联赛校准概率69.7%，原模型69.7%，市场公平概率66.1%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "美职联",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.005599144698408387"
+        },
+        {
+          "date": "2026-07-17",
+          "expected_value": "0.8946766766341088",
+          "league_calibrated_probability": "0.5684539685580552",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.5335376979782498",
+          "match": "弗鲁米嫩 vs 布拉干",
+          "odds": "1.66",
+          "play": "观察单",
+          "probability": "0.5389618533940415",
+          "profit": "-0.0",
+          "raw_model_probability": "0.5684539685580552",
+          "reason": "零金额观察单；保守概率53.9%，联赛校准概率56.8%，原模型56.8%，市场公平概率53.4%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "巴西甲",
+          "stake": "0",
+          "status": "未中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.005424155415791665"
+        },
+        {
+          "date": "2026-07-17",
+          "expected_value": "0.892334490324991",
+          "league_calibrated_probability": "0.5401163994335005",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.5148784735367609",
+          "match": "米拉索 vs 格雷米奥",
+          "odds": "1.72",
+          "play": "观察单",
+          "probability": "0.5187991222819716",
+          "profit": "0.0",
+          "raw_model_probability": "0.5401163994335005",
+          "reason": "零金额观察单；保守概率51.9%，联赛校准概率54.0%，原模型54.0%，市场公平概率51.5%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "巴西甲",
+          "stake": "0",
+          "status": "命中",
+          "strategy_version": "value-v3",
+          "value_edge": "0.0039206487452106975"
+        },
+        {
+          "date": "2026-07-17",
+          "expected_value": "0.8567241474861608",
+          "league_calibrated_probability": "0.43347143742581895",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.5502713788165409",
+          "match": "米亚尔比 vs 瓦斯特拉",
+          "odds": "1.61",
+          "play": "观察单",
+          "probability": "0.5321267996808452",
+          "profit": "-0.0",
+          "raw_model_probability": "0.43347143742581895",
+          "reason": "零金额观察单；保守概率53.2%，联赛校准概率43.3%，原模型43.3%，市场公平概率55.0%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "瑞典超",
+          "stake": "0",
+          "status": "未中",
+          "strategy_version": "value-v3",
+          "value_edge": "-0.01814457913569567"
+        },
+        {
+          "date": "2026-07-18",
+          "expected_value": "0.957639986065452",
+          "league_calibrated_probability": "0.6358323579813487",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.42578490786056283",
+          "match": "斯达 vs 罗森博格",
+          "odds": "2.08",
+          "play": "观察单",
+          "probability": "0.4604038394545442",
+          "profit": "0.0",
+          "raw_model_probability": "0.6358323579813487",
+          "reason": "零金额观察单；保守概率46.0%，联赛校准概率63.6%，原模型63.6%，市场公平概率42.6%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "负",
+          "stage": "挪超",
+          "stake": "0",
+          "status": "未结算",
+          "strategy_version": "value-v3",
+          "value_edge": "0.034618931593981384"
+        },
+        {
+          "date": "2026-07-18",
+          "expected_value": "0.9262220208000786",
+          "league_calibrated_probability": "0.6199277340642011",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.4836759371221282",
+          "match": "汉坎 vs 特罗姆瑟",
+          "odds": "1.83",
+          "play": "观察单",
+          "probability": "0.5061322518033217",
+          "profit": "0.0",
+          "raw_model_probability": "0.6199277340642011",
+          "reason": "零金额观察单；保守概率50.6%，联赛校准概率62.0%，原模型62.0%，市场公平概率48.4%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "负",
+          "stage": "挪超",
+          "stake": "0",
+          "status": "未结算",
+          "strategy_version": "value-v3",
+          "value_edge": "0.022456314681193468"
+        },
+        {
+          "date": "2026-07-18",
+          "expected_value": "0.8901893332346402",
+          "league_calibrated_probability": "0.606154100804106",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.5862486458930734",
+          "match": "利勒斯特 vs KF奥斯陆",
+          "odds": "1.51",
+          "play": "观察单",
+          "probability": "0.5895293597580399",
+          "profit": "0.0",
+          "raw_model_probability": "0.606154100804106",
+          "reason": "零金额观察单；保守概率59.0%，联赛校准概率60.6%，原模型60.6%，市场公平概率58.6%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "挪超",
+          "stake": "0",
+          "status": "未结算",
+          "strategy_version": "value-v3",
+          "value_edge": "0.0032807138649665335"
+        },
+        {
+          "date": "2026-07-18",
+          "expected_value": "0.891042825886471",
+          "league_calibrated_probability": "0.5194044882872748",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.5002584801367957",
+          "match": "赫尔辛基 vs 瓦萨",
+          "odds": "1.77",
+          "play": "观察单",
+          "probability": "0.5034140259245599",
+          "profit": "0.0",
+          "raw_model_probability": "0.5194044882872748",
+          "reason": "零金额观察单；保守概率50.3%，联赛校准概率51.9%，原模型51.9%，市场公平概率50.0%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "胜",
+          "stage": "芬超",
+          "stake": "0",
+          "status": "未结算",
+          "strategy_version": "value-v3",
+          "value_edge": "0.0031555457877641135"
+        },
+        {
+          "date": "2026-07-18",
+          "expected_value": "0.9487791329399028",
+          "league_calibrated_probability": "0.46747405666336916",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "0.3269410854606897",
+          "match": "奥卢 vs 赫尔火花",
+          "odds": "2.71",
+          "play": "观察单",
+          "probability": "0.350103001084835",
+          "profit": "0.0",
+          "raw_model_probability": "0.46747405666336916",
+          "reason": "零金额观察单；保守概率35.0%，联赛校准概率46.7%，原模型46.7%，市场公平概率32.7%，仅用于概率校准和CLV，不计入盈亏",
+          "selection": "负",
+          "stage": "芬超",
+          "stake": "0",
+          "status": "未结算",
+          "strategy_version": "value-v3",
+          "value_edge": "0.023161915624145324"
+        }
+      ],
+      "sha256": "c8257ce7cca891ee437b18b455107c3a8153521697a55ede5bbfd062fe334e79"
+    },
+    "paid_history": {
+      "rows": [
+        {
+          "date": "2026-07-11",
+          "expected_value": "",
+          "league_calibrated_probability": "0.23167755700259896",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "",
+          "match": "挪威 vs 英格兰",
+          "odds": "3.6",
+          "play": "总进球",
+          "probability": "0.23167755700259896",
+          "profit": "260.0",
+          "raw_model_probability": "0.23167755700259896",
+          "reason": "总进球模型信心最高：2球，概率23.2%，竞彩网赔率3.6",
+          "selection": "2球",
+          "stage": "",
+          "stake": "100",
+          "status": "命中",
+          "strategy_version": "",
+          "value_edge": ""
+        },
+        {
+          "date": "2026-07-11",
+          "expected_value": "",
+          "league_calibrated_probability": "0.6630892677829613",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "",
+          "match": "厄格里特 vs 赫根",
+          "odds": "1.4",
+          "play": "胜平负",
+          "probability": "0.6630892677829613",
+          "profit": "-100.0",
+          "raw_model_probability": "0.6630892677829613",
+          "reason": "胜平负模型信心最高：负，概率66.3%，竞彩网赔率1.4",
+          "selection": "负",
+          "stage": "",
+          "stake": "100",
+          "status": "未中",
+          "strategy_version": "",
+          "value_edge": ""
+        },
+        {
+          "date": "2026-07-11",
+          "expected_value": "",
+          "league_calibrated_probability": "0.46990872250761184",
+          "league_calibration_samples": "0",
+          "legs_json": "[]",
+          "market_probability": "",
+          "match": "阿根廷 vs 瑞士",
+          "odds": "2.42",
+          "play": "半全场",
+          "probability": "0.46990872250761184",
+          "profit": "-50.0",
+          "raw_model_probability": "0.46990872250761184",
+          "reason": "半全场模型信心最高：胜胜，概率47.0%，竞彩网赔率2.42",
+          "selection": "胜胜",
+          "stage": "",
+          "stake": "50",
+          "status": "未中",
+          "strategy_version": "",
+          "value_edge": ""
+        },
+        {
+          "date": "2026-07-11",
+          "expected_value": "",
+          "league_calibrated_probability": "0.0001381196672728801",
+          "league_calibration_samples": "0",
+          "legs_json": "[{\"date\": \"2026-07-11\", \"team_a\": \"阿根廷\", \"team_b\": \"瑞士\", \"score\": \"2-0\", \"probability\": 0.11252518531946808, \"odds\": 6.5}, {\"date\": \"2026-07-11\", \"team_a\": \"厄格里特\", \"team_b\": \"赫根\", \"score\": \"0-2\", \"probability\": 0.10985698878514592, \"odds\": 8.0}, {\"date\": \"2026-07-11\", \"team_a\": \"特罗姆瑟\", \"team_b\": \"瓦勒伦加\", \"score\": \"2-0\", \"probability\": 0.10590856237325683, \"odds\": 8.5}, {\"date\": \"2026-07-11\", \"team_a\": \"挪威\", \"team_b\": \"英格兰\", \"score\": \"1-1\", \"probability\": 0.10549867933865018, \"odds\": 6.55}]",
+          "market_probability": "",
+          "match": "阿根廷 vs 瑞士",
+          "odds": "2895.1",
+          "play": "比分4串1",
+          "probability": "0.0001381196672728801",
+          "profit": "-50.0",
+          "raw_model_probability": "0.0001381196672728801",
+          "reason": "比分串关按单场比分概率排序选取4场，组合概率0.0%，组合赔率2895.1",
+          "selection": "阿根廷vs瑞士 2-0 × 厄格里特vs赫根 0-2 × 特罗姆瑟vs瓦勒伦加 2-0 × 挪威vs英格兰 1-1",
+          "stage": "",
+          "stake": "50",
+          "status": "未中",
+          "strategy_version": "",
+          "value_edge": ""
+        },
+        {
+          "date": "2026-07-12",
+          "expected_value": "1.0451091255828684",
+          "league_calibrated_probability": "0.1474060825927882",
+          "league_calibration_samples": "0",
+          "legs_json": "[{\"date\": \"2026-07-12\", \"team_a\": \"仁川联队\", \"team_b\": \"FC安养\", \"kind\": \"胜平负\", \"selection\": \"胜\", \"probability\": 0.5190196289273526, \"market_probability\": 0.44081174922901084, \"value_edge\": 0.07820787969834181, \"odds\": 2.01}, {\"date\": \"2026-07-12\", \"team_a\": \"桑纳菲\", \"team_b\": \"汉坎\", \"kind\": \"胜平负\", \"selection\": \"胜\", \"probability\": 0.5603607945922855, \"market_probability\": 0.4927536231884058, \"value_edge\": 0.06760717140387967, \"odds\": 1.8}, {\"date\": \"2026-07-12\", \"team_a\": \"瓦斯特拉\", \"team_b\": \"代格福什\", \"kind\": \"胜平负\", \"selection\": \"胜\", \"probability\": 0.5068318274641817, \"market_probability\": 0.45181816609894004, \"value_edge\": 0.055013661365241606, \"odds\": 1.96}]",
+          "market_probability": "0.0981401407024869",
+          "match": "仁川联队 vs FC安养",
+          "odds": "7.09",
+          "play": "胜平负3串1",
+          "probability": "0.1474060825927882",
+          "profit": "0.0",
+          "raw_model_probability": "0.1474060825927882",
+          "reason": "组合概率14.7%，市场公平概率9.8%，概率优势4.9%；分析参考中国足彩网专业欧赔市场，方案赔率采用中国足彩网，组合赔率7.09",
+          "selection": "仁川联队vsFC安养 胜 × 桑纳菲vs汉坎 胜 × 瓦斯特拉vs代格福什 胜",
+          "stage": "",
+          "stake": "30",
+          "status": "未结算",
+          "strategy_version": "",
+          "value_edge": "0.0492659418903013"
+        }
+      ],
+      "sha256": "121a0689380400678834f5968497e385b4db31a25033bbdcfa87aef1c323baec"
+    },
+    "training_samples": {
+      "rows": [],
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    }
+  },
+  "import_manifest": {
+    "bytes": 670,
+    "path": "data/import_manifests/2026-07-22.json",
+    "payload": {
+      "fixtures": {
+        "bytes": 2253,
+        "path": "data/import_extracts/2026-07-22/fixtures.csv",
+        "sha256": "c9a48e92a0c990a2161b3db91363ed2db6df8345c8d1eb8cbd13883cabcda6dd"
+      },
+      "imported_at_bjt": "2026-07-22T17:10:16.918719+08:00",
+      "odds": {
+        "bytes": 12825,
+        "path": "data/import_extracts/2026-07-22/odds.json",
+        "sha256": "223b6cda6e24a7a24935b4311533764839c37d82a8da202b66dadea11298effe"
+      },
+      "ratings": {
+        "bytes": 5346,
+        "path": "data/import_extracts/2026-07-22/ratings.csv",
+        "sha256": "d5783ed51fcfe54c8b0943db77b4e45b70de5e57971cdd908bde7414dfc941c1"
+      },
+      "schema_version": 2,
+      "source": "zgzcw",
+      "target_date": "2026-07-22"
+    },
+    "sha256": "b3db46d362ec74b25f8acb7f1c7580dea390ebece3e53744572c5d8ff2b0a0e2"
+  },
+  "locked_at_bjt": "2026-07-22T21:15:39.836643+08:00",
+  "model_code": {
+    "betting_ledger.py": {
+      "bytes": 110428,
+      "path": "betting_ledger.py",
+      "sha256": "aa2a031a379dc1802a3a800816d10d699eaf742f384270fbf839ba26a54842dd"
+    },
+    "generate_betting_plan.py": {
+      "bytes": 78891,
+      "path": "generate_betting_plan.py",
+      "sha256": "399a335f10bf2b63184d3174c80ef18af69c8c6bd8ff34cbbd47a802fa690c49"
+    },
+    "official_markets.py": {
+      "bytes": 7926,
+      "path": "official_markets.py",
+      "sha256": "08003a14972d69d6208ddb9eb161968dc454ea8bc35583fc236e76b610184c64"
+    },
+    "predict_today.py": {
+      "bytes": 17359,
+      "path": "predict_today.py",
+      "sha256": "429ca146fabf12de06ab150ae66fa5455a347f19c095c2eab4a4fd4eaefa3c55"
+    },
+    "strategy_controls.py": {
+      "bytes": 10708,
+      "path": "strategy_controls.py",
+      "sha256": "5d7ce5a58f4d5dfb38b9ac9028f88465bcab980784692d7f188f3d88a105636b"
+    },
+    "value_candidates.py": {
+      "bytes": 20561,
+      "path": "value_candidates.py",
+      "sha256": "5db4a28e26a06c0e523f59bbbd59345c94c0ef0e161f0babca77011b69656b15"
+    },
+    "value_portfolio.py": {
+      "bytes": 32437,
+      "path": "value_portfolio.py",
+      "sha256": "2a5c300df209c45fe6e75b5ca96806b60b536fa73b98bab70b1994777bbc1da3"
+    }
+  },
+  "paid_plan_evidence": {
+    "bytes": 681,
+    "plan_sha256": "e4d61c3adb1d139f7ca68903817f2c7d825f72ee47ae1a9017bc2b64235e2e78",
+    "row_count": 0,
+    "rows": [],
+    "rows_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "schema_version": 1
+  },
+  "predictions": {
+    "bytes": 3313,
+    "generated_at_bjt": "2026-07-22T21:15:39.816650+08:00",
+    "metadata": {
+      "bytes": 8516,
+      "path": "output/predictions_2026-07-22.meta.json",
+      "sha256": "e02b07be13938f7ed2560f270ab001d7b07a1be26a5b0e4e43ad4b6a6e99c6eb"
+    },
+    "model_inputs": {
+      "config": {
+        "bytes": 457,
+        "path": "config.json",
+        "sha256": "2d7819d1d8071390dfd11ce5e1fc5f847903790453559a9b4fc4ab3b9775529b"
+      },
+      "fixtures": {
+        "bytes": 2253,
+        "path": "data/import_extracts/2026-07-22/fixtures.csv",
+        "sha256": "c9a48e92a0c990a2161b3db91363ed2db6df8345c8d1eb8cbd13883cabcda6dd"
+      },
+      "prediction_code": {
+        "bytes": 17359,
+        "path": "predict_today.py",
+        "sha256": "429ca146fabf12de06ab150ae66fa5455a347f19c095c2eab4a4fd4eaefa3c55"
+      },
+      "ratings": {
+        "bytes": 5346,
+        "path": "data/import_extracts/2026-07-22/ratings.csv",
+        "sha256": "d5783ed51fcfe54c8b0943db77b4e45b70de5e57971cdd908bde7414dfc941c1"
+      }
+    },
+    "path": "output/predictions_2026-07-22.csv",
+    "sha256": "3300823055aaa9d967655ab4d50cdb6de6e5586ef176f80a9a38fc6e6b0fc1e2"
+  },
+  "ratings": {
+    "bytes": 5346,
+    "path": "data/import_extracts/2026-07-22/ratings.csv",
+    "sha256": "d5783ed51fcfe54c8b0943db77b4e45b70de5e57971cdd908bde7414dfc941c1"
+  },
+  "roles": {
+    "model_reference_inputs": [
+      "import_manifest",
+      "fixture_extract",
+      "prediction_config",
+      "ratings",
+      "history_inputs",
+      "model_code"
+    ],
+    "paid_odds": "decision_snapshot",
+    "paid_plan": "deterministic_bundle_evidence"
+  },
+  "schema_version": 3,
+  "target_date": "2026-07-22"
+}
