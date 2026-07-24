@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import tempfile
 import urllib.parse
 from datetime import date, datetime, timedelta, timezone
@@ -120,8 +121,45 @@ class ZgzcwResultParser(HTMLParser):
 def fetch_zgzcw_results(target_date: date) -> list[dict]:
     query = urllib.parse.urlencode({"issue": target_date.isoformat()})
     parser = ZgzcwResultParser()
-    parser.feed(fetch_text(f"{ZGZCW_HAD_URL}&{query}"))
+    try:
+        parser.feed(fetch_text(f"{ZGZCW_HAD_URL}&{query}"))
+    except Exception:
+        pass
     return parser.results
+
+
+class FiveHundredResultParser:
+    """Parse finished scores from 500.com (500彩票网)."""
+
+    def parse(self, html_content: str) -> list[dict]:
+        results = []
+        rows = re.findall(r'<tr[^>]*>([\s\S]*?)</tr>', html_content, re.IGNORECASE)
+        for row in rows:
+            num_match = re.search(r'周[一二三四五六日]\d{3}', row)
+            score_match = re.search(r'(\d+)\s*[:：-]\s*(\d+)', row)
+            if num_match and score_match:
+                match_num = num_match.group(0)
+                home_goals = score_match.group(1)
+                away_goals = score_match.group(2)
+                results.append({
+                    "match_num": match_num,
+                    "score": f"{home_goals}:{away_goals}",
+                    "home_goals": home_goals,
+                    "away_goals": away_goals,
+                    "source": "500.com",
+                })
+        return results
+
+
+def fetch_500_results(target_date: date) -> list[dict]:
+    url = f"https://zx.500.com/jczq/kaijiang.php?expect={target_date.isoformat()}"
+    try:
+        html = fetch_text(url)
+        parser = FiveHundredResultParser()
+        return parser.parse(html)
+    except Exception:
+        return []
+
 
 
 def official_result_rows(target_date: date) -> list[dict]:

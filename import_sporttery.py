@@ -16,10 +16,14 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 BEIJING = timezone(timedelta(hours=8))
 IMPORT_MANIFEST_SCHEMA_VERSION = 2
-APPROVED_IMPORT_SOURCES = frozenset({"sporttery", "zgzcw"})
+APPROVED_IMPORT_SOURCES = frozenset({"sporttery", "zgzcw", "caiminbang", "vipc"})
 API_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getUniformMatchResultV1.qry"
 MATCH_LIST_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getMatchListV1.qry"
 ODDS_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getFixedBonusV1.qry"
+CAIMINBANG_API_URL = "http://yqyl.caiminbang1.com/proxy/client.do"
+VIPC_ODDS_URL = "https://www.vipc.cn/i/match/jczq/lr/{vipc_match_id}"
+FIVE_HUNDRED_URL = "https://zx.500.com/jczq/kaijiang.php"
+
 ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
 ESPN_LEAGUES = {
     "fifa.world": "世界杯",
@@ -343,6 +347,118 @@ def fetch_text(url: str, retries: int = 3) -> str:
                 time.sleep(2 ** attempt)
     assert last_error is not None
     raise last_error
+
+
+def post_json(url: str, data: dict | bytes, retries: int = 3) -> dict:
+    last_error: Exception | None = None
+    if isinstance(data, dict):
+        body = json.dumps(data).encode("utf-8")
+        headers = {**HEADERS, "Content-Type": "application/json;charset=utf-8"}
+    else:
+        body = data
+        headers = {**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}
+    for attempt in range(retries):
+        try:
+            request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < retries:
+                time.sleep(2 ** attempt)
+    assert last_error is not None
+    raise last_error
+
+
+def fetch_caiminbang_matches(target_date: date) -> list[dict]:
+    """Fetch active/selling matches from Caiminbang (彩民帮 H5 API)."""
+    post_data = {"date": target_date.isoformat(), "lotteryType": "JCZQ"}
+    try:
+        payload = post_json(CAIMINBANG_API_URL, post_data, retries=2)
+    except Exception:
+        try:
+            encoded = urllib.parse.urlencode(post_data).encode("utf-8")
+            payload = post_json(CAIMINBANG_API_URL, encoded, retries=2)
+        except Exception:
+            return []
+
+    raw_items = []
+    if isinstance(payload, dict):
+        raw_items = payload.get("data") or payload.get("list") or payload.get("items") or []
+        if isinstance(raw_items, dict):
+            raw_items = raw_items.get("list") or raw_items.get("matches") or []
+    elif isinstance(payload, list):
+        raw_items = payload
+
+    matches = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        match_id = str(item.get("matchId") or item.get("id") or "")
+        match_num = str(item.get("number") or item.get("num") or item.get("matchNumStr") or "")
+        home_name = str(item.get("homeName") or item.get("homeTeam") or "")
+        guest_name = str(item.get("guestName") or item.get("awayTeam") or item.get("guestTeam") or "")
+        match_time = str(item.get("matchTime") or item.get("kickoff_at") or "")
+        league_name = str(item.get("matchName") or item.get("leagueName") or item.get("league") or "")
+        is_single = "1" if str(item.get("single") or item.get("isSingle") or item.get("isSingleHad") or "0") in {"1", "true", "True"} else "0"
+
+        if match_id and home_name and guest_name:
+            matches.append({
+                "matchId": match_id,
+                "matchNumStr": match_num,
+                "leagueNameAbbr": league_name,
+                "homeTeam": home_name,
+                "awayTeam": guest_name,
+                "kickoff_at": match_time,
+                "matchStatus": "Selling",
+                "isSingleHad": is_single,
+                "isSingleHhad": is_single,
+                "isSingleTtg": "0",
+                "source": "caiminbang",
+            })
+    return matches
+
+
+def fetch_vipc_odds(match_id: str) -> dict:
+    """Fetch live odds from VIPC (唯彩看球 API)."""
+    url = VIPC_ODDS_URL.format(vipc_match_id=match_id)
+    try:
+        payload = fetch_json(url, retries=2)
+    except Exception:
+        return {}
+
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+
+    had_data = data.get("jyykSpf") or data.get("tzbl") or data.get("spf") or {}
+    had = {}
+    if isinstance(had_data, dict):
+        had = {
+            "h": str(had_data.get("h") or had_data.get("win") or ""),
+            "d": str(had_data.get("d") or had_data.get("draw") or ""),
+            "a": str(had_data.get("a") or had_data.get("lose") or ""),
+        }
+
+    hhad_data = data.get("jyykRqspf") or data.get("rqspf") or {}
+    hhad = {}
+    if isinstance(hhad_data, dict):
+        goal = str(hhad_data.get("goal") or hhad_data.get("goalLine") or hhad_data.get("rq") or "")
+        hhad = {
+            "goalLine": goal,
+            "h": str(hhad_data.get("h") or hhad_data.get("win") or ""),
+            "d": str(hhad_data.get("d") or hhad_data.get("draw") or ""),
+            "a": str(hhad_data.get("a") or hhad_data.get("lose") or ""),
+        }
+
+    return {
+        "had": had,
+        "hhad": hhad,
+        "ttg": {},
+        "hafu": {},
+        "crs": {},
+    }
+
 
 
 class ZgzcwMatchParser(HTMLParser):
