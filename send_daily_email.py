@@ -8,15 +8,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPORT = ROOT / "web" / "daily-report.png"
-SITE_URL = "https://l18381527760-sketch.github.io/sporttery-prediction/"
+SITE_URL = "https://cxs13991120.github.io/ZUQIU/"
 
 
 def main() -> int:
-    address = os.environ.get("GMAIL_ADDRESS", "").strip()
-    app_password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "").strip()
-    recipient = os.environ.get("REPORT_RECIPIENT", address).strip()
+    address = os.environ.get("QQ_ADDRESS", os.environ.get("GMAIL_ADDRESS", "594241761@qq.com")).strip()
+    app_password = os.environ.get("QQ_APP_PASSWORD", os.environ.get("GMAIL_APP_PASSWORD", "pgvhqxqientebbjc")).replace(" ", "").strip()
+    recipient = os.environ.get("REPORT_RECIPIENT", "594241761@qq.com").strip()
     if not address or not app_password or not recipient:
-        raise RuntimeError("缺少Gmail地址、收件人或应用专用密码。")
+        raise RuntimeError("缺少邮箱地址、收件人或授权码。")
     if not REPORT.exists() or REPORT.stat().st_size == 0:
         raise RuntimeError(f"日报图片不存在或为空：{REPORT}")
 
@@ -39,7 +39,9 @@ def main() -> int:
         filename=f"竞彩足球日报-{beijing_now:%Y-%m-%d}.png",
     )
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+    smtp_server = os.environ.get("SMTP_SERVER", "smtp.qq.com").strip()
+    smtp_port = int(os.environ.get("SMTP_PORT", "465"))
+    with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30) as smtp:
         smtp.login(address, app_password)
         smtp.send_message(message)
     print(f"Sent daily report to {recipient}")

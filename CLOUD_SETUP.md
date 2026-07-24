@@ -20,17 +20,17 @@
 
 ## 启用 GitHub 功能
 
-1. 确认远程仓库为 `l18381527760-sketch/sporttery-prediction`，生产分支为 `main`。
+1. 确认远程仓库为 `cxs13991120/ZUQIU`，生产分支为 `main`。
 2. 打开 `Settings -> Actions -> General`，允许 Actions 运行，并把 `Workflow permissions` 设为 **Read and write permissions**。工作流需要写回报告、结算与赛前快照。
 3. 打开 `Settings -> Pages`，把 `Source` 设为 **GitHub Actions**。三个报告工作流都把仓库目录 `web/` 作为 Pages artifact 根目录；公开 URL 不包含 `/web/`。
 4. 不要再配置 `GMAIL_APP_PASSWORD`。Gmail 由 Apps Script 的当前 Google 账号授权发送，GitHub 不发送邮件，也不需要 Gmail 密钥。
 5. 打开 Actions 左侧的 `Email Daily Betting Report`，通过右上角菜单选择 **Disable workflow**。随后再次打开该页面，确认页面显示已禁用并提供 **Enable workflow**，且最近运行记录中没有部署后的定时邮件运行。这就是验证 `.github/workflows/email-report.yml` 在 GitHub Actions 中保持 disabled 的方法。
 
-Apps Script 需要一个 fine-grained token 来调用工作流。它只能授权 `l18381527760-sketch/sporttery-prediction`，权限只能是 Metadata: Read-only 和 Actions: Read and write。完整的创建步骤、8 项 Script Properties（包括 `REVALIDATION_INDEX_URL`）、`TEST_MODE` 验收和恢复方法见 [apps-script/README.md](apps-script/README.md)。不要把真实令牌、密钥、私人邮箱或截图写进源码、文档、提交信息和日志。
+Apps Script 需要一个 fine-grained token 来调用工作流。它只能授权 `cxs13991120/ZUQIU`，权限只能是 Metadata: Read-only 和 Actions: Read and write。完整的创建步骤、8 项 Script Properties（包括 `REVALIDATION_INDEX_URL`）、`TEST_MODE` 验收和恢复方法见 [apps-script/README.md](apps-script/README.md)。不要把真实令牌、密钥、私人邮箱或截图写进源码、文档、提交信息和日志。
 
 ## 可靠日报路径
 
-1. 仓库路径 `web/report-status.json` 发布后对应公开地址 `https://l18381527760-sketch.github.io/sporttery-prediction/report-status.json`；`runAutomation` 按北京时间读取这个公开地址。仓库路径 `web/daily-report.png` 对应 `https://l18381527760-sketch.github.io/sporttery-prediction/daily-report.png`，报告首页对应 `https://l18381527760-sketch.github.io/sporttery-prediction/`。公共地址绝不能插入 `/web/`。
+1. 仓库路径 `web/report-status.json` 发布后对应公开地址 `https://cxs13991120.github.io/ZUQIU/report-status.json`；`runAutomation` 按北京时间读取这个公开地址。仓库路径 `web/daily-report.png` 对应 `https://cxs13991120.github.io/ZUQIU/daily-report.png`，报告首页对应 `https://cxs13991120.github.io/ZUQIU/`。公共地址绝不能插入 `/web/`。
 2. Apps Script 只接受 schema 2 状态：若当天 `forecast_ready`、`initial_report_ready` 或 `settlement_ready` 对应阶段缺失，就通过相应工作流的 `workflow_dispatch` 和 `target_date` 发起运行；旧 schema 1 不能跳过阶段。
 3. 从 14:00 起，Apps Script 只接受 `report_date` 为当天，且 `forecast_ready`、`initial_report_ready`、`settlement_ready`、`revalidation_ready`、provisional SHA-256、数据质量和构建信息全部有效的状态。
 4. Apps Script 使用状态中的 `build_id` 下载 `web/daily-report.png`，计算实际 SHA-256，并与 `image_sha256` 比较。

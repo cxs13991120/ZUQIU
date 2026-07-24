@@ -1018,15 +1018,15 @@ class DeploymentDocumentationTest(unittest.TestCase):
         for text in (apps_readme, cloud_setup):
             self.assertIn("仓库路径 `web/report-status.json`", text)
             self.assertIn(
-                "`https://l18381527760-sketch.github.io/sporttery-prediction/report-status.json`",
+                "`https://cxs13991120.github.io/ZUQIU/report-status.json`",
                 text,
             )
             self.assertIn(
-                "`https://l18381527760-sketch.github.io/sporttery-prediction/daily-report.png`",
+                "`https://cxs13991120.github.io/ZUQIU/daily-report.png`",
                 text,
             )
             self.assertIn(
-                "`https://l18381527760-sketch.github.io/sporttery-prediction/`",
+                "`https://cxs13991120.github.io/ZUQIU/`",
                 text,
             )
         self.assertNotRegex(combined, r"https?://[^\s`)]+/web/report-status\.json")
@@ -1128,7 +1128,7 @@ class DeploymentDocumentationTest(unittest.TestCase):
     def test_apps_script_readme_documents_least_privilege_token_and_deployment_order(self):
         text = self.read_doc(self.APPS_SCRIPT_README)
         for literal in (
-            "`l18381527760-sketch/sporttery-prediction`",
+            "`cxs13991120/ZUQIU`",
             "Metadata: Read-only",
             "Actions: Read and write",
             "不得填写真实令牌或密钥",
